@@ -89,6 +89,14 @@ class YahooDirectAdapter(DataSourceAdapter):
     def supports(self, symbol: str) -> bool:
         return "/" not in symbol
 
+    def fetch_symbols(self) -> list[dict]:
+        return [
+            {"unified_symbol": "AAPL", "base_asset": "AAPL", "quote_asset": "USD",
+             "asset_type": "stock", "description": "Apple Inc."},
+            {"unified_symbol": "^GSPC", "base_asset": "^GSPC", "quote_asset": "USD",
+             "asset_type": "index", "description": "S&P 500 Index"},
+        ]
+
     def health_check(self) -> bool:
         try:
             resp = self._session.get(

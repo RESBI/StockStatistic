@@ -72,6 +72,22 @@ class CcxtAdapter(DataSourceAdapter):
     def supports(self, symbol: str) -> bool:
         return "/" in symbol
 
+    def fetch_symbols(self) -> list[dict]:
+        try:
+            self.exchange.load_markets()
+        except Exception:
+            return []
+        result = []
+        for sym, market in self.exchange.markets.items():
+            result.append({
+                "unified_symbol": sym,
+                "base_asset": market.get("base"),
+                "quote_asset": market.get("quote"),
+                "asset_type": "crypto",
+                "description": market.get("id", sym),
+            })
+        return result
+
     def health_check(self) -> bool:
         try:
             self.exchange.load_markets()
