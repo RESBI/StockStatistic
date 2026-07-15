@@ -172,12 +172,23 @@ The signature analysis: PAXG (gold-pegged token) weekend return (x-axis: Friday 
 
 ## Data Sources
 
-| Source | Type | Network | Description |
-|--------|------|---------|-------------|
-| `yfinance` | stock | Yes | Yahoo Finance direct API (proxy recommended) |
-| `binance` | crypto | Yes | Binance via ccxt (proxy recommended) |
-| `coinbase` | crypto | Yes | Coinbase via ccxt (proxy recommended) |
-| `synthetic` | mixed | No | Synthetic data for offline testing |
+| Source | Type | Network | Total Symbols | Description |
+|--------|------|---------|---------------|-------------|
+| `yfinance` | stock | Yes | On-demand | Yahoo Finance direct API; user provides any ticker (AAPL, MSFT, ^GSPC, ...) |
+| `binance` | crypto | Yes | 4,498 (1,479 USDT pairs) | Binance via ccxt |
+| `coinbase` | crypto | Yes | 1,183 (528 USD pairs) | Coinbase via ccxt |
+| `synthetic` | mixed | No | — | Synthetic data for offline testing |
+
+### Data Size Estimates
+
+| Scope | Timeframe | Rows (1 year) | Storage |
+|-------|-----------|---------------|---------|
+| 1 symbol | daily | ~250 | ~2 KB |
+| 1 symbol | 1-minute | ~525,000 | ~15 MB |
+| Binance USDT pairs (1,479) | daily | ~370,000 | ~3 MB |
+| Binance USDT pairs (1,479) | 1-minute | ~776M | ~22 GB |
+| Coinbase USD pairs (528) | daily | ~132,000 | ~1 MB |
+| Coinbase USD pairs (528) | 1-minute | ~277M | ~8 GB |
 
 ## REST API
 

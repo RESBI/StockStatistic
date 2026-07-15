@@ -172,12 +172,23 @@ renderer.savefig("btc.png")
 
 ## 数据源
 
-| 数据源 | 类型 | 需联网 | 说明 |
-|--------|------|--------|------|
-| `yfinance` | 股票 | 是 | Yahoo Finance 直连 API（推荐走代理） |
-| `binance` | 加密货币 | 是 | Binance via ccxt（推荐走代理） |
-| `coinbase` | 加密货币 | 是 | Coinbase via ccxt（推荐走代理） |
-| `synthetic` | 混合 | 否 | 合成数据，用于离线测试 |
+| 数据源 | 类型 | 需联网 | 标的数目 | 说明 |
+|--------|------|--------|---------|------|
+| `yfinance` | 股票 | 是 | 按需获取 | Yahoo Finance 直连 API，用户传入任意股票代码（AAPL、MSFT、^GSPC、…） |
+| `binance` | 加密货币 | 是 | 4,498（其中 1,479 个 USDT 交易对） | Binance via ccxt |
+| `coinbase` | 加密货币 | 是 | 1,183（其中 528 个 USD 交易对） | Coinbase via ccxt |
+| `synthetic` | 混合 | 否 | — | 合成数据，用于离线测试 |
+
+### 数据大小估算
+
+| 范围 | 时间框架 | 1年行数 | 存储大小 |
+|------|---------|--------|---------|
+| 1 个标的 | 日线 | ~250 | ~2 KB |
+| 1 个标的 | 1分钟 | ~525,000 | ~15 MB |
+| Binance USDT 交易对（1,479） | 日线 | ~370,000 | ~3 MB |
+| Binance USDT 交易对（1,479） | 1分钟 | ~776M | ~22 GB |
+| Coinbase USD 交易对（528） | 日线 | ~132,000 | ~1 MB |
+| Coinbase USD 交易对（528） | 1分钟 | ~277M | ~8 GB |
 
 ## REST API
 
