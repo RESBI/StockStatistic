@@ -31,3 +31,6 @@ Thumbs.db
 # Env
 .env
 *.env.local
+
+# Working folder (local statistics work, not for version control)
+working/
