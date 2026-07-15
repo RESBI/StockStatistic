@@ -155,8 +155,8 @@ def main():
         print(f"High volatility days: {high_vol_days}")
         print(f"Low volatility days: {low_vol_days}")
 
-        # ── Example 13: PAXG Weekend Directional Extreme ──
-        print("\n--- Example 13: PAXG Weekend Directional Extreme ---")
+        # ── Example 13: PAXG Weekend Gain/Loss (v2 independent) ──
+        print("\n--- Example 13: PAXG Weekend Gain/Loss (Independent) ---")
         from scipy import stats
         paxg = client.ohlcv("PAXG/USDT", start="2022-01-01", timeframe="1d")
         df = paxg.copy()
@@ -176,23 +176,23 @@ def main():
                 mon_open = mon_row["open"]
                 max_gain = (mon_row["high"] - mon_open) / mon_open
                 max_loss = (mon_row["low"] - mon_open) / mon_open
-                # Select by weekend direction: up → high, down → low
-                monday_move = max_gain if weekend_ret > 0 else max_loss
-                pairs.append({"weekend_return": weekend_ret, "monday_move": monday_move})
+                pairs.append({"weekend_return": weekend_ret, "max_gain": max_gain, "max_loss": max_loss})
 
         result_df = pd.DataFrame(pairs)
-        pearson = result_df["weekend_return"].corr(result_df["monday_move"])
-        t_stat, p_value = stats.pearsonr(result_df["weekend_return"], result_df["monday_move"])
+        r_gain = result_df["weekend_return"].corr(result_df["max_gain"])
+        r_loss = result_df["weekend_return"].corr(result_df["max_loss"])
+        p_gain = stats.pearsonr(result_df["weekend_return"], result_df["max_gain"])[1]
+        p_loss = stats.pearsonr(result_df["weekend_return"], result_df["max_loss"])[1]
         up = result_df[result_df["weekend_return"] > 0]
         dn = result_df[result_df["weekend_return"] < 0]
         print(f"Samples: {len(result_df)}")
-        print(f"Pearson correlation: {pearson:.4f}")
-        print(f"p-value: {p_value:.6f}")
-        print(f"Significant (p<0.05): {p_value < 0.05}")
-        print(f"Weekend Up  (n={len(up)}): avg (High-Open)/Open = {up['monday_move'].mean()*100:.4f}%")
-        print(f"Weekend Dn  (n={len(dn)}): avg (Low-Open)/Open  = {dn['monday_move'].mean()*100:.4f}%")
+        print(f"r(gain): {r_gain:.4f}, p={p_gain:.4f}")
+        print(f"r(loss): {r_loss:.4f}, p={p_loss:.4f}")
+        print(f"Weekend Up  (n={len(up)}): gain={up['max_gain'].mean()*100:.4f}%, loss={up['max_loss'].mean()*100:.4f}%")
+        print(f"Weekend Dn  (n={len(dn)}): gain={dn['max_gain'].mean()*100:.4f}%, loss={dn['max_loss'].mean()*100:.4f}%")
         assert len(result_df) > 50
-        assert -1 <= pearson <= 1
+        assert -1 <= r_gain <= 1
+        assert -1 <= r_loss <= 1
 
         # ── Example 14: Visualization ──
         print("\n--- Example 14: Visualization ---")

@@ -197,15 +197,15 @@ class TestVisualizationIntegration:
 
 
 # ═══════════════════════════════════════════════════
-# PAXG Weekend Return vs Monday Directional Extreme
+# PAXG Weekend Return vs Monday Independent Gain/Loss (v2)
 # ═══════════════════════════════════════════════════
 
 class TestPAXGWeekendCorrelation:
-    """PAXG weekend return vs Monday directional extreme.
+    """PAXG weekend return vs Monday max_gain AND max_loss (independently).
 
-    Monday extreme selected by WEEKEND direction:
-      - Weekend UP  (return > 0): monday_move = (High - Open) / Open  (max upside)
-      - Weekend DOWN (return < 0): monday_move = (Low  - Open) / Open  (max downside, negative)
+    Records both (High-Open)/Open and (Low-Open)/Open for every Monday,
+    then correlates the weekend return with each independently.
+    This avoids the selection bias of v1 (picking one extreme by signal direction).
     """
 
     @pytest.fixture(scope="class")
@@ -234,43 +234,44 @@ class TestPAXGWeekendCorrelation:
                 max_gain = (mon_row["high"] - mon_open) / mon_open
                 max_loss = (mon_row["low"] - mon_open) / mon_open
 
-                # Select by weekend direction: up → high, down → low
-                if weekend_return > 0:
-                    monday_move = max_gain
-                else:
-                    monday_move = max_loss
-
                 pairs.append({
                     "monday": mon_date,
                     "weekend_return": weekend_return,
-                    "monday_move": monday_move,
                     "max_gain": max_gain,
                     "max_loss": max_loss,
                 })
 
         result_df = pd.DataFrame(pairs).set_index("monday")
+
         x = result_df["weekend_return"]
-        y = result_df["monday_move"]
+        gain = result_df["max_gain"]
+        loss = result_df["max_loss"]
 
-        pearson_corr = x.corr(y)
-        spearman_corr = x.corr(y, method="spearman")
-        t_stat, p_value = sp_stats.pearsonr(x.dropna(), y.dropna())
+        r_gain = x.corr(gain)
+        r_loss = x.corr(loss)
+        p_gain = sp_stats.pearsonr(x.dropna(), gain.dropna())[1]
+        p_loss = sp_stats.pearsonr(x.dropna(), loss.dropna())[1]
 
-        up_weekend = result_df[result_df["weekend_return"] > 0]
-        down_weekend = result_df[result_df["weekend_return"] < 0]
-        rolling_corr = x.rolling(52).corr(y)
+        up = result_df[x > 0]
+        dn = result_df[x < 0]
+
+        # t-test: up vs down for gain and loss separately
+        t_gain, p_t_gain = sp_stats.ttest_ind(up["max_gain"].dropna(), dn["max_gain"].dropna())
+        t_loss, p_t_loss = sp_stats.ttest_ind(up["max_loss"].dropna(), dn["max_loss"].dropna())
 
         return {
             "n_samples": len(result_df),
-            "pearson_corr": pearson_corr,
-            "spearman_corr": spearman_corr,
-            "t_stat": t_stat,
-            "p_value": p_value,
-            "significant": p_value < 0.05,
-            "avg_move_up": up_weekend["monday_move"].mean(),
-            "avg_move_down": down_weekend["monday_move"].mean(),
-            "rolling_mean": rolling_corr.mean(),
-            "rolling_std": rolling_corr.std(),
+            "n_up": len(up),
+            "n_down": len(dn),
+            "r_gain": r_gain, "r_loss": r_loss,
+            "p_gain": p_gain, "p_loss": p_loss,
+            "sig_gain": p_gain < 0.05, "sig_loss": p_loss < 0.05,
+            "up_gain_mean": up["max_gain"].mean(), "up_loss_mean": up["max_loss"].mean(),
+            "dn_gain_mean": dn["max_gain"].mean(), "dn_loss_mean": dn["max_loss"].mean(),
+            "up_gain_std": up["max_gain"].std(), "up_loss_std": up["max_loss"].std(),
+            "dn_gain_std": dn["max_gain"].std(), "dn_loss_std": dn["max_loss"].std(),
+            "t_gain_ud": t_gain, "p_t_gain": p_t_gain,
+            "t_loss_ud": t_loss, "p_t_loss": p_t_loss,
             "result_df": result_df,
         }
 
@@ -287,53 +288,56 @@ class TestPAXGWeekendCorrelation:
         assert weekend_corr_result["n_samples"] > 50
 
     def test_pearson_range(self, weekend_corr_result):
-        assert -1.0 <= weekend_corr_result["pearson_corr"] <= 1.0
-
-    def test_spearman_range(self, weekend_corr_result):
-        assert -1.0 <= weekend_corr_result["spearman_corr"] <= 1.0
+        assert -1.0 <= weekend_corr_result["r_gain"] <= 1.0
+        assert -1.0 <= weekend_corr_result["r_loss"] <= 1.0
 
     def test_p_value_range(self, weekend_corr_result):
-        assert 0.0 <= weekend_corr_result["p_value"] <= 1.0
+        assert 0.0 <= weekend_corr_result["p_gain"] <= 1.0
+        assert 0.0 <= weekend_corr_result["p_loss"] <= 1.0
 
     def test_move_reasonable(self, weekend_corr_result):
         # PAXG is gold-pegged, intraday moves should be small
-        assert abs(weekend_corr_result["avg_move_up"]) < 0.05
-        assert abs(weekend_corr_result["avg_move_down"]) < 0.05
-
-    def test_rolling_corr_stats(self, weekend_corr_result):
-        assert not np.isnan(weekend_corr_result["rolling_mean"])
-        assert not np.isnan(weekend_corr_result["rolling_std"])
+        assert abs(weekend_corr_result["up_gain_mean"]) < 0.05
+        assert abs(weekend_corr_result["up_loss_mean"]) < 0.05
+        assert abs(weekend_corr_result["dn_gain_mean"]) < 0.05
+        assert abs(weekend_corr_result["dn_loss_mean"]) < 0.05
 
     def test_print_results(self, weekend_corr_result):
         print("\n" + "=" * 60)
-        print("PAXG Weekend Return vs Monday Directional Extreme (REAL DATA)")
+        print("PAXG Weekend Return vs Monday Independent Gain/Loss (REAL DATA)")
         print("=" * 60)
-        print(f"  Samples:                {weekend_corr_result['n_samples']}")
-        print(f"  Pearson correlation:    {weekend_corr_result['pearson_corr']:.4f}")
-        print(f"  Spearman correlation:   {weekend_corr_result['spearman_corr']:.4f}")
-        print(f"  t-statistic:            {weekend_corr_result['t_stat']:.4f}")
-        print(f"  p-value:                {weekend_corr_result['p_value']:.6f}")
-        print(f"  Significant (p<0.05):   {weekend_corr_result['significant']}")
-        print(f"  Weekend Up  → avg (High-Open)/Open:  {weekend_corr_result['avg_move_up']*100:.4f}%")
-        print(f"  Weekend Dn  → avg (Low-Open)/Open:   {weekend_corr_result['avg_move_down']*100:.4f}%")
-        print(f"  Rolling corr mean:      {weekend_corr_result['rolling_mean']:.4f}")
-        print(f"  Rolling corr std:       {weekend_corr_result['rolling_std']:.4f}")
+        print(f"  Samples:    {weekend_corr_result['n_samples']} (up={weekend_corr_result['n_up']}, dn={weekend_corr_result['n_down']})")
+        print(f"  r(gain):    {weekend_corr_result['r_gain']:.4f}  p={weekend_corr_result['p_gain']:.4f}  sig={weekend_corr_result['sig_gain']}")
+        print(f"  r(loss):    {weekend_corr_result['r_loss']:.4f}  p={weekend_corr_result['p_loss']:.4f}  sig={weekend_corr_result['sig_loss']}")
+        print(f"  Sig>0: gain={weekend_corr_result['up_gain_mean']*100:.4f}%±{weekend_corr_result['up_gain_std']*100:.4f}%, loss={weekend_corr_result['up_loss_mean']*100:.4f}%±{weekend_corr_result['up_loss_std']*100:.4f}%")
+        print(f"  Sig<0: gain={weekend_corr_result['dn_gain_mean']*100:.4f}%±{weekend_corr_result['dn_gain_std']*100:.4f}%, loss={weekend_corr_result['dn_loss_mean']*100:.4f}%±{weekend_corr_result['dn_loss_std']*100:.4f}%")
+        print(f"  t-test(up vs dn): gain t={weekend_corr_result['t_gain_ud']:.3f} p={weekend_corr_result['p_t_gain']:.4f}, loss t={weekend_corr_result['t_loss_ud']:.3f} p={weekend_corr_result['p_t_loss']:.4f}")
         print("=" * 60)
 
-    def test_plot_weekend_corr(self, weekend_corr_result, tmp_path):
+    def test_plot_gain_loss_scatter(self, weekend_corr_result, tmp_path):
         import matplotlib
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
 
         df = weekend_corr_result["result_df"]
-        fig, ax = plt.subplots(figsize=(8, 6))
-        colors = ["#e74c3c" if w > 0 else "#3498db" for w in df["weekend_return"]]
-        ax.scatter(df["weekend_return"] * 100, df["monday_move"] * 100, c=colors, alpha=0.5, s=20)
+        fig, ax = plt.subplots(figsize=(10, 8))
+        up = df["weekend_return"] > 0
+        dn = df["weekend_return"] < 0
+        ax.scatter(df.loc[up, "weekend_return"] * 100, df.loc[up, "max_gain"] * 100,
+                   c="#e74c3c", alpha=0.4, s=20, label="Sig>0 → Gain (H-O)/O", edgecolors="white", linewidth=0.2)
+        ax.scatter(df.loc[up, "weekend_return"] * 100, df.loc[up, "max_loss"] * 100,
+                   c="#f39c12", alpha=0.4, s=20, label="Sig>0 → Loss (L-O)/O", edgecolors="white", linewidth=0.2, marker="^")
+        ax.scatter(df.loc[dn, "weekend_return"] * 100, df.loc[dn, "max_gain"] * 100,
+                   c="#2980b9", alpha=0.4, s=20, label="Sig<0 → Gain (H-O)/O", edgecolors="white", linewidth=0.2, marker="s")
+        ax.scatter(df.loc[dn, "weekend_return"] * 100, df.loc[dn, "max_loss"] * 100,
+                   c="#8e44ad", alpha=0.4, s=20, label="Sig<0 → Loss (L-O)/O", edgecolors="white", linewidth=0.2, marker="v")
         ax.axhline(0, color="gray", linewidth=0.5)
         ax.axvline(0, color="gray", linewidth=0.5)
         ax.set_xlabel("Weekend Return (%)")
-        ax.set_ylabel("Monday Move (%) [up→(H-O)/O, down→(L-O)/O]")
-        ax.set_title("PAXG Weekend Return vs Monday Directional Extreme (Real Data)")
+        ax.set_ylabel("Monday Move (%)")
+        ax.set_title("PAXG Weekend Return vs Monday Gain/Loss (Independent, Real Data)")
+        ax.legend(fontsize=9)
+        ax.grid(True, alpha=0.3)
         path = str(tmp_path / "paxg_weekend_real.png")
         fig.savefig(path, dpi=150, bbox_inches="tight")
         plt.close(fig)

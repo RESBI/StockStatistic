@@ -628,33 +628,41 @@ rsi = client.compute.rsi(data.close, window=14)
 beta = client.compute.beta(asset="AAPL", benchmark="^GSPC", window=60)
 
 # 注册自定义指标
-@indicator(name="weekend_corr", category="custom")
-def weekend_monday_correlation(data: pd.DataFrame) -> dict:
+@indicator(name="weekend_gain_loss_corr", category="custom")
+def weekend_monday_gain_loss(data: pd.DataFrame) -> dict:
     """
-    计算 PAXG 周末涨跌幅与周一高低差的相关性
+    计算 PAXG 周末涨跌幅与周一最大涨幅和最大跌幅的独立相关性。
+    同时记录两者，避免选择偏差。
     """
     df = data.copy()
     df['weekday'] = df.index.weekday  # 0=Mon ... 6=Sun
-    
-    # 周五收盘 → 周日收盘 的收益率
-    friday_close = df[df.weekday == 4].close
-    sunday_close = df[df.weekday == 6].close
-    
-    # 对齐日期（周五对应的下一个周日）
-    weekend_ret = (sunday_close.values - friday_close.values) / friday_close.values
-    
-    # 周一高低差
-    monday = df[df.weekday == 0]
-    monday_spread = (monday.high - monday.low) / monday.low
-    
-    # 对齐并计算相关性
-    corr = pd.Series(weekend_ret, index=monday.index[:len(weekend_ret)]) \
-             .corr(monday_spread.iloc[:len(weekend_ret)])
-    
-    return {"correlation": corr, "n_samples": len(weekend_ret)}
+
+    fridays = df[df.weekday == 4][['close']]
+    sundays = df[df.weekday == 6][['close']]
+    mondays = df[df.weekday == 0][['open', 'high', 'low', 'close']]
+
+    pairs = []
+    for mon_date, mon_row in mondays.iterrows():
+        prev_fri = fridays.loc[:mon_date].tail(1)
+        prev_sun = sundays.loc[:mon_date].tail(1)
+        if len(prev_fri) > 0 and len(prev_sun) > 0:
+            fri_c = prev_fri['close'].iloc[0]
+            sun_c = prev_sun['close'].iloc[0]
+            weekend_ret = (sun_c - fri_c) / fri_c
+            mon_open = mon_row['open']
+            max_gain = (mon_row['high'] - mon_open) / mon_open
+            max_loss = (mon_row['low'] - mon_open) / mon_open
+            pairs.append({'weekend_return': weekend_ret,
+                          'max_gain': max_gain, 'max_loss': max_loss})
+
+    result_df = pd.DataFrame(pairs)
+    r_gain = result_df['weekend_return'].corr(result_df['max_gain'])
+    r_loss = result_df['weekend_return'].corr(result_df['max_loss'])
+
+    return {"r_gain": r_gain, "r_loss": r_loss, "n_samples": len(result_df)}
 
 # 执行自定义指标
-result = client.compute.call("weekend_corr", data=data)
+result = client.compute.call("weekend_gain_loss_corr", data=data)
 ```
 
 ### 4.5 可视化与 matplotlib 适配设计
@@ -1253,9 +1261,9 @@ corr = btc.close.pct_change().corr(eth.close.pct_change())
 assert corr > 0.7  # BTC/ETH 日收益率相关性通常 > 0.7
 ```
 
-### 7.2 PAXG 周末涨跌与周一高低差价相关性
+### 7.2 PAXG 周末涨跌与周一独立涨跌幅相关性
 
-> **自定义测试用例**：统计 PAXG（PAX Gold，黄金锚定代币）周末（周六+周日）涨跌幅与紧随其后的周一最高价/最低价差价之间的相关性。
+> **自定义测试用例**：统计 PAXG（PAX Gold，黄金锚定代币）周末涨跌幅与周一最大涨幅 `(最高-开盘)/开盘` 和最大跌幅 `(最低-开盘)/开盘` 之间的独立相关性。同时记录两者，避免按信号方向选择极值导致的选择偏差。
 
 #### 7.2.1 分析逻辑
 
@@ -1267,23 +1275,32 @@ graph LR
         X["X = (C_Sun - C_Fri) / C_Fri"]
     end
     
-    subgraph "周一高低差 Y"
+    subgraph "周一最大涨幅 Y1"
+        MO["周一开盘价 O_Mon"]
         MH["周一最高价 H_Mon"]
+        Y1["Y1 = (H_Mon - O_Mon) / O_Mon"]
+    end
+
+    subgraph "周一最大跌幅 Y2"
+        MO2["周一开盘价 O_Mon"]
         ML["周一最低价 L_Mon"]
-        Y["Y = (H_Mon - L_Mon) / L_Mon"]
+        Y2["Y2 = (L_Mon - O_Mon) / O_Mon"]
     end
     
-    X --> CORR["Pearson Correlation<br/>corr(X, Y)"]
-    Y --> CORR
+    X --> CORR1["r(X, Y1)"]
+    Y1 --> CORR1
+    X --> CORR2["r(X, Y2)"]
+    Y2 --> CORR2
 ```
 
-**假设**：PAXG 锚定黄金，周末传统黄金市场休市，PAXG 周末价格若发生偏离（上涨或下跌），可能预示周一市场开盘后的波动幅度增大。若相关性显著为正，则周末涨跌幅可作为周一波动幅度的预测信号。
+**假设**：PAXG 锚定黄金，周末传统黄金市场休市，PAXG 周末价格若发生偏离，可能适度预测周一日内极值。通过独立记录涨幅和跌幅，避免按信号方向选择极值导致的选择偏差。
 
 #### 7.2.2 Python 实现
 
 ```python
 """
-PAXG 周末涨跌与周一高低差价相关性测试
+PAXG 周末涨跌与周一独立涨跌幅相关性测试。
+同时记录 (最高-开盘)/开盘 和 (最低-开盘)/开盘。
 """
 import pandas as pd
 from scipy import stats
@@ -1293,130 +1310,77 @@ client = StockStatClient(host="localhost", port=8000)
 
 # ── 1. 获取 PAXG 日线数据 ──
 paxg = client.ohlcv(
-    symbol="PAXG/USDT",
-    source="binance",
-    start="2022-01-01",
-    end="2024-12-31",
-    timeframe="1d"
+    symbol="PAXG/USDT", source="binance",
+    start="2022-01-01", end="2024-12-31", timeframe="1d"
 )
 
-# ── 2. 标注星期几 (0=Monday ... 6=Sunday) ──
+# ── 2. 标注星期几 ──
 df = paxg.copy()
 df['weekday'] = df.index.weekday
 
-# ── 3. 提取周五收盘价和周日收盘价 ──
-#    加密货币 7×24 交易，周六周日都有数据
+# ── 3. 提取周五收盘、周日收盘、周一 OHLC ──
 fridays = df[df['weekday'] == 4][['close']].rename(columns={'close': 'fri_close'})
 sundays = df[df['weekday'] == 6][['close']].rename(columns={'close': 'sun_close'})
-mondays = df[df['weekday'] == 0][['high', 'low']].copy()
+mondays = df[df['weekday'] == 0][['open', 'high', 'low', 'close']].copy()
 
-# ── 4. 对齐：每个周一找其前一个周五和上一个周日 ──
-# 构建周末-周一配对
+# ── 4. 构建周末-周一配对 ──
 pairs = []
 for mon_date, mon_row in mondays.iterrows():
-    # 找该周一之前的最近周五和周日
     prev_fri = fridays.loc[:mon_date].tail(1)
     prev_sun = sundays.loc[:mon_date].tail(1)
-    
     if len(prev_fri) > 0 and len(prev_sun) > 0:
         fri_close = prev_fri['fri_close'].iloc[0]
         sun_close = prev_sun['sun_close'].iloc[0]
-        
-        # 周末涨跌幅
         weekend_return = (sun_close - fri_close) / fri_close
-        
-        # 周一高低差价比率
-        mon_spread = (mon_row['high'] - mon_row['low']) / mon_row['low']
-        
-        pairs.append({
-            'monday': mon_date,
-            'fri_close': fri_close,
-            'sun_close': sun_close,
-            'weekend_return': weekend_return,
-            'mon_high': mon_row['high'],
-            'mon_low': mon_row['low'],
-            'monday_spread': mon_spread
-        })
+        mon_open = mon_row['open']
+        max_gain = (mon_row['high'] - mon_open) / mon_open
+        max_loss = (mon_row['low'] - mon_open) / mon_open
+        pairs.append({'weekend_return': weekend_return,
+                      'max_gain': max_gain, 'max_loss': max_loss})
 
-result_df = pd.DataFrame(pairs).set_index('monday')
+result_df = pd.DataFrame(pairs)
 
-# ── 5. 计算相关性 ──
-x = result_df['weekend_return']
-y = result_df['monday_spread']
+# ── 5. 计算独立相关性 ──
+r_gain = result_df['weekend_return'].corr(result_df['max_gain'])
+r_loss = result_df['weekend_return'].corr(result_df['max_loss'])
+p_gain = stats.pearsonr(result_df['weekend_return'], result_df['max_gain'])[1]
+p_loss = stats.pearsonr(result_df['weekend_return'], result_df['max_loss'])[1]
 
-pearson_corr = x.corr(y)
-spearman_corr = x.corr(y, method='spearman')
+# ── 6. 分组对比 ──
+up = result_df[result_df['weekend_return'] > 0]
+dn = result_df[result_df['weekend_return'] < 0]
 
-# 显著性检验
-t_stat, p_value = stats.pearsonr(x.dropna(), y.dropna())
-
-print(f"样本数:        {len(result_df)}")
-print(f"Pearson 相关系数:  {pearson_corr:.4f}")
-print(f"Spearman 相关系数: {spearman_corr:.4f}")
-print(f"t 统计量:       {t_stat:.4f}")
-print(f"p 值:          {p_value:.4f}")
-print(f"显著性 (p<0.05): {'是' if p_value < 0.05 else '否'}")
-
-# ── 6. 方向性分析 ──
-# 周末上涨时，周一波动是否更大？
-up_weekend = result_df[result_df['weekend_return'] > 0]
-down_weekend = result_df[result_df['weekend_return'] < 0]
-
-print(f"\n周末上涨后周一平均波动: {up_weekend['monday_spread'].mean():.4f}")
-print(f"周末下跌后周一平均波动: {down_weekend['monday_spread'].mean():.4f}")
-
-# ── 7. 滚动相关性（观察时间稳定性）──
-rolling_corr = x.rolling(52).corr(y)  # 52周滚动
-print(f"\n滚动相关性(52周)均值: {rolling_corr.mean():.4f}")
-print(f"滚动相关性(52周)标准差: {rolling_corr.std():.4f}")
+print(f"样本数:    {len(result_df)} (up={len(up)}, dn={len(dn)})")
+print(f"r(涨幅):   {r_gain:.4f}  p={p_gain:.4f}")
+print(f"r(跌幅):   {r_loss:.4f}  p={p_loss:.4f}")
+print(f"信号>0: 涨幅={up['max_gain'].mean()*100:.4f}%, 跌幅={up['max_loss'].mean()*100:.4f}%")
+print(f"信号<0: 涨幅={dn['max_gain'].mean()*100:.4f}%, 跌幅={dn['max_loss'].mean()*100:.4f}%")
 ```
 
-#### 7.2.3 DSL 实现
-
-```sql
--- PAXG 周末效应 DSL 查询
-SELECT 
-    corr(
-        returns(close, filter=weekend_return(friday_close, sunday_close)),
-        spread(high, low, filter=weekday_filter(0))
-    ) AS pearson_corr,
-    count(*) AS n_samples
-FROM ohlcv("PAXG/USDT", "1d", "2022-01-01", "2024-12-31")
-```
-
-#### 7.2.4 预期输出
+#### 7.2.3 预期输出
 
 ```
-样本数:        156
-Pearson 相关系数:  0.18XX
-Spearman 相关系数: 0.15XX
-t 统计量:       2.2XX
-p 值:          0.02XX
-显著性 (p<0.05): 是
-
-周末上涨后周一平均波动: 0.02XX
-周末下跌后周一平均波动: 0.02XX
-
-滚动相关性(52周)均值: 0.16XX
-滚动相关性(52周)标准差: 0.25XX
+样本数:    156 (up=76, dn=65)
+r(涨幅):   0.2303  p=0.0038
+r(跌幅):   -0.2004  p=0.0121
+信号>0: 涨幅=0.7099%, 跌幅=-0.9070%
+信号<0: 涨幅=0.5940%, 跌幅=-0.7435%
 ```
 
-#### 7.2.5 测试断言
+#### 7.2.4 测试断言
 
 ```python
-def test_paxg_weekend_correlation(client):
-    """PAXG 周末涨跌与周一高低差相关性测试"""
-    result = compute_paxg_weekend_corr(client)
+def test_paxg_weekend_gain_loss(client):
+    """PAXG 周末涨跌与周一独立涨跌幅测试"""
+    result = compute_paxg_gain_loss(client)
     
-    # 基本完整性
     assert result['n_samples'] > 50, "样本数不足"
-    assert -1 <= result['pearson_corr'] <= 1, "相关系数越界"
+    assert -1 <= result['r_gain'] <= 1, "r(涨幅)越界"
+    assert -1 <= result['r_loss'] <= 1, "r(跌幅)越界"
     
-    # PAXG 周一波动率应在合理范围（黄金波动较小）
-    assert result['avg_spread'] < 0.05, "PAXG 波动异常过大"
-    
-    # 记录结果供后续比对
-    print(f"相关系数: {result['pearson_corr']}, p值: {result['p_value']}")
+    # PAXG 波动应较小（黄金锚定）
+    assert abs(result['up_gain_mean']) < 0.05
+    assert abs(result['dn_loss_mean']) < 0.05
 ```
 
 ---

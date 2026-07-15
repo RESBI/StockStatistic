@@ -155,20 +155,20 @@ renderer.savefig("btc.png")
 #### Normalized price comparison
 ![Price Comparison](docs/images/price_comparison.png)
 
-### PAXG weekend return vs Monday directional extreme
+### PAXG weekend return vs Monday gain/loss (independent)
 
-The signature analysis: PAXG (gold-pegged token) weekend return (x-axis: Friday close → Sunday close) vs Monday **directional extreme** (y-axis: selected by weekend direction — if up, `(High-Open)/Open`; if down, `(Low-Open)/Open`). Real data 2022-2024.
+The signature analysis: PAXG (gold-pegged token) weekend return (x-axis: Friday close → Sunday close) vs Monday's **max gain** `(High-Open)/Open` and **max loss** `(Low-Open)/Open`, recorded **independently** (no selection by signal direction). Real data 2022-2024.
 
-#### Scatter plot with regression line
+#### Scatter plot — gain & loss on same chart
 ![PAXG Weekend Scatter](docs/images/paxg_weekend_scatter.png)
 
-**Result**: Pearson r = 0.58, p-value ≈ 0 — strong, statistically significant positive correlation. Weekend up → Monday avg spike +0.71%; weekend down → Monday avg dip -0.74%.
+**Result**: r(gain)=0.23 (p=0.004), r(loss)=-0.20 (p=0.012). Both significant but weak — the weekend return has modest independent predictive power for both Monday's upside and downside. Up vs Down group means are not significantly different (t-test p>0.26).
 
-#### Average Monday move by weekend direction
+#### Gain/loss distribution by weekend direction
 ![PAXG Directional](docs/images/paxg_directional.png)
 
-#### 52-week rolling correlation
-![PAXG Rolling Correlation](docs/images/paxg_rolling_corr.png)
+#### Weekend return distribution
+![PAXG Weekend Histogram](docs/images/paxg_weekend_hist.png)
 
 ## Data Sources
 

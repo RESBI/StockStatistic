@@ -477,12 +477,12 @@ renderer.render(spec)  # UserWarning: No plotting backend available
 
 ### Analysis goal
 
-Test whether PAXG (gold-pegged token) weekend return (Friday close → Sunday close) correlates with Monday's **directional extreme** — selected by weekend direction:
+Test whether PAXG (gold-pegged token) weekend return (Friday close → Sunday close) independently correlates with Monday's **max gain** and **max loss**:
 
-- If weekend **UP** (return > 0): `monday_move = (High - Open) / Open` — the max upside from open (how high it spiked)
-- If weekend **DOWN** (return < 0): `monday_move = (Low - Open) / Open` — the max downside from open (how low it dipped, negative)
+- `max_gain = (High - Open) / Open` — intraday maximum upside (always positive)
+- `max_loss = (Low - Open) / Open` — intraday maximum downside (always negative)
 
-**Hypothesis**: If weekend is up, does Monday spike higher? If weekend is down, does Monday dip lower?
+Both are recorded for every Monday and correlated with the weekend return **independently**. This avoids the selection bias of picking one extreme based on the signal direction.
 
 ### Example 11.1: Full analysis
 
@@ -509,55 +509,51 @@ for mon_date, mon_row in mondays.iterrows():
         mon_open = mon_row["open"]
         max_gain = (mon_row["high"] - mon_open) / mon_open
         max_loss = (mon_row["low"] - mon_open) / mon_open
-        # Select by weekend direction: up → high, down → low
-        monday_move = max_gain if weekend_ret > 0 else max_loss
-        pairs.append({"weekend_return": weekend_ret, "monday_move": monday_move})
+        pairs.append({"weekend_return": weekend_ret, "max_gain": max_gain, "max_loss": max_loss})
 
 result_df = pd.DataFrame(pairs)
-pearson = result_df["weekend_return"].corr(result_df["monday_move"])
-t_stat, p_value = stats.pearsonr(result_df["weekend_return"], result_df["monday_move"])
+r_gain = result_df["weekend_return"].corr(result_df["max_gain"])
+r_loss = result_df["weekend_return"].corr(result_df["max_loss"])
+p_gain = stats.pearsonr(result_df["weekend_return"], result_df["max_gain"])[1]
+p_loss = stats.pearsonr(result_df["weekend_return"], result_df["max_loss"])[1]
 
 up = result_df[result_df["weekend_return"] > 0]
 dn = result_df[result_df["weekend_return"] < 0]
 
 print(f"Samples: {len(result_df)}")
-print(f"Pearson correlation: {pearson:.4f}")
-print(f"p-value: {p_value:.6f}")
-print(f"Significant (p<0.05): {p_value < 0.05}")
-print(f"Weekend Up  (n={len(up)}): avg (High-Open)/Open = {up['monday_move'].mean()*100:.4f}%")
-print(f"Weekend Dn  (n={len(dn)}): avg (Low-Open)/Open  = {dn['monday_move'].mean()*100:.4f}%")
+print(f"r(gain): {r_gain:.4f}, p={p_gain:.4f}")
+print(f"r(loss): {r_loss:.4f}, p={p_loss:.4f}")
+print(f"Weekend Up  (n={len(up)}): gain={up['max_gain'].mean()*100:.4f}%, loss={up['max_loss'].mean()*100:.4f}%")
+print(f"Weekend Dn  (n={len(dn)}): gain={dn['max_gain'].mean()*100:.4f}%, loss={dn['max_loss'].mean()*100:.4f}%")
 ```
 
 **Expected result**:
 ```
 Samples: 156
-Pearson correlation: 0.5784
-p-value: 0.000000
-Significant (p<0.05): True
-Weekend Up  (n=76): avg (High-Open)/Open = 0.7099%
-Weekend Dn  (n=65): avg (Low-Open)/Open  = -0.7435%
+r(gain): 0.2303, p=0.0038
+r(loss): -0.2004, p=0.0121
+Weekend Up  (n=76): gain=0.7099%, loss=-0.9070%
+Weekend Dn  (n=65): gain=0.5940%, loss=-0.7435%
 ```
 
-### Example 11.2: Scatter plot — Monday directional extreme vs weekend return
+### Example 11.2: Scatter plot — gain & loss on same chart
 
 ![PAXG Weekend Scatter](images/paxg_weekend_scatter.png)
 
-### Example 11.3: Bar chart — avg Monday move by weekend direction
+### Example 11.3: Gain/loss distribution histograms by weekend direction
 
 ![PAXG Directional](images/paxg_directional.png)
 
-### Example 11.4: Rolling correlation
+### Example 11.4: Weekend return distribution
 
-![PAXG Rolling Correlation](images/paxg_rolling_corr.png)
+![PAXG Weekend Histogram](images/paxg_weekend_hist.png)
 
 ### Interpretation
 
-- **Pearson r = 0.58**: strong positive correlation between weekend return and Monday's directional extreme
-- **Spearman r = 0.74**: very strong monotonic relationship
-- **p-value ≈ 0**: highly statistically significant (p < 0.001)
-- **Directional insight**: Weekend up → Monday avg spike +0.71% above open; Weekend down → Monday avg dip -0.74% below open
-- **Rolling correlation**: 52-week mean 0.63, std 0.08 — stable and consistently positive
-- **Conclusion**: PAXG weekend return is a **strong, statistically significant predictor** of Monday's directional extreme. When the weekend is up, Monday tends to spike higher; when the weekend is down, Monday tends to dip lower. The effect is consistent over time.
+- **r(gain) = 0.23** (p=0.004): weak but significant positive correlation — weekend return modestly predicts Monday's max upside
+- **r(loss) = -0.20** (p=0.012): weak but significant negative correlation — positive weekend return modestly predicts smaller Monday max downside
+- **Up vs Down groups**: gain and loss means are not significantly different between groups (t-test p > 0.26)
+- **Conclusion**: The weekend return has modest independent predictive power for both Monday's gain and loss. The correlations are statistically significant but weak (r ≈ 0.2), meaning the effect is real but small. High individual variability (std ≈ mean) limits practical single-trade predictability.
 
 ---
 

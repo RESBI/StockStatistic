@@ -249,17 +249,15 @@ class TestClassicCharts:
 
 
 # ═══════════════════════════════════════════════════
-# PAXG Weekend Return vs Monday Directional Extreme
+# PAXG Weekend Return vs Monday Independent Gain/Loss (v2)
 # ═══════════════════════════════════════════════════
 
 class TestPAXGWeekendChart:
-    """PAXG weekend return (x-axis) vs Monday directional extreme (y-axis).
+    """PAXG weekend return vs Monday max_gain AND max_loss (independently).
 
-    Monday extreme selected by WEEKEND direction:
-      - Weekend UP  (return > 0): monday_move = (High - Open) / Open  (max upside from open)
-      - Weekend DOWN (return < 0): monday_move = (Low  - Open) / Open  (max downside from open, negative)
-
-    Hypothesis: if weekend is up, does Monday spike higher? If weekend is down, does Monday dip lower?
+    Records both (High-Open)/Open and (Low-Open)/Open for every Monday,
+    then correlates the weekend return with each independently.
+    This avoids the selection bias of picking one extreme by signal direction.
     """
 
     @pytest.fixture(scope="class")
@@ -288,121 +286,141 @@ class TestPAXGWeekendChart:
                 max_gain = (mon_row["high"] - mon_open) / mon_open
                 max_loss = (mon_row["low"] - mon_open) / mon_open
 
-                # Select by weekend direction: up → high, down → low
-                if weekend_return > 0:
-                    monday_move = max_gain
-                else:
-                    monday_move = max_loss
-
                 pairs.append({
                     "weekend_return": weekend_return,
                     "max_gain": max_gain,
                     "max_loss": max_loss,
-                    "monday_move": monday_move,
-                    "weekend_up": weekend_return > 0,
                 })
 
         return pd.DataFrame(pairs)
 
-    def test_chart_weekend_vs_monday_scatter(self, weekend_pairs):
-        """Chart 8: Weekend return (x) vs Monday directional extreme (y)"""
+    def test_chart_gain_loss_scatter(self, weekend_pairs):
+        """Chart 8: Weekend return (x) vs Monday gain & loss (y), both plotted independently"""
         df = weekend_pairs.dropna()
-        pearson_corr = df["weekend_return"].corr(df["monday_move"])
-        t_stat, p_value = sp_stats.pearsonr(df["weekend_return"], df["monday_move"])
+        r_gain = df["weekend_return"].corr(df["max_gain"])
+        r_loss = df["weekend_return"].corr(df["max_loss"])
+        p_gain = sp_stats.pearsonr(df["weekend_return"], df["max_gain"])[1]
+        p_loss = sp_stats.pearsonr(df["weekend_return"], df["max_loss"])[1]
 
-        fig, ax = plt.subplots(figsize=(10, 8))
+        fig, ax = plt.subplots(figsize=(12, 8))
 
-        # Red = weekend up (measuring high), blue = weekend down (measuring low)
-        colors = ["#e74c3c" if w else "#3498db" for w in df["weekend_up"]]
-        ax.scatter(df["weekend_return"] * 100, df["monday_move"] * 100,
-                    c=colors, alpha=0.5, s=25, edgecolors="white", linewidth=0.3)
+        up = df["weekend_return"] > 0
+        dn = df["weekend_return"] < 0
 
-        x_vals = np.linspace(df["weekend_return"].min() * 100, df["weekend_return"].max() * 100, 100)
-        coeffs = np.polyfit(df["weekend_return"] * 100, df["monday_move"] * 100, 1)
-        ax.plot(x_vals, coeffs[0] * x_vals + coeffs[1], color="black", linewidth=2,
-                label=f"Regression (slope={coeffs[0]:.3f})")
+        ax.scatter(df.loc[up, "weekend_return"] * 100, df.loc[up, "max_gain"] * 100,
+                   c="#e74c3c", alpha=0.4, s=20, label="Sig>0 → Gain (H-O)/O", edgecolors="white", linewidth=0.2)
+        ax.scatter(df.loc[up, "weekend_return"] * 100, df.loc[up, "max_loss"] * 100,
+                   c="#f39c12", alpha=0.4, s=20, label="Sig>0 → Loss (L-O)/O", edgecolors="white", linewidth=0.2, marker="^")
+        ax.scatter(df.loc[dn, "weekend_return"] * 100, df.loc[dn, "max_gain"] * 100,
+                   c="#2980b9", alpha=0.4, s=20, label="Sig<0 → Gain (H-O)/O", edgecolors="white", linewidth=0.2, marker="s")
+        ax.scatter(df.loc[dn, "weekend_return"] * 100, df.loc[dn, "max_loss"] * 100,
+                   c="#8e44ad", alpha=0.4, s=20, label="Sig<0 → Loss (L-O)/O", edgecolors="white", linewidth=0.2, marker="v")
+
+        # Regression lines for gain and loss
+        for y, color, ls in [(df["max_gain"] * 100, "red", "-"), (df["max_loss"] * 100, "blue", "--")]:
+            valid = ~df["weekend_return"].isna() & ~y.isna()
+            if valid.sum() > 2:
+                coeffs = np.polyfit(df.loc[valid, "weekend_return"] * 100, y[valid], 1)
+                x_line = np.linspace(df["weekend_return"].min() * 100, df["weekend_return"].max() * 100, 100)
+                ax.plot(x_line, coeffs[0] * x_line + coeffs[1], color=color, linewidth=1.5, linestyle=ls, alpha=0.7)
 
         ax.axhline(0, color="gray", linewidth=0.8)
         ax.axvline(0, color="gray", linewidth=0.8)
 
-        ax.set_title("PAXG Weekend Return vs Monday Directional Extreme (2022-2024, Real Data)",
+        ax.set_title("PAXG Weekend Return vs Monday Gain/Loss (Independent, Real Data)",
                       fontsize=13, fontweight="bold")
         ax.set_xlabel("Weekend Return (%)  [Friday close → Sunday close]", fontsize=11)
-        ax.set_ylabel("Monday Move (%)  [up→(H-O)/O, down→(L-O)/O]", fontsize=11)
+        ax.set_ylabel("Monday Move (%)", fontsize=11)
 
         textstr = (f"Samples: {len(df)}\n"
-                    f"Pearson r: {pearson_corr:.4f}\n"
-                    f"p-value: {p_value:.6f}\n"
-                    f"Significant: {'Yes' if p_value < 0.05 else 'No'}\n"
-                    f"Red = weekend up → (High-Open)/Open\n"
-                    f"Blue = weekend down → (Low-Open)/Open")
+                    f"r(gain) = {r_gain:.4f}, p = {p_gain:.4f}\n"
+                    f"r(loss) = {r_loss:.4f}, p = {p_loss:.4f}")
         props = dict(boxstyle="round", facecolor="wheat", alpha=0.8)
         ax.text(0.05, 0.95, textstr, transform=ax.transAxes, fontsize=10,
                 verticalalignment="top", bbox=props)
 
-        ax.legend(loc="lower right")
+        ax.legend(loc="lower right", fontsize=9)
         ax.grid(True, alpha=0.3)
 
         path = _savefig(fig, "paxg_weekend_scatter.png")
         assert os.path.exists(path)
 
-    def test_chart_weekend_directional(self, weekend_pairs):
-        """Chart 9: Bar — avg monday_move by weekend direction + comparison"""
+    def test_chart_gain_histogram_by_direction(self, weekend_pairs):
+        """Chart 9: Histograms — Monday max_gain & max_loss distributions by weekend direction"""
         df = weekend_pairs.dropna()
+        up = df[df["weekend_return"] > 0]
+        dn = df[df["weekend_return"] < 0]
 
-        up_grp = df[df["weekend_return"] > 0]
-        down_grp = df[df["weekend_return"] < 0]
+        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
 
-        # For weekend-up group: avg of (High-Open)/Open
-        up_move = up_grp["monday_move"].mean() * 100
-        # For weekend-down group: avg of (Low-Open)/Open
-        down_move = down_grp["monday_move"].mean() * 100
+        for i, (mask, label) in enumerate([(df["weekend_return"] > 0, "Weekend Up"),
+                                            (df["weekend_return"] < 0, "Weekend Down")]):
+            gains = df.loc[mask, "max_gain"] * 100
+            losses = df.loc[mask, "max_loss"] * 100
+            n = mask.sum()
 
-        up_n = len(up_grp)
-        down_n = len(down_grp)
+            bins = np.linspace(min(gains.min(), losses.min()) - 0.5,
+                               max(gains.max(), losses.max()) + 0.5, 40)
 
-        fig, ax = plt.subplots(figsize=(8, 6))
+            ax = axes[i][0]
+            ax.hist(gains, bins=bins, alpha=0.6, color="#e74c3c",
+                    label=f"Gain (mean={gains.mean():.4f}%)", edgecolor="black")
+            ax.hist(losses, bins=bins, alpha=0.6, color="#3498db",
+                    label=f"Loss (mean={losses.mean():.4f}%)", edgecolor="black")
+            ax.axvline(gains.mean(), color="#e74c3c", linestyle="--", linewidth=2)
+            ax.axvline(losses.mean(), color="#3498db", linestyle="--", linewidth=2)
+            ax.set_title(f"{label} (n={n}) — Monday Gain & Loss Distribution", fontsize=12, fontweight="bold")
+            ax.set_xlabel("Move (%)")
+            ax.set_ylabel("Count")
+            ax.legend()
+            ax.grid(True, alpha=0.3)
 
-        categories = [f"Weekend Up\n(n={up_n})\n(High-Open)/Open",
-                       f"Weekend Down\n(n={down_n})\n(Low-Open)/Open"]
-        values = [up_move, down_move]
-        colors = ["#e74c3c", "#3498db"]
+            ax = axes[i][1]
+            spread = gains - losses
+            ax.hist(spread, bins=30, alpha=0.7, color="#2ecc71", edgecolor="black")
+            ax.axvline(spread.mean(), color="black", linestyle="--", linewidth=2,
+                       label=f"Mean={spread.mean():.4f}%")
+            ax.set_title(f"{label} — Intraday Range (Gain - Loss) Distribution", fontsize=12, fontweight="bold")
+            ax.set_xlabel("Range (%)")
+            ax.set_ylabel("Count")
+            ax.legend()
+            ax.grid(True, alpha=0.3)
 
-        bars = ax.bar(categories, values, color=colors, alpha=0.7, edgecolor="black", width=0.5)
-
-        for bar, val in zip(bars, values):
-            y_pos = bar.get_height() + 0.02 if val >= 0 else bar.get_height() - 0.04
-            ax.text(bar.get_x() + bar.get_width() / 2, y_pos,
-                    f"{val:.4f}%", ha="center", fontsize=12, fontweight="bold")
-
-        ax.set_title("PAXG Monday Directional Extreme by Weekend Direction",
-                      fontsize=13, fontweight="bold")
-        ax.set_ylabel("Monday Move (%)")
-        ax.axhline(0, color="black", linewidth=0.5)
-        ax.grid(True, alpha=0.3, axis="y")
-
+        fig.suptitle("PAXG Monday Gain/Loss Distribution by Weekend Direction (Real Data)",
+                      fontsize=14, fontweight="bold", y=1.01)
+        fig.tight_layout()
         path = _savefig(fig, "paxg_directional.png")
         assert os.path.exists(path)
 
-    def test_chart_rolling_correlation(self, weekend_pairs):
-        """Chart 10: 52-week rolling correlation over time"""
+    def test_chart_weekend_return_histogram(self, weekend_pairs):
+        """Chart 10: Histogram — weekend return distribution with gain/loss overlay"""
         df = weekend_pairs.dropna()
-        rolling = df["weekend_return"].rolling(52).corr(df["monday_move"])
+        up = df[df["weekend_return"] > 0]
+        dn = df[df["weekend_return"] < 0]
 
-        fig, ax = plt.subplots(figsize=(14, 5))
-        ax.plot(rolling.index, rolling, color="darkgreen", linewidth=1.5)
-        ax.axhline(0, color="black", linewidth=0.5)
-        ax.axhline(rolling.mean(), color="red", linestyle="--", alpha=0.7,
-                    label=f"Mean: {rolling.mean():.3f}")
-        ax.fill_between(rolling.index, rolling, 0, where=rolling >= 0, alpha=0.15, color="green")
-        ax.fill_between(rolling.index, rolling, 0, where=rolling < 0, alpha=0.15, color="red")
-        ax.set_title("PAXG Weekend Return vs Monday Directional Extreme — 52-Week Rolling Correlation",
-                      fontsize=13, fontweight="bold")
-        ax.set_xlabel("Date")
-        ax.set_ylabel("Rolling Correlation")
-        ax.set_ylim(-1, 1)
-        ax.legend()
+        fig, ax = plt.subplots(figsize=(12, 7))
+
+        bins = np.linspace(df["weekend_return"].min() * 100,
+                           df["weekend_return"].max() * 100, 40)
+
+        ax.hist(up["weekend_return"] * 100, bins=bins, alpha=0.6, color="#e74c3c",
+                label=f"Weekend Up (n={len(up)}, mean gain={up['max_gain'].mean()*100:.4f}%)",
+                edgecolor="black")
+        ax.hist(dn["weekend_return"] * 100, bins=bins, alpha=0.6, color="#3498db",
+                label=f"Weekend Down (n={len(dn)}, mean loss={dn['max_loss'].mean()*100:.4f}%)",
+                edgecolor="black")
+
+        ax.axvline(0, color="black", linewidth=1)
+        ax.axvline(up["weekend_return"].mean() * 100, color="#e74c3c", linestyle="--", linewidth=2,
+                   label=f"Up mean={up['weekend_return'].mean()*100:.4f}%")
+        ax.axvline(dn["weekend_return"].mean() * 100, color="#3498db", linestyle="--", linewidth=2,
+                   label=f"Dn mean={dn['weekend_return'].mean()*100:.4f}%")
+
+        ax.set_title("PAXG Weekend Return Distribution (Real Data)", fontsize=13, fontweight="bold")
+        ax.set_xlabel("Weekend Return (%)  [Friday close → Sunday close]")
+        ax.set_ylabel("Count")
+        ax.legend(fontsize=9)
         ax.grid(True, alpha=0.3)
 
-        path = _savefig(fig, "paxg_rolling_corr.png")
+        path = _savefig(fig, "paxg_weekend_hist.png")
         assert os.path.exists(path)

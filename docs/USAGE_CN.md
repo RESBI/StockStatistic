@@ -477,12 +477,12 @@ renderer.render(spec)  # UserWarning: No plotting backend available
 
 ### 分析目标
 
-检验 PAXG（黄金锚定代币）周末涨跌幅（周五收盘→周日收盘）与周一**方向性极值**之间的相关性。极值按周末涨跌方向选取：
+检验 PAXG（黄金锚定代币）周末涨跌幅（周五收盘→周日收盘）与周一**最大涨幅**和**最大跌幅**之间的独立相关性：
 
-- 若周末**上涨**（return > 0）：`monday_move = (最高 - 开盘) / 开盘` — 周一最高点相对开盘的涨幅（冲高幅度）
-- 若周末**下跌**（return < 0）：`monday_move = (最低 - 开盘) / 开盘` — 周一最低点相对开盘的跌幅（下探幅度，负值）
+- `max_gain = (最高 - 开盘) / 开盘` — 日内最大上行幅度（恒为正）
+- `max_loss = (最低 - 开盘) / 开盘` — 日内最大下行幅度（恒为负）
 
-**假设**：若周末涨，周一是否冲得更高？若周末跌，周一是否探得更低？
+每个周一同时记录两者，与周末涨跌幅**独立**相关。这避免了按信号方向选择极值导致的选择偏差。
 
 ### 示例 11.1：完整分析
 
@@ -509,55 +509,51 @@ for mon_date, mon_row in mondays.iterrows():
         mon_open = mon_row["open"]
         max_gain = (mon_row["high"] - mon_open) / mon_open
         max_loss = (mon_row["low"] - mon_open) / mon_open
-        # 按周末方向选取：涨→最高，跌→最低
-        monday_move = max_gain if weekend_ret > 0 else max_loss
-        pairs.append({"weekend_return": weekend_ret, "monday_move": monday_move})
+        pairs.append({"weekend_return": weekend_ret, "max_gain": max_gain, "max_loss": max_loss})
 
 result_df = pd.DataFrame(pairs)
-pearson = result_df["weekend_return"].corr(result_df["monday_move"])
-t_stat, p_value = stats.pearsonr(result_df["weekend_return"], result_df["monday_move"])
+r_gain = result_df["weekend_return"].corr(result_df["max_gain"])
+r_loss = result_df["weekend_return"].corr(result_df["max_loss"])
+p_gain = stats.pearsonr(result_df["weekend_return"], result_df["max_gain"])[1]
+p_loss = stats.pearsonr(result_df["weekend_return"], result_df["max_loss"])[1]
 
 up = result_df[result_df["weekend_return"] > 0]
 dn = result_df[result_df["weekend_return"] < 0]
 
 print(f"样本数: {len(result_df)}")
-print(f"Pearson 相关系数: {pearson:.4f}")
-print(f"p 值: {p_value:.6f}")
-print(f"统计显著 (p<0.05): {p_value < 0.05}")
-print(f"周末上涨 (n={len(up)}): 平均 (最高-开盘)/开盘 = {up['monday_move'].mean()*100:.4f}%")
-print(f"周末下跌 (n={len(dn)}): 平均 (最低-开盘)/开盘 = {dn['monday_move'].mean()*100:.4f}%")
+print(f"r(涨幅): {r_gain:.4f}, p={p_gain:.4f}")
+print(f"r(跌幅): {r_loss:.4f}, p={p_loss:.4f}")
+print(f"周末上涨 (n={len(up)}): 涨幅={up['max_gain'].mean()*100:.4f}%, 跌幅={up['max_loss'].mean()*100:.4f}%")
+print(f"周末下跌 (n={len(dn)}): 涨幅={dn['max_gain'].mean()*100:.4f}%, 跌幅={dn['max_loss'].mean()*100:.4f}%")
 ```
 
 **预期结果**：
 ```
 样本数: 156
-Pearson 相关系数: 0.5784
-p 值: 0.000000
-统计显著 (p<0.05): True
-周末上涨 (n=76): 平均 (最高-开盘)/开盘 = 0.7099%
-周末下跌 (n=65): 平均 (最低-开盘)/开盘 = -0.7435%
+r(涨幅): 0.2303, p=0.0038
+r(跌幅): -0.2004, p=0.0121
+周末上涨 (n=76): 涨幅=0.7099%, 跌幅=-0.9070%
+周末下跌 (n=65): 涨幅=0.5940%, 跌幅=-0.7435%
 ```
 
-### 示例 11.2：散点图 — 周一方向性极值 vs 周末涨跌幅度
+### 示例 11.2：散点图 — 涨幅与跌幅同图显示
 
 ![PAXG 周末散点图](images/paxg_weekend_scatter.png)
 
-### 示例 11.3：柱状图 — 按周末涨跌方向分组的平均周一极值
+### 示例 11.3：按周末方向的涨跌幅分布直方图
 
 ![PAXG 方向性](images/paxg_directional.png)
 
-### 示例 11.4：滚动相关性
+### 示例 11.4：周末涨跌幅分布
 
-![PAXG 滚动相关性](images/paxg_rolling_corr.png)
+![PAXG 周末直方图](images/paxg_weekend_hist.png)
 
 ### 解读
 
-- **Pearson r = 0.58**：周末涨跌幅与周一方向性极值之间存在强正相关
-- **Spearman r = 0.74**：非常强的单调关系
-- **p 值 ≈ 0**：高度统计显著 (p < 0.001)
-- **方向性洞察**：周末上涨 → 周一平均冲高 +0.71%；周末下跌 → 周一平均下探 -0.74%
-- **滚动相关性**：52周均值 0.63，标准差 0.08 — 稳定且持续为正
-- **结论**：PAXG 周末涨跌幅是周一方向性极值的**强统计显著预测信号**。周末涨则周一冲高，周末跌则周一下探，该效应在时间上持续稳定。
+- **r(涨幅) = 0.23** (p=0.004)：弱但显著的正相关 — 周末涨跌幅适度预测周一最大涨幅
+- **r(跌幅) = -0.20** (p=0.012)：弱但显著的负相关 — 周末正向涨跌幅适度预测周一最大跌幅较小
+- **涨组 vs 跌组**：涨幅和跌幅的均值在两组间无显著差异 (t 检验 p > 0.26)
+- **结论**：周末涨跌幅对周一涨幅和跌幅有适度的独立预测力。相关性统计显著但较弱 (r ≈ 0.2)，说明效应真实但较小。高个体波动性（标准差 ≈ 均值）限制了单笔交易的可预测性。
 
 ---
 
