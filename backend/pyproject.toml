@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "stockstat-backend"
+version = "0.1.0"
+description = "StockStat storage backend service"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi>=0.110",
+    "uvicorn>=0.27",
+    "sqlalchemy>=2.0",
+    "yfinance>=0.2",
+    "ccxt>=4.0",
+    "pandas>=2.0",
+    "pyarrow>=15.0",
+]
+
+[project.optional-dependencies]
+postgres = ["psycopg2-binary>=2.9"]
+redis = ["redis>=5.0"]
+
+[tool.setuptools.packages.find]
+include = ["stockstat_backend*"]
