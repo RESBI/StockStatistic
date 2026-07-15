@@ -259,6 +259,6 @@ This program is distributed in the hope that it will be useful, but WITHOUT ANY 
 
 ## Acknowledgements
 
-This project — including all source code, documentation, tests, and charts — was entirely designed, implemented, and documented by **GLM-5.2** (model ID: `taitest/glm-5.2`), an AI assistant powered by Zhipu AI.
+This project — including all source code, documentation, tests, and charts — was entirely designed, implemented, and documented by **GLM-5.2**, an AI assistant.
 
-All code was generated through iterative conversation with the user, verified by automated test suites, and validated against real market data (Yahoo Finance + Binance) via proxy.
+All code was generated through iterative conversation with the user, verified by automated test suites, and validated against real market data (Yahoo Finance + Binance).
