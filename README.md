@@ -262,3 +262,17 @@ This program is distributed in the hope that it will be useful, but WITHOUT ANY 
 This project — including all source code, documentation, tests, and charts — was entirely designed, implemented, and documented by **GLM-5.2**, an AI assistant.
 
 All code was generated through iterative conversation with the user, verified by automated test suites, and validated against real market data (Yahoo Finance + Binance).
+
+---
+
+## Disclaimer
+
+This software is provided for **educational and research purposes only**. It is **not** financial, investment, or trading advice.
+
+- The authors and contributors of this project are **not** financial advisors and do not accept any liability for financial losses or damages arising from the use of this software.
+- All statistical analyses, indicators, and correlations (including the PAXG weekend effect) are based on historical data and do **not** guarantee future results.
+- Users are solely responsible for their own investment decisions and should consult a qualified financial professional before making any investment.
+- The software may contain bugs or inaccuracies. Use at your own risk.
+- Market data is obtained from third-party sources (Yahoo Finance, Binance) and their accuracy or availability is not guaranteed.
+
+**THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.**
