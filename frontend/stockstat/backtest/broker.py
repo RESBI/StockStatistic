@@ -18,6 +18,8 @@ class SimulatedBroker:
         self.allow_short = allow_short
         self._pending: dict[str, Order] = {}
         self._trailing_states: dict[str, float] = {}
+        self._oco_pairs: dict[str, str] = {}
+        self._oco_reverse: dict[str, str] = {}
 
     def submit(self, order: Order) -> str:
         self._pending[order.order_id] = order
@@ -25,7 +27,39 @@ class SimulatedBroker:
             self._trailing_states[order.order_id] = 0.0
         return order.order_id
 
+    def submit_oco(self, order_a: Order, order_b: Order) -> tuple[str, str]:
+        """Submit a One-Cancels-Other pair. When either fills, the other is cancelled."""
+        self.submit(order_a)
+        self.submit(order_b)
+        self._oco_pairs[order_a.order_id] = order_b.order_id
+        self._oco_reverse[order_b.order_id] = order_a.order_id
+        return order_a.order_id, order_b.order_id
+
+    def submit_oco_mutual(self, order_a: Order, order_b: Order) -> tuple[str, str]:
+        """Submit a mutual-OCO pair: if BOTH fill, both are cancelled.
+
+        Unlike submit_oco (one fills → cancel other), this requires
+        scanning all sub-bars first. The mutual relationship is managed
+        by IntrabarExecution via register_oco_mutual().
+
+        For non-intrabar usage, this behaves like submit_oco.
+        """
+        self.submit(order_a)
+        self.submit(order_b)
+        self._oco_pairs[order_a.order_id] = order_b.order_id
+        self._oco_reverse[order_b.order_id] = order_a.order_id
+        return order_a.order_id, order_b.order_id
+
     def cancel(self, order_id: str) -> bool:
+        """Cancel an order. If part of an OCO pair, cancel the other too."""
+        paired = self._oco_pairs.get(order_id) or self._oco_reverse.get(order_id)
+        if paired:
+            self._pending.pop(paired, None)
+            self._trailing_states.pop(paired, None)
+            self._oco_pairs.pop(paired, None)
+            self._oco_reverse.pop(paired, None)
+        self._oco_pairs.pop(order_id, None)
+        self._oco_reverse.pop(order_id, None)
         return self._pending.pop(order_id, None) is not None
 
     def get_position(self, symbol: str):
@@ -59,9 +93,15 @@ class SimulatedBroker:
             fills.append(fill)
             to_remove.append(oid)
 
+            paired = self._oco_pairs.get(oid) or self._oco_reverse.get(oid)
+            if paired and paired not in to_remove:
+                to_remove.append(paired)
+
         for oid in to_remove:
             self._pending.pop(oid, None)
             self._trailing_states.pop(oid, None)
+            self._oco_pairs.pop(oid, None)
+            self._oco_reverse.pop(oid, None)
         return fills
 
     def _resolve_fill_price(self, order: Order, bar: pd.Series,
@@ -106,6 +146,7 @@ class SimulatedBroker:
             slippage_cost=slippage_cost,
             ts=ts,
             tag=order.tag,
+            exit_reason=order.exit_reason,
         )
 
     @property

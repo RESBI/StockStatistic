@@ -71,3 +71,28 @@ class Signal:
         if signal:
             return ctx.broker.submit(Order(symbol=symbol, side=side, qty=qty, tag=tag))
         return None
+
+
+class IntrabarMixin:
+    """Optional mixin providing intrabar execution conveniences.
+
+    Usage:
+        class MyStrategy(Strategy, IntrabarMixin):
+            def on_bar(self, ctx):
+                ctx.intrabar_submit(Order(...))
+
+            def define_exits(self, entry_fill, ctx):
+                return [Order(...)]
+
+    The engine uses duck typing to detect ``define_exits`` — inheriting
+    this mixin is optional but provides a clear declaration of intent
+    and a default no-op implementation.
+    """
+
+    def define_exits(self, entry_fill, ctx: BacktestContext) -> list:
+        """Define exit orders after an entry fill. Override in subclass.
+
+        Default returns empty list (no active exits; relies on
+        market close-order in the returned list or engine fallback).
+        """
+        return []

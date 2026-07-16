@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from typing import Optional
 
 import pandas as pd
@@ -83,6 +84,58 @@ class WorstPriceFill(FillModel):
         return float(next_bar["low"])
 
 
+class IntrabarLimitFill(FillModel):
+    """Fill limit/stop orders using intrabar high/low; market orders at next open.
+
+    LIMIT buy:  fills if next_bar["low"] <= limit_price, at limit_price.
+    LIMIT sell: fills if next_bar["high"] >= limit_price, at limit_price.
+    STOP buy:   fills if next_bar["high"] >= stop_price, at stop_price.
+    STOP sell:  fills if next_bar["low"] <= stop_price, at stop_price.
+    MARKET:     fills at next_bar["open"] (same as NextOpenFill).
+    """
+
+    def fill_price(self, order: Order, bar: pd.Series,
+                   next_bar: Optional[pd.Series]) -> Optional[float]:
+        if next_bar is None:
+            return None
+
+        from .orders import OrderType, OrderSide
+
+        if order.order_type == OrderType.MARKET:
+            return float(next_bar["open"])
+
+        if order.order_type == OrderType.LIMIT:
+            if order.side == OrderSide.BUY:
+                if next_bar["low"] <= order.limit_price:
+                    return float(order.limit_price)
+            else:
+                if next_bar["high"] >= order.limit_price:
+                    return float(order.limit_price)
+            return None
+
+        if order.order_type == OrderType.STOP:
+            if order.side == OrderSide.BUY:
+                if next_bar["high"] >= order.stop_price:
+                    return float(order.stop_price)
+            else:
+                if next_bar["low"] <= order.stop_price:
+                    return float(order.stop_price)
+            return None
+
+        if order.order_type == OrderType.STOP_LIMIT:
+            if order.side == OrderSide.BUY:
+                if next_bar["high"] >= order.stop_price:
+                    if next_bar["low"] <= order.limit_price:
+                        return float(order.limit_price)
+            else:
+                if next_bar["low"] <= order.stop_price:
+                    if next_bar["high"] >= order.limit_price:
+                        return float(order.limit_price)
+            return None
+
+        return None
+
+
 def _check_limit_stop(order: Order, price: float) -> bool:
     """Validate limit/stop conditions against a candidate fill price."""
     from .orders import OrderType, OrderSide
@@ -101,3 +154,80 @@ def _check_limit_stop(order: Order, price: float) -> bool:
             return price >= order.stop_price and price <= order.limit_price
         return price <= order.stop_price and price >= order.limit_price
     return True
+
+
+# ── Intrabar fill support (BT-11) ──────────────────────────────
+
+@dataclass
+class IntrabarFillResult:
+    """Result of an intrabar fill: price + sub-bar timing."""
+
+    fill_price: float
+    sub_bar_ts: object
+    sub_bar_index: int
+
+
+class IntrabarFillModel(IntrabarLimitFill):
+    """Scan a sequence of sub-bars for limit/stop fills, returning timing.
+
+    Inherits from IntrabarLimitFill (reuses single-bar logic) and adds
+    ``fill_with_timing`` which returns an IntrabarFillResult.
+
+    Does NOT modify the FillModel ABC — existing subclasses are unaffected.
+    """
+
+    def fill_with_timing(self, order: Order,
+                         sub_bars: pd.DataFrame) -> Optional[IntrabarFillResult]:
+        """Scan sub-bar sequence for the first fill, returning price + timing.
+
+        Logic mirrors IntrabarLimitFill.fill_price but:
+        - Input is a DataFrame of sub-bars (not a single next_bar)
+        - Returns IntrabarFillResult (with timestamp + index)
+        """
+        if sub_bars is None or len(sub_bars) == 0:
+            return None
+
+        from .orders import OrderType, OrderSide
+
+        for i in range(len(sub_bars)):
+            ts = sub_bars.index[i]
+            bar = sub_bars.iloc[i]
+
+            if order.order_type == OrderType.MARKET:
+                if i == 0:
+                    return IntrabarFillResult(float(bar["open"]), ts, i)
+                continue
+
+            if order.order_type == OrderType.LIMIT:
+                if order.side == OrderSide.BUY:
+                    if bar["low"] <= order.limit_price:
+                        return IntrabarFillResult(
+                            float(order.limit_price), ts, i
+                        )
+                else:
+                    if bar["high"] >= order.limit_price:
+                        return IntrabarFillResult(
+                            float(order.limit_price), ts, i
+                        )
+                continue
+
+            if order.order_type == OrderType.STOP:
+                if order.side == OrderSide.BUY:
+                    if bar["high"] >= order.stop_price:
+                        return IntrabarFillResult(
+                            float(order.stop_price), ts, i
+                        )
+                else:
+                    if bar["low"] <= order.stop_price:
+                        return IntrabarFillResult(
+                            float(order.stop_price), ts, i
+                        )
+                continue
+
+            if order.order_type == OrderType.STOP_LIMIT:
+                price = super().fill_price(order, sub_bars.iloc[0], bar)
+                if price is not None:
+                    return IntrabarFillResult(float(price), ts, i)
+                continue
+
+        return None

@@ -95,3 +95,47 @@ class DataFeed:
 
     def close_series(self, symbol: str, tf: str) -> pd.Series:
         return self._aligned[symbol][tf]["close"]
+
+    def intrabar_slice(self, symbol: str, parent_tf: str,
+                       intrabar_tf: str, t: pd.Timestamp) -> pd.DataFrame:
+        """Return the sub-bar sequence inside parent bar [t, t_next).
+
+        Used by IntrabarExecution to simulate sub-bar order matching.
+
+        The sub-bars are historical data within the parent bar's time
+        range — no future information is introduced.
+        """
+        if symbol not in self.universe._data:
+            return pd.DataFrame()
+        if parent_tf not in self.universe._data[symbol]:
+            return pd.DataFrame()
+        parent_df = self.universe.raw(symbol, parent_tf)
+        if intrabar_tf not in self.universe._data[symbol]:
+            return pd.DataFrame()
+        intrabar_df = self.universe.raw(symbol, intrabar_tf)
+
+        parent_times = parent_df.index
+        if t not in parent_times:
+            t = parent_times[parent_times.get_indexer([t], method="ffill")[0]]
+            if pd.isna(parent_times.get_indexer([t], method="ffill")[0]):
+                return intrabar_df.iloc[0:0]
+
+        idx = parent_times.get_loc(t)
+        if isinstance(idx, slice):
+            idx = idx.start
+        if idx + 1 < len(parent_times):
+            end_t = parent_times[idx + 1]
+        else:
+            # Last parent bar: infer duration from parent_tf
+            _PARENT_DELTAS = {
+                "1m": pd.Timedelta(minutes=1), "3m": pd.Timedelta(minutes=3),
+                "5m": pd.Timedelta(minutes=5), "15m": pd.Timedelta(minutes=15),
+                "30m": pd.Timedelta(minutes=30), "1h": pd.Timedelta(hours=1),
+                "4h": pd.Timedelta(hours=4), "1d": pd.Timedelta(days=1),
+                "1w": pd.Timedelta(weeks=1),
+            }
+            delta = _PARENT_DELTAS.get(parent_tf, pd.Timedelta(days=1))
+            end_t = t + delta
+
+        mask = (intrabar_df.index >= t) & (intrabar_df.index < end_t)
+        return intrabar_df.loc[mask].copy()

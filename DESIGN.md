@@ -2112,6 +2112,13 @@ The backtest core (BT-0–BT-7) and backtest visualization (BT-V0–BT-V3 + onli
 | BT-5 | [docs/backtest/BT5.md](docs/backtest/BT5.md) | metrics/report/viz | `test_backtest_metrics.py` |
 | BT-6 | [docs/backtest/BT6.md](docs/backtest/BT6.md) | optimization/walk-forward/MC | `test_backtest_optimize.py` |
 | BT-7 | [docs/backtest/BT7.md](docs/backtest/BT7.md) | DSL integration/12 strategies | `test_backtest_strategies.py` |
+| BT-8 | [docs/backtest/BT8.md](docs/backtest/BT8.md) | P0 fixes: IntrabarLimitFill + MakerTakerCost + OCO | `test_backtest_p0.py` |
+| BT-9 | [docs/backtest/BT9.md](docs/backtest/BT9.md) | P1 enhancements: BinanceCost + IntrabarSimulator + BatchRunner + exit_reason | `test_backtest_p1.py` |
+| BT-10 | [docs/backtest/BT10.md](docs/backtest/BT10.md) | P2 analysis: annualization + DCA + Analyzer + fee_sweep | `test_backtest_p2.py` |
+| BT-11 | `working/PAXG-Weekend-Monday-Law-v5-redo/STAGE_REPORT.md` | ExecutionModel ABC + IntrabarFillModel + Fill/Order field extensions | `test_backtest_intrabar.py` |
+| BT-12 | same | IntrabarExecution + IntrabarMixin + OCO mutual + priority | `test_backtest_intrabar.py` |
+| BT-13 | same | v5 strategy migration (33 strategies × 4 fees = 132 runs validated) | `run_redo.py` |
+| BT-14 | same | Analysis & visualization adaptation | `plots_redo.py` |
 
 ### 14.2 Backtest Visualization (BT-V series + online validation)
 
@@ -2122,6 +2129,289 @@ The backtest core (BT-0–BT-7) and backtest visualization (BT-V0–BT-V3 + onli
 | BT-V2 | [docs/backtest/BTV2.md](docs/backtest/BTV2.md) | histogram/heatmap/bar advanced charts | `test_backtest_viz_advanced.py` |
 | BT-V3 | [docs/backtest/BTV3.md](docs/backtest/BTV3.md) | dashboard combo + annotations | `test_backtest_viz_dashboard.py` |
 | BT-V Online | [docs/backtest/BT_VIZ_ONLINE_REPORT.md](docs/backtest/BT_VIZ_ONLINE_REPORT.md) | real-data online validation + 13 images | `test_backtest_viz_online.py` |
+
+---
+
+## 15. Backtest Engine Enhancement Subsystem Design
+
+> **Added in v1.5.** Enhances the backtest subsystem (§12) based on 12 deficiencies exposed during v5 research (see `working/PAXG-Weekend-Monday-Law-v5/BACKTEST_IMPROVEMENT_REPORT.md`). Enhancements follow **backward-compatible, composition-first, minimal-invasion** principles — new classes/methods are added without breaking existing APIs.
+
+### 15.1 Design Goals
+
+| Goal | Description |
+|------|-------------|
+| **Intrabar limit fills** | Limit orders should fill when intrabar price crosses the limit level, not just at open |
+| **Maker/Taker fee differentiation** | Crypto exchanges differentiate maker/taker rates up to 5× |
+| **OCO orders** | A pair of limit orders where filling one cancels the other (required for dual-limit strategies) |
+| **Binance fee model** | Spot/futures × BNB discount four-combination presets |
+| **Multi-strategy batch backtest** | Run multiple strategies and aggregate comparison in one call |
+| **Exit reason tagging** | Trades tagged as TP/SL/close/time/breakeven/profit exit |
+| **Subperiod/regime analysis** | Post-backtest analysis grouped by subperiod or market regime |
+| **DCA benchmark** | Dollar-cost-average benchmark for comparison |
+| **Fee sensitivity sweep** | Sweep fee parameters and output performance curves |
+
+### 15.2 File Changes
+
+| File | Change | Content |
+|------|--------|---------|
+| `fill_model.py` | Modified | Added `IntrabarLimitFill` |
+| `cost_model.py` | Modified | Added `MakerTakerCost`, `BinanceCost` + 4 presets |
+| `orders.py` | Modified | `Fill`/`Order` gained `exit_reason` field |
+| `broker.py` | Modified | Added `submit_oco()` + OCO cancel propagation |
+| `engine.py` | Modified | Added `periods_per_year` parameter |
+| `result.py` | Modified | Added `exit_reason_stats()` |
+| `benchmark.py` | Modified | Added `dca_equity()` |
+| `intrabar.py` | **New** | `IntrabarSimulator` |
+| `batch_runner.py` | **New** | `StrategyBatchRunner` + `BatchResults` |
+| `analyzer.py` | **New** | `BacktestAnalyzer` |
+| `fee_sweep.py` | **New** | `fee_sweep()` + `maker_taker_sweep()` |
+| `__init__.py` | Modified | Export new components |
+
+### 15.3 Core New Interfaces
+
+#### 15.3.1 IntrabarLimitFill
+
+```python
+class IntrabarLimitFill(FillModel):
+    """Fills limit orders when intrabar price crosses the limit level.
+    LIMIT buy:  next_bar["low"] <= limit_price → fills at limit_price
+    LIMIT sell: next_bar["high"] >= limit_price → fills at limit_price
+    MARKET:     fills at next_bar["open"] (same as NextOpenFill)
+    """
+```
+
+Exists in parallel with `NextOpenFill`; strategies explicitly choose. `NextOpenFill` retains original logic unchanged.
+
+#### 15.3.2 MakerTakerCost / BinanceCost
+
+```python
+@dataclass
+class MakerTakerCost(CostModel):
+    maker_rate: float = 0.001
+    taker_rate: float = 0.001
+    slippage: float = 0.0001
+    # LIMIT → maker_rate, MARKET/STOP → taker_rate
+
+@dataclass
+class BinanceCost(CostModel):
+    venue: str = "spot"          # "spot" | "futures"
+    bnb_discount: bool = False
+    slippage: float = 0.0001
+    # Spot:    maker 0.1% / taker 0.1%  (BNB: -25%)
+    # Futures: maker 0.02% / taker 0.05%  (BNB: -10%)
+
+# Convenience presets
+BINANCE_SPOT = BinanceCost(venue="spot", bnb_discount=False)
+BINANCE_SPOT_BNB = BinanceCost(venue="spot", bnb_discount=True)
+BINANCE_FUTURES = BinanceCost(venue="futures", bnb_discount=False)
+BINANCE_FUTURES_BNB = BinanceCost(venue="futures", bnb_discount=True)
+```
+
+#### 15.3.3 OCO Orders
+
+```python
+class SimulatedBroker:
+    def submit_oco(self, order_a: Order, order_b: Order) -> tuple[str, str]:
+        """Submit an OCO pair. When either fills, the other is auto-cancelled."""
+```
+
+No new `OrderType`; the association is managed at the Broker layer.
+
+#### 15.3.4 IntrabarSimulator
+
+```python
+class IntrabarSimulator:
+    """Simulate limit order fills using finer-grained bars."""
+    def __init__(self, fine_data: pd.DataFrame): ...
+    def check_fill(self, price_level, side, start_ts, end_ts) -> tuple: ...
+    def first_to_fill(self, levels, start_ts, end_ts) -> tuple | None: ...
+```
+
+#### 15.3.5 StrategyBatchRunner
+
+```python
+class StrategyBatchRunner:
+    def run_all(self, strategies: dict) -> BatchResults: ...
+    def run_all_fees(self, strategies: dict, cost_models: dict) -> BatchResults: ...
+
+class BatchResults:
+    def to_dataframe(self) -> pd.DataFrame: ...
+    def equity_curves(self) -> dict: ...
+    def best_by(self, metric: str) -> tuple: ...
+    def rank(self, metric: str) -> pd.DataFrame: ...
+```
+
+#### 15.3.6 BacktestAnalyzer
+
+```python
+class BacktestAnalyzer:
+    @staticmethod
+    def subperiod_metrics(result, split_dates) -> dict: ...
+    @staticmethod
+    def regime_conditional_metrics(result, regime_series) -> dict: ...
+    @staticmethod
+    def rolling_metric(result, metric, window) -> pd.Series: ...
+    @staticmethod
+    def trade_analysis_by_exit(result) -> pd.DataFrame: ...
+```
+
+### 15.4 Implementation Phases (BT-8–BT-10)
+
+| Phase | Content | Tests | Priority |
+|-------|---------|-------|----------|
+| **BT-8** | P0 critical fixes: `IntrabarLimitFill` + `MakerTakerCost` + OCO orders | `test_backtest_p0.py` | ★★★ |
+| **BT-9** | P1 enhancements: `BinanceCost` + `IntrabarSimulator` + `StrategyBatchRunner` + `exit_reason` | `test_backtest_p1.py` | ★★☆ |
+| **BT-10** | P2 analysis tools: annualization + DCA + `BacktestAnalyzer` + `fee_sweep` | `test_backtest_p2.py` | ★☆☆ |
+
+### 15.5 Backward Compatibility Guarantee
+
+| Existing API | After Enhancement | Compatibility |
+|-------------|-------------------|---------------|
+| `NextOpenFill()` | Original logic retained | ✅ Fully compatible |
+| `PercentCost(commission=0.001)` | Retained | ✅ Fully compatible |
+| `Order(symbol, side, qty)` | New `exit_reason=""` default | ✅ Fully compatible |
+| `Fill(...)` | New `exit_reason=""` default | ✅ Fully compatible |
+| `BacktestEngine(data, strategy)` | New `periods_per_year=None` | ✅ Fully compatible |
+
+Existing user code requires no modifications. New features are enabled by explicitly selecting new classes/parameters.
+
+### 15.6 Dependency Declaration
+
+```toml
+[project.optional-dependencies]
+backtest = ["stockstat"]                  # Core (includes BT-8–10 enhancements)
+optimize = ["optuna>=3.5"]                # BT-6 parameter optimization
+backtest_full = ["stockstat[backtest]", "stockstat[optimize]", "stockstat[matplotlib]"]
+```
+
+No new external dependencies. All enhancements are pure Python + pandas/numpy.
+
+---
+
+## 16. Pluggable Execution Model Design
+
+> **Added in v1.6 (BT-11–BT-14).** Builds on §15 enhancements by abstracting "how orders fill" into a pluggable `ExecutionModel`, injected into `BacktestEngine` via composition. Supports intrabar sub-bar execution **without adding a new engine class**. Design principle: general solution enriches library + simplified interface stays concise + strict backward compatibility.
+
+### 16.1 Design Motivation
+
+§15's BT-8–BT-10 addressed intrabar limit fills, Maker/Taker fees, and batch backtesting, but v5 research still exposed 5 structural gaps (see `working/PAXG-Weekend-Monday-Law-v5-redo/BACKTEST_IMPROVEMENT_REPORT_V2.md`):
+
+| Gap | Description | Root Cause |
+|-----|-------------|------------|
+| Gap-1 | Intrabar fill timing not tracked | `FillModel` returns only price |
+| Gap-2 | Same-bar entry + exit | Event loop t→t+1 constraint |
+| Gap-3 | Post-entry conditional exit scan | No intrabar forward-scan hook |
+| Gap-4 | Dual-fill → dual-cancel | OCO semantics insufficient |
+| Gap-5 | SL priority over TP within same bar | Broker has no priority sorting |
+
+The V1 approach (a separate `IntrabarExecutionEngine` class) had 8 compatibility blind spots. The V2 approach uses a pluggable `ExecutionModel` architecture: **one engine class + two execution modes**.
+
+### 16.2 Architecture
+
+```mermaid
+graph TB
+    subgraph "BacktestEngine (single engine class)"
+        ENG["execution_model parameter<br/>default: NextBarExecution"]
+        EM["ExecutionModel ABC"]
+        NB["NextBarExecution<br/>default: t→t+1 fill"]
+        IB["IntrabarExecution<br/>intrabar sub-bar matching"]
+    end
+
+    subgraph "IntrabarExecution internals"
+        FILL["IntrabarFillModel<br/>sub-bar scan + timing"]
+        SCAN["_scan_sub_bars<br/>pre-scan→OCO check→apply→exit scan"]
+        EXIT["_scan_exits<br/>limit/stop per-bar + market close at session end"]
+        OCO["register_oco_mutual<br/>both fill → both cancel"]
+    end
+
+    subgraph "Strategy layer (duck typing)"
+        STR["Strategy base class (unchanged)"]
+        MIX["IntrabarMixin (optional)<br/>define_exits()"]
+    end
+
+    ENG --> EM
+    EM --> NB
+    EM --> IB
+    IB --> FILL
+    IB --> SCAN
+    SCAN --> EXIT
+    SCAN --> OCO
+    STR -.-> MIX
+```
+
+### 16.3 Core Interfaces
+
+```python
+# execution_model.py (new file)
+
+class ExecutionModel(ABC):
+    """Execution model: decides how/when pending orders fill within a bar."""
+    @abstractmethod
+    def execute(self, engine, ctx, t, pending_orders) -> list[Fill]: ...
+    @property
+    @abstractmethod
+    def is_intrabar(self) -> bool: ...
+
+class NextBarExecution(ExecutionModel):
+    """Default: order submitted at t → fills at t+1 bar (existing behavior)."""
+    is_intrabar = False
+
+class IntrabarExecution(ExecutionModel):
+    """Intrabar: matches orders within a parent bar's sub-bar sequence."""
+    def __init__(self, intrabar_tf, parent_tf=None, fill_model=None): ...
+    def register_oco_mutual(self, order_a, order_b): ...
+    is_intrabar = True
+```
+
+### 16.4 File Changes
+
+| File | Change | Content |
+|------|--------|---------|
+| `execution_model.py` | **New** | `ExecutionModel` ABC + `NextBarExecution` + `IntrabarExecution` |
+| `fill_model.py` | New classes | `IntrabarFillResult` + `IntrabarFillModel` (inherits `IntrabarLimitFill`) |
+| `orders.py` | New fields | `Order.priority: int = 99` + `Fill.sub_bar_ts` + `Fill.sub_bar_index` |
+| `data_feed.py` | New method | `DataFeed.intrabar_slice()` |
+| `engine.py` | New param | `execution_model` parameter + intrabar branch + parent_tf iteration |
+| `context.py` | New methods | `intrabar_submit()` + `intrabar_submit_oco_mutual()` (mode-aware degradation) |
+| `broker.py` | New method | `submit_oco_mutual()` |
+| `strategy.py` | New class | `IntrabarMixin` (optional mixin with `define_exits` default) |
+
+### 16.5 Gap Resolution
+
+| Gap | Solution |
+|-----|----------|
+| Gap-1 | `Fill.sub_bar_ts` + `Fill.sub_bar_index` + `IntrabarFillModel.fill_with_timing()` |
+| Gap-2 | `IntrabarExecution` completes entry→exit lifecycle within a parent bar |
+| Gap-3 | Duck-typed `define_exits()` detection + `_scan_exits()` forward scan |
+| Gap-4 | `register_oco_mutual()` + pre-scan detects dual fills |
+| Gap-5 | `Order.priority` field + sort (SL priority=0 > TP priority=1) |
+
+### 16.6 Backward Compatibility Guarantee
+
+| Existing API | After Enhancement | Compatibility |
+|-------------|-------------------|---------------|
+| `BacktestEngine(data, strategy)` | New `execution_model=None` | ✅ Default `NextBarExecution` = existing behavior |
+| `FillModel` ABC | Unchanged | ✅ `fill_with_timing` is a non-abstract new method |
+| `Fill` / `Order` | New fields have defaults | ✅ Dataclass trailing defaults |
+| `Strategy` base class | Unchanged | ✅ Duck-typed `define_exits` detection |
+| `@strategy` functions | Unchanged | ✅ Function-style strategies fully compatible |
+| `ctx.intrabar_submit()` | Degrades in default mode | ✅ Falls back to `broker.submit` + warning |
+
+### 16.7 Implementation Phases (BT-11–BT-14)
+
+| Phase | Content | Tests | Priority |
+|-------|---------|-------|----------|
+| **BT-11** | ExecutionModel ABC + IntrabarFillModel + Fill/Order fields + intrabar_slice | `test_backtest_intrabar.py` (compat + FillModel + DataFeed) | ★★★ |
+| **BT-12** | IntrabarExecution + IntrabarMixin + OCO mutual + engine integration | same (same-bar exit + define_exits + priority + OCO) | ★★★ |
+| **BT-13** | v5 strategy migration validation (33 strategies × 4 fees = 132 runs) | `run_redo.py` (PnL error < 0.1%) | ★★☆ |
+| **BT-14** | Analysis & visualization adaptation | `plots_redo.py` | ★☆☆ |
+
+### 16.8 Validation Results
+
+- All 314 pre-existing tests pass (zero regression)
+- All 23 new intrabar tests pass
+- v5's 33 strategies × 4 fees = 132 runs, key strategy PnL error < 0.1%
+- Conclusion unchanged: no strategy beat buy-and-hold PAXG (+104.84%)
 
 ---
 

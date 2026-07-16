@@ -176,24 +176,76 @@ res = BacktestEngine(data=data, strategy=pair_trade,
                      initial_cash=10000, allow_short=True).run()
 ```
 
+### Intrabar 执行：同 bar 入场 + TP/SL 退出
+
+`IntrabarExecution` 模型支持在 parent bar（如日线）内部用子 bar（如 1h）模拟订单撮合全生命周期——同 bar 入场 + 退出扫描 + OCO 互斥 + 订单优先级。
+
+```python
+from stockstat.backtest import (
+    BacktestEngine, Strategy, IntrabarMixin, Order,
+    IntrabarExecution, BinanceCost,
+)
+
+class TPStrategy(Strategy, IntrabarMixin):
+    """市价入场 → intrabar 扫描 TP 限价 → 收盘兜底。"""
+    def on_bar(self, ctx):
+        o = ctx.current_price("PAXG/USDT", "open")
+        if o is None: return
+        ctx.intrabar_submit(Order("PAXG/USDT", "buy", 10.0, tag="entry"))
+        ctx.history["tp"] = o * 1.01  # 1% 止盈
+
+    def define_exits(self, entry_fill, ctx):
+        tp = ctx.history.get("tp")
+        return [
+            Order("PAXG/USDT", "sell", entry_fill.qty,
+                  order_type="limit", limit_price=tp,
+                  tag="tp", exit_reason="tp", priority=1),
+            Order("PAXG/USDT", "sell", entry_fill.qty,
+                  order_type="market", tag="close",
+                  exit_reason="close", priority=99),
+        ]
+
+res = BacktestEngine(
+    data={"PAXG/USDT": {"1d": paxg_1d, "1h": paxg_1h}},
+    strategy=TPStrategy(),
+    initial_cash=10000,
+    cost_model=BinanceCost(venue="spot"),
+    execution_model=IntrabarExecution(intrabar_tf="1h", parent_tf="1d"),  # ← 显式启用
+).run()
+```
+
+> 默认 `execution_model=None` 等价于 `NextBarExecution`（现有行为，完全兼容）。
+
 ### 回测能力一览
 
 | 能力 | 说明 |
 |------|------|
-| 自定义策略 | `Strategy` 基类 / `@strategy` 函数装饰器 |
+| 自定义策略 | `Strategy` 基类 / `@strategy` 函数装饰器 / **`IntrabarMixin`** |
 | 多标的交易组 | `{symbol: {tf: df}}` Universe |
 | 多时间尺度 | 自动以最细 tf 为主索引，高 tf ffill 对齐 |
 | 计算库指标 | `ctx.compute` 代理 `ComputeEngine`，含 `register()` |
-| 订单类型 | 市价 / 限价 / 止损 / 移动止损 |
-| 成本模型 | 比例 / 固定 / 阶梯 / 印花税 / 零成本 |
+| 订单类型 | 市价 / 限价 / 止损 / 移动止损 / **OCO 挂单对** / **互斥 OCO** |
+| 成本模型 | 比例 / 固定 / 阶梯 / 印花税 / 零成本 / **Maker/Taker 区分** / **Binance 现货合约+BNB** |
 | 做空 | `allow_short=True` |
 | 绩效 | Sharpe / Sortino / Calmar / 回撤 / 胜率 / 盈亏比 |
 | 可视化 | `plot_equity/plot_drawdown/plot_trades` 返回 PlotSpec |
 | **高级可视化** | `result.chart(name)` 返回 BacktestChartSpec；dashboard/heatmap/histogram；零 matplotlib 硬依赖 |
 | 参数优化 | 网格搜索 / optuna（extras）/ 走样 / 蒙特卡洛 |
 | 未来函数防护 | 默认 NextOpenFill + lookahead_audit |
+| **intrabar 限价成交** | `IntrabarLimitFill`：盘中价格穿越限价即成交 |
+| **intrabar 模拟器** | `IntrabarSimulator`：用更细 K 线模拟限价单成交时序 |
+| **可插拔执行模型** | `ExecutionModel`：`NextBarExecution`（默认）/ `IntrabarExecution`（intrabar 子 bar 撮合） |
+| **同 bar 入场+出场** | `IntrabarExecution`：parent bar 内完成入场→退出扫描全生命周期 |
+| **成交后退出扫描** | `IntrabarMixin.define_exits()`：入场成交后定义 TP/SL/条件退出 |
+| **订单优先级** | `Order(priority=...)`：同 bar 内 SL 优先于 TP |
+| **批量回测** | `StrategyBatchRunner`：多策略/多费率并行回测 |
+| **退出原因标记** | `Order(exit_reason=...)` + `result.exit_reason_stats()` |
+| **DCA 基准** | `dca_equity()` 定投基准 |
+| **子期间分析** | `BacktestAnalyzer.subperiod_metrics()` |
+| **状态条件分析** | `BacktestAnalyzer.regime_conditional_metrics()` |
+| **费率扫描** | `fee_sweep()` / `maker_taker_sweep()` |
 
-回测设计详见 [DESIGN_CN.md §12-13](DESIGN_CN.md#12-回测子系统设计)，阶段实现文档见 [docs/backtest/](docs/backtest/)。回测可视化示例见下文 [matplotlib 可视化](#matplotlib-可视化) 章节。
+回测设计详见 [DESIGN_CN.md §12-15](DESIGN_CN.md#12-回测子系统设计)，阶段实现文档见 [docs/backtest/](docs/backtest/)。回测可视化示例见下文 [matplotlib 可视化](#matplotlib-可视化) 章节。
 
 ## matplotlib 可视化
 
@@ -350,14 +402,16 @@ cd backend && python -m pytest tests/test_backend.py -v
 # 前端单元测试（指标、DSL、可视化）
 cd frontend && python -m pytest tests/test_frontend.py -v
 
-# 回测测试（接口、MVP、组合、多 tf、成本、绩效、优化、12 策略、可视化、在线真实数据）
+# 回测测试（接口、MVP、组合、多 tf、成本、绩效、优化、12 策略、可视化、在线真实数据、引擎增强）
 cd frontend && python -m pytest tests/test_backtest_iface.py tests/test_backtest_mvp.py \
     tests/test_backtest_portfolio.py tests/test_backtest_multitf.py \
     tests/test_backtest_cost.py tests/test_backtest_metrics.py \
     tests/test_backtest_optimize.py tests/test_backtest_strategies.py \
     tests/test_backtest_viz_iface.py tests/test_backtest_viz_mpl.py \
     tests/test_backtest_viz_advanced.py tests/test_backtest_viz_dashboard.py \
-    tests/test_backtest_viz_online.py -v
+    tests/test_backtest_viz_online.py \
+    tests/test_backtest_p0.py tests/test_backtest_p1.py tests/test_backtest_p2.py \
+    tests/test_backtest_intrabar.py -v
 
 # 集成测试（真实数据：经典统计 + PAXG 周末相关性）
 cd frontend && python -m pytest tests/test_integration.py -v -s
@@ -389,9 +443,10 @@ cd frontend && python -m pytest tests/test_matplotlib_charts.py -v
 ## 文档
 
 - [使用文档](docs/USAGE_CN.md) — 详细示例与预期结果
-- [设计报告](DESIGN_CN.md) — 完整架构设计（含 [§12 回测子系统](DESIGN_CN.md#12-回测子系统设计) · [§14 回测可视化](DESIGN_CN.md#13-回测可视化子系统设计)）
-- [回测阶段文档](docs/backtest/) — BT-0 ~ BT-7 + BT-V0 ~ V3 + 在线验证报告
+- [设计报告](DESIGN_CN.md) — 完整架构设计（含 [§12 回测子系统](DESIGN_CN.md#12-回测子系统设计) · [§13 回测可视化](DESIGN_CN.md#13-回测可视化子系统设计) · [§15 引擎增强](DESIGN_CN.md#15-回测引擎增强子系统设计) · [§16 可插拔执行模型](DESIGN_CN.md#16-可插拔执行模型设计)）
+- [回测阶段文档](docs/backtest/) — BT-0 ~ BT-14 + BT-V0 ~ V3 + 在线验证报告
 - [测试报告](reports/TEST_REPORT.md) — 测试结果
+- [PAXG 周末规律研究](working/PAXG-Weekend-Monday-Law-v5-redo/) — v1~v5 完整研究 + 引擎改进报告
 
 ## 配置
 

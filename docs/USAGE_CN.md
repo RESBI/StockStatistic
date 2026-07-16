@@ -855,24 +855,281 @@ eng = BacktestEngine(data=data, strategy=s, lookahead_audit=True)
 # 若策略误访问 > t 的数据，抛 LookaheadError
 ```
 
+### 示例 13.12：Binance 费率模型（4 种预设）
+
+```python
+from stockstat.backtest import BinanceCost, BINANCE_SPOT, BINANCE_SPOT_BNB, \
+    BINANCE_FUTURES, BINANCE_FUTURES_BNB, MakerTakerCost
+
+# 4 种预设：现货/合约 × BNB 无/有
+# F1 现货无 BNB:  maker 0.100% / taker 0.100%
+# F2 现货+BNB:    maker 0.075% / taker 0.075%  (−25%)
+# F3 合约无 BNB:  maker 0.020% / taker 0.050%
+# F4 合约+BNB:    maker 0.018% / taker 0.045%  (−10%)
+
+eng = BacktestEngine(data=data, strategy=s,
+                     cost_model=BINANCE_FUTURES_BNB,  # 最低费率
+                     initial_cash=10000)
+
+# 也可自定义 Maker/Taker 费率
+custom = MakerTakerCost(maker_rate=0.0002, taker_rate=0.0005, slippage=0.0)
+# LIMIT → maker_rate, MARKET/STOP → taker_rate
+```
+
+### 示例 13.13：Intrabar 执行（同 bar 入场+出场）
+
+`IntrabarExecution` 模型在 parent bar（如日线）内部用子 bar（如 1h）模拟订单撮合——同 bar 内完成入场→退出全生命周期。
+
+```python
+from stockstat.backtest import (
+    BacktestEngine, Strategy, IntrabarMixin, Order,
+    IntrabarExecution, BinanceCost,
+)
+
+class SimpleTP(Strategy, IntrabarMixin):
+    """市价入场 → intrabar 扫描 TP 限价 → 收盘兜底。"""
+    def on_bar(self, ctx):
+        o = ctx.current_price("BTC/USDT", "open")
+        if o is None:
+            return
+        # 用 intrabar_submit 提交（在当前 bar 的子 bar 上执行）
+        ctx.intrabar_submit(
+            Order("BTC/USDT", "buy", 0.1, tag="entry")
+        )
+        ctx.history["tp_price"] = o * 1.01  # 1% 止盈
+
+    def define_exits(self, entry_fill, ctx):
+        """入场成交后自动调用，返回退出订单列表。"""
+        tp = ctx.history.get("tp_price")
+        if tp is None:
+            return []
+        return [
+            # TP 限价（优先级 1，成交则止盈）
+            Order("BTC/USDT", "sell", entry_fill.qty,
+                  order_type="limit", limit_price=tp,
+                  tag="tp", exit_reason="tp", priority=1),
+            # 收盘市价兜底（优先级 99，未成交则在收盘平仓）
+            Order("BTC/USDT", "sell", entry_fill.qty,
+                  order_type="market", tag="close",
+                  exit_reason="close", priority=99),
+        ]
+
+# 需要同时提供 1d 和 1h 数据
+data = {"BTC/USDT": {"1d": daily_df, "1h": hourly_df}}
+
+res = BacktestEngine(
+    data=data,
+    strategy=SimpleTP(),
+    initial_cash=10000,
+    cost_model=BinanceCost(venue="spot"),
+    execution_model=IntrabarExecution(intrabar_tf="1h", parent_tf="1d"),  # ← 显式启用
+).run()
+
+# 退出原因统计
+print(res.exit_reason_stats())
+# {'tp': {'count': 45, 'total_pnl': 120.5, 'avg_pnl': 2.68},
+#  'close': {'count': 55, 'total_pnl': -30.2, 'avg_pnl': -0.55}}
+```
+
+> **关键**：默认 `execution_model=None` 等价于 `NextBarExecution`（现有行为）。只有传入 `IntrabarExecution(...)` 才启用 intrabar 模式。
+
+### 示例 13.14：双向挂单互斥（OCO Mutual）
+
+核心 B 策略族需要同时挂买限+卖限，若双向均成交则取消交易（避免净零持仓白付手续费）。
+
+```python
+class DualLimit(Strategy, IntrabarMixin):
+    """双向限价挂单 + 利润退出。"""
+    def on_bar(self, ctx):
+        o = ctx.current_price("PAXG/USDT", "open")
+        if o is None:
+            return
+        k = 0.005  # 挂单宽度 0.5%
+        q = 500 / o  # 各半仓位
+        buy = Order("PAXG/USDT", "buy", q,
+                    order_type="limit", limit_price=o * (1 - k),
+                    tag="entry_buy", exit_reason="entry")
+        sell = Order("PAXG/USDT", "sell", q,
+                     order_type="limit", limit_price=o * (1 + k),
+                     tag="entry_sell", exit_reason="entry")
+        # 互斥 OCO：双向均成交 → 双取消
+        ctx.intrabar_submit_oco_mutual(buy, sell)
+
+    def define_exits(self, entry_fill, ctx):
+        # 利润退出：盈利 0.3% 即平仓
+        if entry_fill.side.value == "buy":
+            target = entry_fill.price * 1.003
+        else:
+            target = entry_fill.price * 0.997
+        side = "sell" if entry_fill.side.value == "buy" else "buy"
+        return [
+            Order("PAXG/USDT", side, entry_fill.qty,
+                  order_type="limit", limit_price=target,
+                  tag="profit", exit_reason="profit", priority=1),
+            Order("PAXG/USDT", side, entry_fill.qty,
+                  order_type="market", tag="close",
+                  exit_reason="close", priority=99),
+        ]
+```
+
+### 示例 13.15：订单优先级（SL 优先于 TP）
+
+同一子 bar 内止损和止盈都可能触发时，通过 `priority` 字段控制撮合顺序（0 = 最高优先）。
+
+```python
+class TPWithSL(Strategy, IntrabarMixin):
+    """入场后同时挂 TP 和 SL，同 bar 内 SL 优先检查。"""
+    def define_exits(self, entry_fill, ctx):
+        side = "sell" if entry_fill.side.value == "buy" else "buy"
+        qty = entry_fill.qty
+        if entry_fill.side.value == "buy":
+            tp_price = entry_fill.price * 1.009  # +0.9% 止盈
+            sl_price = entry_fill.price * 0.9865  # −1.35% 止损
+        else:
+            tp_price = entry_fill.price * 0.991
+            sl_price = entry_fill.price * 1.0135
+
+        return [
+            # SL 优先级 0（最高）：同 bar 内先检查
+            Order("BTC/USDT", side, qty,
+                  order_type="stop", stop_price=sl_price,
+                  tag="sl", exit_reason="sl", priority=0),
+            # TP 优先级 1
+            Order("BTC/USDT", side, qty,
+                  order_type="limit", limit_price=tp_price,
+                  tag="tp", exit_reason="tp", priority=1),
+            # 收盘兜底 优先级 99
+            Order("BTC/USDT", side, qty,
+                  order_type="market", tag="close",
+                  exit_reason="close", priority=99),
+        ]
+```
+
+### 示例 13.16：批量回测（多策略 × 多费率）
+
+```python
+from stockstat.backtest import StrategyBatchRunner
+
+runner = StrategyBatchRunner(
+    data=data,
+    initial_cash=10000,
+    cost_model=BINANCE_SPOT,
+    allow_short=True,
+    periods_per_year=52,
+)
+
+# 多策略并行
+results = runner.run_all({
+    "ma_cross": ma_cross_strategy,
+    "rsi_reversal": rsi_strategy,
+    "bollinger": boll_strategy,
+})
+
+# 汇总为 DataFrame
+df = results.to_dataframe()
+print(df[["total_return", "sharpe", "max_drawdown", "win_rate"]].round(4))
+
+# 按 Sharpe 排名
+ranked = results.rank("sharpe")
+print(ranked)
+
+# 多策略 × 多费率
+fee_models = {
+    "F1_SpotNoBNB": BINANCE_SPOT,
+    "F4_FutBNB": BINANCE_FUTURES_BNB,
+}
+results_all_fees = runner.run_all_fees(
+    {"ma_cross": ma_cross_strategy, "rsi": rsi_strategy},
+    fee_models,
+)
+df_all = results_all_fees.to_dataframe()
+```
+
+### 示例 13.17：子期间与状态分析
+
+```python
+from stockstat.backtest import BacktestAnalyzer
+
+res = BacktestEngine(data=data, strategy=s, initial_cash=10000).run()
+
+# 子期间分析：2024 前后
+sub = BacktestAnalyzer.subperiod_metrics(
+    res, split_dates=[pd.Timestamp("2024-01-01")]
+)
+# {'2020-2023': {'sharpe': 0.85, 'total_return': 0.12},
+#  '2024-2026': {'sharpe': -0.32, 'total_return': -0.05}}
+
+# 状态条件分析：高/低波动状态
+atr = data["BTC/USDT"]["1d"]["close"].pct_change().rolling(30).std()
+regime = pd.Series("low_vol", index=atr.index)
+regime[atr > atr.quantile(0.75)] = "high_vol"
+
+reg = BacktestAnalyzer.regime_conditional_metrics(res, regime)
+# {'high_vol': {'sharpe': 1.20, 'total_return': 0.08},
+#  'low_vol':  {'sharpe': 0.15, 'total_return': 0.02}}
+
+# 按退出原因分析
+exit_stats = res.exit_reason_stats()
+# {'tp': {'count': 45, 'avg_pnl': 2.68},
+#  'sl': {'count': 20, 'avg_pnl': -3.10},
+#  'close': {'count': 35, 'avg_pnl': -0.15}}
+```
+
+### 示例 13.18：DCA 基准与费率扫描
+
+```python
+from stockstat.backtest import dca_equity, fee_sweep, maker_taker_sweep
+
+# DCA 定投基准
+prices = data["BTC/USDT"]["1d"]["close"]
+dca_eq = dca_equity(10000, prices, schedule="weekly")
+# 每周定投的资金曲线
+
+# 费率敏感性扫描
+sweep_results = fee_sweep(
+    data=data, strategy=ma_cross_strategy,
+    initial_cash=10000,
+    commissions=[0.0001, 0.0003, 0.0005, 0.001, 0.002],
+)
+# 返回 DataFrame: commission → sharpe, total_return, max_drawdown
+
+# Maker/Taker 费率组合扫描
+mt_results = maker_taker_sweep(
+    data=data, strategy=ma_cross_strategy,
+    initial_cash=10000,
+    maker_rates=[0.0002, 0.0005, 0.001],
+    taker_rates=[0.0005, 0.001, 0.002],
+)
+```
+
 回测可视化（仪表盘、热力图、收益分布等 9 种图表）见 [§14 回测可视化](#14-回测可视化)。
 
 ### 回测 API 速查
 
 | 类/函数 | 说明 |
 |---------|------|
-| `BacktestEngine(data, strategy, ...)` | 主引擎 |
-| `@strategy` / `Strategy` | 策略定义 |
+| `BacktestEngine(data, strategy, ...)` | 主引擎（含 `execution_model` 参数） |
+| `@strategy` / `Strategy` / `IntrabarMixin` | 策略定义（函数式/类式/intrabar） |
 | `ctx.get(sym, tf, lookback)` | 获取 ≤ t 切片 |
 | `ctx.compute` | ComputeEngine 代理（含 register/call） |
-| `ctx.broker.submit(Order)` | 下单 |
+| `ctx.broker.submit(Order)` | 下单（默认模式） |
+| `ctx.intrabar_submit(Order)` | intrabar 下单（intrabar 模式） |
+| `ctx.intrabar_submit_oco_mutual(a, b)` | 互斥 OCO 双向挂单 |
 | `ctx.portfolio.get_position(sym)` | 查持仓 |
 | `ctx.history` | 策略状态 scratchpad |
-| `Order(sym, side, qty, order_type=...)` | 订单 |
-| `PercentCost / FixedCost / StampDutyCost / ZeroCost` | 成本模型 |
-| `NextOpenFill / VWAPFill / WorstPriceFill` | 成交模型 |
+| `Order(sym, side, qty, order_type=..., priority=...)` | 订单（含优先级字段） |
+| `PercentCost / FixedCost / StampDutyCost / ZeroCost` | 基础成本模型 |
+| `MakerTakerCost / BinanceCost` | Maker/Taker 与 Binance 费率 |
+| `BINANCE_SPOT / _BNB / FUTURES / _BNB` | Binance 4 种预设 |
+| `NextOpenFill / VWAPFill / WorstPriceFill / IntrabarLimitFill` | 成交模型 |
+| `ExecutionModel / NextBarExecution / IntrabarExecution` | 可插拔执行模型 |
+| `IntrabarFillModel / IntrabarFillResult` | intrabar 成交扫描+时间追踪 |
 | `res.summary() / metrics() / plot_equity() / to_csv()` | 结果 |
+| `res.exit_reason_stats()` | 退出原因统计 |
 | `res.chart(name) / render(name, path) / render_all(dir)` | 回测可视化（§14） |
+| `StrategyBatchRunner` | 多策略/多费率批量回测 |
+| `BacktestAnalyzer` | 子期间/状态/滚动分析 |
+| `dca_equity() / fee_sweep() / maker_taker_sweep()` | 基准与费率扫描 |
 | `grid_search / optuna_search / walk_forward / monte_carlo_equity` | 优化 |
 
 ---

@@ -180,20 +180,32 @@ res = BacktestEngine(data=data, strategy=pair_trade,
 
 | Capability | Description |
 |------------|-------------|
-| Custom strategy | `Strategy` base class / `@strategy` function decorator |
+| Custom strategy | `Strategy` base class / `@strategy` function decorator / **`IntrabarMixin`** |
 | Multi-instrument group | `{symbol: {tf: df}}` Universe |
 | Multi-timeframe | finest tf drives master index; higher tfs ffill-aligned |
 | Compute-library indicators | `ctx.compute` proxies `ComputeEngine`, includes `register()` |
-| Order types | market / limit / stop / trailing stop |
-| Cost models | percent / fixed / tiered / stamp duty / zero |
+| Order types | market / limit / stop / trailing stop / **OCO** / **mutual OCO** |
+| Cost models | percent / fixed / tiered / stamp duty / zero / **Maker/Taker** / **Binance spot+futures+BNB** |
 | Short selling | `allow_short=True` |
 | Performance | Sharpe / Sortino / Calmar / drawdown / win rate / profit factor |
 | Visualization | `plot_equity/plot_drawdown/plot_trades` return PlotSpec |
 | **Advanced viz** | `result.chart(name)` returns BacktestChartSpec; dashboard/heatmap/histogram; zero matplotlib hard-dependency |
 | Optimization | grid search / optuna (extras) / walk-forward / Monte Carlo |
 | Lookahead protection | default NextOpenFill + lookahead_audit |
+| **Intrabar limit fill** | `IntrabarLimitFill`: fills when intrabar price crosses limit |
+| **Intrabar simulator** | `IntrabarSimulator`: simulate limit fills with finer bars |
+| **Pluggable execution** | `ExecutionModel`: `NextBarExecution` (default) / `IntrabarExecution` (sub-bar matching) |
+| **Same-bar entry+exit** | `IntrabarExecution`: full lifecycle within a parent bar |
+| **Post-entry exit scan** | `IntrabarMixin.define_exits()`: TP/SL/conditional exit after entry fill |
+| **Order priority** | `Order(priority=...)`: SL before TP within same sub-bar |
+| **Batch backtest** | `StrategyBatchRunner`: multi-strategy/multi-fee parallel runs |
+| **Exit reason tags** | `Order(exit_reason=...)` + `result.exit_reason_stats()` |
+| **DCA benchmark** | `dca_equity()` |
+| **Subperiod analysis** | `BacktestAnalyzer.subperiod_metrics()` |
+| **Regime analysis** | `BacktestAnalyzer.regime_conditional_metrics()` |
+| **Fee sweep** | `fee_sweep()` / `maker_taker_sweep()` |
 
-See [DESIGN.md §12-13](DESIGN.md#12-backtest-subsystem-design) for the backtest design and [docs/backtest/](docs/backtest/) for phase-by-phase docs. Backtest visualization examples are in the [Visualization with Matplotlib](#visualization-with-matplotlib) section below.
+See [DESIGN.md §12-16](DESIGN.md#12-backtest-subsystem-design) for the backtest design and [docs/backtest/](docs/backtest/) for phase-by-phase docs. Backtest visualization examples are in the [Visualization with Matplotlib](#visualization-with-matplotlib) section below.
 
 ## Visualization with Matplotlib
 

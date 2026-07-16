@@ -854,24 +854,273 @@ eng = BacktestEngine(data=data, strategy=s, lookahead_audit=True)
 # If the strategy accidentally accesses data > t, raises LookaheadError
 ```
 
+### Example 13.12: Binance fee models (4 presets)
+
+```python
+from stockstat.backtest import BinanceCost, BINANCE_SPOT, BINANCE_SPOT_BNB, \
+    BINANCE_FUTURES, BINANCE_FUTURES_BNB, MakerTakerCost
+
+# 4 presets: spot/futures × BNB no/yes
+# F1 Spot No BNB:  maker 0.100% / taker 0.100%
+# F2 Spot + BNB:    maker 0.075% / taker 0.075%  (-25%)
+# F3 Futures No BNB: maker 0.020% / taker 0.050%
+# F4 Futures + BNB:  maker 0.018% / taker 0.045%  (-10%)
+
+eng = BacktestEngine(data=data, strategy=s,
+                     cost_model=BINANCE_FUTURES_BNB,  # lowest fees
+                     initial_cash=10000)
+
+# Custom Maker/Taker rates also possible
+custom = MakerTakerCost(maker_rate=0.0002, taker_rate=0.0005, slippage=0.0)
+# LIMIT → maker_rate, MARKET/STOP → taker_rate
+```
+
+### Example 13.13: Intrabar execution (same-bar entry + exit)
+
+`IntrabarExecution` model simulates order matching within a parent bar (e.g. daily) using sub-bars (e.g. hourly) — completing the full entry→exit lifecycle within a single parent bar.
+
+```python
+from stockstat.backtest import (
+    BacktestEngine, Strategy, IntrabarMixin, Order,
+    IntrabarExecution, BinanceCost,
+)
+
+class SimpleTP(Strategy, IntrabarMixin):
+    """Market entry → intrabar TP scan → close fallback."""
+    def on_bar(self, ctx):
+        o = ctx.current_price("BTC/USDT", "open")
+        if o is None:
+            return
+        # intrabar_submit: order executes on current bar's sub-bars
+        ctx.intrabar_submit(
+            Order("BTC/USDT", "buy", 0.1, tag="entry")
+        )
+        ctx.history["tp_price"] = o * 1.01  # 1% take-profit
+
+    def define_exits(self, entry_fill, ctx):
+        """Called automatically after entry fill; return exit orders."""
+        tp = ctx.history.get("tp_price")
+        if tp is None:
+            return []
+        return [
+            # TP limit (priority 1: fills if price reaches target)
+            Order("BTC/USDT", "sell", entry_fill.qty,
+                  order_type="limit", limit_price=tp,
+                  tag="tp", exit_reason="tp", priority=1),
+            # Close fallback (priority 99: market at session close)
+            Order("BTC/USDT", "sell", entry_fill.qty,
+                  order_type="market", tag="close",
+                  exit_reason="close", priority=99),
+        ]
+
+# Provide both 1d and 1h data
+data = {"BTC/USDT": {"1d": daily_df, "1h": hourly_df}}
+
+res = BacktestEngine(
+    data=data,
+    strategy=SimpleTP(),
+    initial_cash=10000,
+    cost_model=BinanceCost(venue="spot"),
+    execution_model=IntrabarExecution(intrabar_tf="1h", parent_tf="1d"),  # ← explicit
+).run()
+
+# Exit reason statistics
+print(res.exit_reason_stats())
+# {'tp': {'count': 45, 'total_pnl': 120.5, 'avg_pnl': 2.68},
+#  'close': {'count': 55, 'total_pnl': -30.2, 'avg_pnl': -0.55}}
+```
+
+> **Key**: default `execution_model=None` is equivalent to `NextBarExecution` (existing behavior). Only passing `IntrabarExecution(...)` enables intrabar mode.
+
+### Example 13.14: Mutual OCO (dual limit orders)
+
+When both buy-limit and sell-limit fill within the same bar, the trade is cancelled (avoiding a net-zero position with wasted fees).
+
+```python
+class DualLimit(Strategy, IntrabarMixin):
+    """Dual limit entry + profit exit."""
+    def on_bar(self, ctx):
+        o = ctx.current_price("PAXG/USDT", "open")
+        if o is None:
+            return
+        k = 0.005  # 0.5% width
+        q = 500 / o  # half position each
+        buy = Order("PAXG/USDT", "buy", q,
+                    order_type="limit", limit_price=o * (1 - k),
+                    tag="entry_buy", exit_reason="entry")
+        sell = Order("PAXG/USDT", "sell", q,
+                     order_type="limit", limit_price=o * (1 + k),
+                     tag="entry_sell", exit_reason="entry")
+        # Mutual OCO: both fill → both cancel
+        ctx.intrabar_submit_oco_mutual(buy, sell)
+
+    def define_exits(self, entry_fill, ctx):
+        # Profit exit: close when profit >= 0.3%
+        if entry_fill.side.value == "buy":
+            target = entry_fill.price * 1.003
+        else:
+            target = entry_fill.price * 0.997
+        side = "sell" if entry_fill.side.value == "buy" else "buy"
+        return [
+            Order("PAXG/USDT", side, entry_fill.qty,
+                  order_type="limit", limit_price=target,
+                  tag="profit", exit_reason="profit", priority=1),
+            Order("PAXG/USDT", side, entry_fill.qty,
+                  order_type="market", tag="close",
+                  exit_reason="close", priority=99),
+        ]
+```
+
+### Example 13.15: Order priority (SL before TP)
+
+When both SL and TP could trigger in the same sub-bar, use the `priority` field to control matching order (0 = highest).
+
+```python
+class TPWithSL(Strategy, IntrabarMixin):
+    """Entry with TP and SL; SL checked first in same bar."""
+    def define_exits(self, entry_fill, ctx):
+        side = "sell" if entry_fill.side.value == "buy" else "buy"
+        qty = entry_fill.qty
+        if entry_fill.side.value == "buy":
+            tp_price = entry_fill.price * 1.009  # +0.9% TP
+            sl_price = entry_fill.price * 0.9865  # -1.35% SL
+        else:
+            tp_price = entry_fill.price * 0.991
+            sl_price = entry_fill.price * 1.0135
+
+        return [
+            # SL priority 0 (highest): checked first in each sub-bar
+            Order("BTC/USDT", side, qty,
+                  order_type="stop", stop_price=sl_price,
+                  tag="sl", exit_reason="sl", priority=0),
+            # TP priority 1
+            Order("BTC/USDT", side, qty,
+                  order_type="limit", limit_price=tp_price,
+                  tag="tp", exit_reason="tp", priority=1),
+            # Close fallback priority 99
+            Order("BTC/USDT", side, qty,
+                  order_type="market", tag="close",
+                  exit_reason="close", priority=99),
+        ]
+```
+
+### Example 13.16: Batch backtest (multi-strategy × multi-fee)
+
+```python
+from stockstat.backtest import StrategyBatchRunner
+
+runner = StrategyBatchRunner(
+    data=data,
+    initial_cash=10000,
+    cost_model=BINANCE_SPOT,
+    allow_short=True,
+    periods_per_year=52,
+)
+
+# Multiple strategies
+results = runner.run_all({
+    "ma_cross": ma_cross_strategy,
+    "rsi_reversal": rsi_strategy,
+    "bollinger": boll_strategy,
+})
+
+# Summary DataFrame
+df = results.to_dataframe()
+print(df[["total_return", "sharpe", "max_drawdown", "win_rate"]].round(4))
+
+# Rank by Sharpe
+ranked = results.rank("sharpe")
+
+# Multi-strategy × multi-fee
+fee_models = {
+    "F1_SpotNoBNB": BINANCE_SPOT,
+    "F4_FutBNB": BINANCE_FUTURES_BNB,
+}
+results_all_fees = runner.run_all_fees(
+    {"ma_cross": ma_cross_strategy, "rsi": rsi_strategy},
+    fee_models,
+)
+```
+
+### Example 13.17: Subperiod and regime analysis
+
+```python
+from stockstat.backtest import BacktestAnalyzer
+
+res = BacktestEngine(data=data, strategy=s, initial_cash=10000).run()
+
+# Subperiod analysis: pre/post 2024
+sub = BacktestAnalyzer.subperiod_metrics(
+    res, split_dates=[pd.Timestamp("2024-01-01")]
+)
+
+# Regime-conditional: high/low volatility
+atr = data["BTC/USDT"]["1d"]["close"].pct_change().rolling(30).std()
+regime = pd.Series("low_vol", index=atr.index)
+regime[atr > atr.quantile(0.75)] = "high_vol"
+
+reg = BacktestAnalyzer.regime_conditional_metrics(res, regime)
+
+# Exit reason analysis
+exit_stats = res.exit_reason_stats()
+# {'tp': {'count': 45, 'avg_pnl': 2.68},
+#  'sl': {'count': 20, 'avg_pnl': -3.10},
+#  'close': {'count': 35, 'avg_pnl': -0.15}}
+```
+
+### Example 13.18: DCA benchmark and fee sweep
+
+```python
+from stockstat.backtest import dca_equity, fee_sweep, maker_taker_sweep
+
+# DCA benchmark
+prices = data["BTC/USDT"]["1d"]["close"]
+dca_eq = dca_equity(10000, prices, schedule="weekly")
+
+# Fee sensitivity sweep
+sweep_results = fee_sweep(
+    data=data, strategy=ma_cross_strategy,
+    initial_cash=10000,
+    commissions=[0.0001, 0.0003, 0.0005, 0.001, 0.002],
+)
+
+# Maker/Taker rate combination sweep
+mt_results = maker_taker_sweep(
+    data=data, strategy=ma_cross_strategy,
+    initial_cash=10000,
+    maker_rates=[0.0002, 0.0005, 0.001],
+    taker_rates=[0.0005, 0.001, 0.002],
+)
+```
+
 Backtest visualization (dashboard, heatmaps, return distributions — 9 chart types) is covered in [§14 Backtest Visualization](#14-backtest-visualization).
 
 ### Backtest API cheat sheet
 
 | Class/Function | Description |
 |----------------|-------------|
-| `BacktestEngine(data, strategy, ...)` | main engine |
-| `@strategy` / `Strategy` | strategy definition |
+| `BacktestEngine(data, strategy, ...)` | main engine (with `execution_model` param) |
+| `@strategy` / `Strategy` / `IntrabarMixin` | strategy definition (function/class/intrabar) |
 | `ctx.get(sym, tf, lookback)` | get ≤ t slice |
 | `ctx.compute` | ComputeEngine proxy (with register/call) |
-| `ctx.broker.submit(Order)` | place order |
+| `ctx.broker.submit(Order)` | place order (default mode) |
+| `ctx.intrabar_submit(Order)` | intrabar order (intrabar mode) |
+| `ctx.intrabar_submit_oco_mutual(a, b)` | mutual OCO dual limit |
 | `ctx.portfolio.get_position(sym)` | inspect position |
 | `ctx.history` | strategy state scratchpad |
-| `Order(sym, side, qty, order_type=...)` | order |
-| `PercentCost / FixedCost / StampDutyCost / ZeroCost` | cost models |
-| `NextOpenFill / VWAPFill / WorstPriceFill` | fill models |
+| `Order(sym, side, qty, order_type=..., priority=...)` | order (with priority field) |
+| `PercentCost / FixedCost / StampDutyCost / ZeroCost` | basic cost models |
+| `MakerTakerCost / BinanceCost` | Maker/Taker & Binance fees |
+| `BINANCE_SPOT / _BNB / FUTURES / _BNB` | Binance 4 presets |
+| `NextOpenFill / VWAPFill / WorstPriceFill / IntrabarLimitFill` | fill models |
+| `ExecutionModel / NextBarExecution / IntrabarExecution` | pluggable execution models |
+| `IntrabarFillModel / IntrabarFillResult` | intrabar fill scan + timing |
 | `res.summary() / metrics() / plot_equity() / to_csv()` | result |
+| `res.exit_reason_stats()` | exit reason statistics |
 | `res.chart(name) / render(name, path) / render_all(dir)` | backtest visualization (§14) |
+| `StrategyBatchRunner` | multi-strategy/multi-fee batch |
+| `BacktestAnalyzer` | subperiod/regime/rolling analysis |
+| `dca_equity() / fee_sweep() / maker_taker_sweep()` | benchmark & fee sweep |
 | `grid_search / optuna_search / walk_forward / monte_carlo_equity` | optimization |
 
 ---

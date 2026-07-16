@@ -43,6 +43,8 @@ class Order:
     time_in_force: TimeInForce | str = TimeInForce.GTC
     tag: str = ""
     order_id: str = field(default="", repr=False)
+    exit_reason: str = ""
+    priority: int = 99  # 0 = highest; 99 = default (lowest)
 
     def __post_init__(self):
         if isinstance(self.side, str):
@@ -71,6 +73,9 @@ class Fill:
     slippage_cost: float = 0.0
     ts: object = None
     tag: str = ""
+    exit_reason: str = ""
+    sub_bar_ts: object = None
+    sub_bar_index: int = -1
 
     def __post_init__(self):
         if isinstance(self.side, str):

@@ -1,8 +1,8 @@
 # StockStat — 可编程金融标的统计计算平台 设计报告
 
-> **版本**: v1.4  
+> **版本**: v1.5  
 > **日期**: 2026-07-16  
-> **状态**: 设计阶段（新增回测可视化子系统）
+> **状态**: 设计阶段（新增回测引擎增强子系统 BT-8~BT-10）
 
 ---
 
@@ -22,6 +22,7 @@
 12. [回测子系统设计](#12-回测子系统设计)
 13. [回测可视化子系统设计](#13-回测可视化子系统设计)
 14. [回测阶段实现文档索引](#14-回测阶段实现文档索引)
+15. [回测引擎增强子系统设计](#15-回测引擎增强子系统设计)
 
 ---
 
@@ -2139,6 +2140,13 @@ backtest_full = ["stockstat[backtest]", "stockstat[optimize]",
 | BT-5 | [docs/backtest/BT5_CN.md](docs/backtest/BT5_CN.md) | 绩效/报告/可视化 | `test_backtest_metrics.py` |
 | BT-6 | [docs/backtest/BT6_CN.md](docs/backtest/BT6_CN.md) | 优化/走样/蒙特卡洛 | `test_backtest_optimize.py` |
 | BT-7 | [docs/backtest/BT7_CN.md](docs/backtest/BT7_CN.md) | DSL 集成/12 策略 | `test_backtest_strategies.py` |
+| BT-8 | [docs/backtest/BT8_CN.md](docs/backtest/BT8_CN.md) | P0 致命修复：IntrabarLimitFill + MakerTakerCost + OCO | `test_backtest_p0.py` |
+| BT-9 | [docs/backtest/BT9_CN.md](docs/backtest/BT9_CN.md) | P1 重要增强：IntrabarSimulator + BatchRunner + exit_reason | `test_backtest_p1.py` |
+| BT-10 | [docs/backtest/BT10_CN.md](docs/backtest/BT10_CN.md) | P2 分析工具：DCA + Analyzer + fee_sweep | `test_backtest_p2.py` |
+| BT-11 | `working/PAXG-Weekend-Monday-Law-v5-redo/STAGE_REPORT.md` | ExecutionModel ABC + IntrabarFillModel + Fill/Order 字段扩展 | `test_backtest_intrabar.py` |
+| BT-12 | 同上 | IntrabarExecution + IntrabarMixin + OCO mutual + 优先级 | `test_backtest_intrabar.py` |
+| BT-13 | 同上 | v5 策略迁移（33 策略 × 4 费率 = 132 次回测验证） | `run_redo.py` |
+| BT-14 | 同上 | 分析与可视化适配 | `plots_redo.py` |
 
 ### 14.2 回测可视化（BT-V 系列 + 在线验证）
 
@@ -2149,6 +2157,289 @@ backtest_full = ["stockstat[backtest]", "stockstat[optimize]",
 | BT-V2 | [docs/backtest/BTV2_CN.md](docs/backtest/BTV2_CN.md) | histogram/heatmap/bar 高级图表 | `test_backtest_viz_advanced.py` |
 | BT-V3 | [docs/backtest/BTV3_CN.md](docs/backtest/BTV3_CN.md) | dashboard 组合 + 交易标注 | `test_backtest_viz_dashboard.py` |
 | BT-V Online | [docs/backtest/BT_VIZ_ONLINE_REPORT_CN.md](docs/backtest/BT_VIZ_ONLINE_REPORT_CN.md) | 真实数据在线验证 + 13 张图像 | `test_backtest_viz_online.py` |
+
+---
+
+## 15. 回测引擎增强子系统设计
+
+> **新增于 v1.5**。基于 v5 研究实践中暴露的 12 项不足（详见 `working/PAXG-Weekend-Monday-Law-v5/BACKTEST_IMPROVEMENT_REPORT.md`），对回测子系统（§12）进行增强。增强以**向后兼容、组合优先、最小侵入**为原则，通过新增类/方法实现，不破坏现有 API。
+
+### 15.1 设计目标
+
+| 目标 | 说明 |
+|------|------|
+| **限价单 intrabar 成交** | 限价单应在盘中价格穿越限价水平时成交，而非仅检查开盘价 |
+| **Maker/Taker 费率区分** | 加密货币交易所区分挂单/吃单费率，差异可达 5 倍 |
+| **OCO 订单** | 一对限价单，任一成交则撤销另一方（双向挂单策略必需） |
+| **Binance 费率模型** | 现货/合约 × BNB 抵扣四组合预设 |
+| **多策略批量回测** | 一次运行多个策略并汇总对比 |
+| **退出原因标记** | 交易记录区分 TP/SL/收盘/时间/打平/利润退出 |
+| **子期间/状态分析** | 回测后按子期间或市场状态分组分析绩效 |
+| **DCA 基准** | 定投基准对比 |
+| **手续费敏感性扫描** | 扫描费率参数输出绩效曲线 |
+
+### 15.2 文件变更清单
+
+| 文件 | 变更类型 | 内容 |
+|------|---------|------|
+| `fill_model.py` | 修改 | 新增 `IntrabarLimitFill` |
+| `cost_model.py` | 修改 | 新增 `MakerTakerCost`、`BinanceCost` + 4 预设 |
+| `orders.py` | 修改 | `Fill`/`Order` 新增 `exit_reason` 字段 |
+| `broker.py` | 修改 | 新增 `submit_oco()` + OCO 撤销传播 |
+| `engine.py` | 修改 | 新增 `periods_per_year` 参数 |
+| `result.py` | 修改 | 新增 `exit_reason_stats()` |
+| `benchmark.py` | 修改 | 新增 `dca_equity()` |
+| `intrabar.py` | **新增** | `IntrabarSimulator` |
+| `batch_runner.py` | **新增** | `StrategyBatchRunner` + `BatchResults` |
+| `analyzer.py` | **新增** | `BacktestAnalyzer` |
+| `fee_sweep.py` | **新增** | `fee_sweep()` + `maker_taker_sweep()` |
+| `__init__.py` | 修改 | 导出新组件 |
+
+### 15.3 核心新增接口
+
+#### 15.3.1 IntrabarLimitFill
+
+```python
+class IntrabarLimitFill(FillModel):
+    """限价单在盘中价格穿越限价水平时成交。
+    LIMIT buy: next_bar["low"] <= limit_price → 以 limit_price 成交
+    LIMIT sell: next_bar["high"] >= limit_price → 以 limit_price 成交
+    MARKET: 以 next_bar["open"] 成交（同 NextOpenFill）
+    """
+```
+
+与 `NextOpenFill` 平行存在，策略显式选择。`NextOpenFill` 保留原逻辑不变。
+
+#### 15.3.2 MakerTakerCost / BinanceCost
+
+```python
+@dataclass
+class MakerTakerCost(CostModel):
+    maker_rate: float = 0.001
+    taker_rate: float = 0.001
+    slippage: float = 0.0001
+    # LIMIT → maker_rate, MARKET/STOP → taker_rate
+
+@dataclass
+class BinanceCost(CostModel):
+    venue: str = "spot"          # "spot" | "futures"
+    bnb_discount: bool = False
+    slippage: float = 0.0001
+    # Spot:  maker 0.1% / taker 0.1%  (BNB: -25%)
+    # Futures: maker 0.02% / taker 0.05%  (BNB: -10%)
+
+# 便捷预设
+BINANCE_SPOT = BinanceCost(venue="spot", bnb_discount=False)
+BINANCE_SPOT_BNB = BinanceCost(venue="spot", bnb_discount=True)
+BINANCE_FUTURES = BinanceCost(venue="futures", bnb_discount=False)
+BINANCE_FUTURES_BNB = BinanceCost(venue="futures", bnb_discount=True)
+```
+
+#### 15.3.3 OCO 订单
+
+```python
+class SimulatedBroker:
+    def submit_oco(self, order_a: Order, order_b: Order) -> tuple[str, str]:
+        """提交 OCO 对。任一成交时自动撤销另一方。"""
+```
+
+不新增 `OrderType`，在 Broker 层管理关联关系。
+
+#### 15.3.4 IntrabarSimulator
+
+```python
+class IntrabarSimulator:
+    """用更细粒度 K 线模拟限价单盘中成交时序。"""
+    def __init__(self, fine_data: pd.DataFrame): ...
+    def check_fill(self, price_level, side, start_ts, end_ts) -> tuple: ...
+    def first_to_fill(self, levels, start_ts, end_ts) -> tuple | None: ...
+```
+
+#### 15.3.5 StrategyBatchRunner
+
+```python
+class StrategyBatchRunner:
+    def run_all(self, strategies: dict) -> BatchResults: ...
+    def run_all_fees(self, strategies: dict, cost_models: dict) -> BatchResults: ...
+
+class BatchResults:
+    def to_dataframe(self) -> pd.DataFrame: ...
+    def equity_curves(self) -> dict: ...
+    def best_by(self, metric: str) -> tuple: ...
+    def rank(self, metric: str) -> pd.DataFrame: ...
+```
+
+#### 15.3.6 BacktestAnalyzer
+
+```python
+class BacktestAnalyzer:
+    @staticmethod
+    def subperiod_metrics(result, split_dates) -> dict: ...
+    @staticmethod
+    def regime_conditional_metrics(result, regime_series) -> dict: ...
+    @staticmethod
+    def rolling_metric(result, metric, window) -> pd.Series: ...
+    @staticmethod
+    def trade_analysis_by_exit(result) -> pd.DataFrame: ...
+```
+
+### 15.4 实现阶段（BT-8~BT-10）
+
+| 阶段 | 内容 | 测试 | 优先级 |
+|------|------|------|--------|
+| **BT-8** | P0 致命修复：`IntrabarLimitFill` + `MakerTakerCost` + OCO 订单 | `test_backtest_p0.py` | ★★★ |
+| **BT-9** | P1 重要增强：`BinanceCost` + `IntrabarSimulator` + `StrategyBatchRunner` + `exit_reason` | `test_backtest_p1.py` | ★★☆ |
+| **BT-10** | P2 分析工具：年化因子 + DCA + `BacktestAnalyzer` + `fee_sweep` | `test_backtest_p2.py` | ★☆☆ |
+
+### 15.5 向后兼容保证
+
+| 现有 API | 改进后 | 兼容性 |
+|---------|--------|--------|
+| `NextOpenFill()` | 保留原逻辑 | ✅ 完全兼容 |
+| `PercentCost(commission=0.001)` | 保留 | ✅ 完全兼容 |
+| `Order(symbol, side, qty)` | 新增 `exit_reason=""` 默认值 | ✅ 完全兼容 |
+| `Fill(...)` | 新增 `exit_reason=""` 默认值 | ✅ 完全兼容 |
+| `BacktestEngine(data, strategy)` | 新增 `periods_per_year=None` | ✅ 完全兼容 |
+
+现有用户代码无需修改。新功能通过显式选择新类/参数启用。
+
+### 15.6 依赖声明
+
+```toml
+[project.optional-dependencies]
+backtest = ["stockstat"]                  # 核心（含 BT-8~10 增强）
+optimize = ["optuna>=3.5"]                # BT-6 参数优化
+backtest_full = ["stockstat[backtest]", "stockstat[optimize]", "stockstat[matplotlib]"]
+```
+
+无新增外部依赖。所有增强纯 Python + pandas/numpy 实现。
+
+---
+
+## 16. 可插拔执行模型设计
+
+> **新增于 v1.6（BT-11~BT-14）**。在 §15 增强基础上，将"订单如何成交"抽象为可插拔的 `ExecutionModel`，通过组合注入 `BacktestEngine`，支持 intrabar 子 bar 执行而**不新增引擎类**。设计原则：general 方案丰富库能力 + simplified 接口保持简洁 + 严格向前兼容。
+
+### 16.1 设计动机
+
+§15 的 BT-8~BT-10 解决了 intrabar 限价成交、Maker/Taker 费率、批量回测等需求，但 v5 研究中仍暴露 5 项结构性差距（详见 `working/PAXG-Weekend-Monday-Law-v5-redo/BACKTEST_IMPROVEMENT_REPORT_V2.md`）：
+
+| Gap | 描述 | 根因 |
+|-----|------|------|
+| Gap-1 | Intrabar 成交时间不追踪 | `FillModel` 只返回价格 |
+| Gap-2 | 同一 parent bar 内入场+出场 | 事件循环 t→t+1 约束 |
+| Gap-3 | 成交后条件退出扫描 | 无 intrabar 前向扫描 hook |
+| Gap-4 | 双向均成交→双取消 | OCO 语义不足 |
+| Gap-5 | 同 bar 内 SL 优先于 TP | broker 无优先级排序 |
+
+V1 方案（独立 `IntrabarExecutionEngine` 类）存在 8 项兼容性盲点。V2 方案以 `ExecutionModel` 可插拔架构解决，**一个引擎类 + 两种执行模式**。
+
+### 16.2 架构
+
+```mermaid
+graph TB
+    subgraph "BacktestEngine（唯一引擎类）"
+        ENG["execution_model 参数<br/>默认 NextBarExecution"]
+        EM["ExecutionModel ABC"]
+        NB["NextBarExecution<br/>默认：t→t+1 成交"]
+        IB["IntrabarExecution<br/>intrabar 子 bar 撮合"]
+    end
+
+    subgraph "IntrabarExecution 内部"
+        FILL["IntrabarFillModel<br/>子 bar 序列扫描 + 时间追踪"]
+        SCAN["_scan_sub_bars<br/>预扫描→OCO检测→apply→退出扫描"]
+        EXIT["_scan_exits<br/>limit/stop 逐bar + market close 收盘"]
+        OCO["register_oco_mutual<br/>双向均成交→双取消"]
+    end
+
+    subgraph "策略层（duck typing）"
+        STR["Strategy 基类（不变）"]
+        MIX["IntrabarMixin（可选）<br/>define_exits()"]
+    end
+
+    ENG --> EM
+    EM --> NB
+    EM --> IB
+    IB --> FILL
+    IB --> SCAN
+    SCAN --> EXIT
+    SCAN --> OCO
+    STR -.-> MIX
+```
+
+### 16.3 核心接口
+
+```python
+# execution_model.py（新文件）
+
+class ExecutionModel(ABC):
+    """订单执行模型：决定订单如何在 bar 内成交。"""
+    @abstractmethod
+    def execute(self, engine, ctx, t, pending_orders) -> list[Fill]: ...
+    @property
+    @abstractmethod
+    def is_intrabar(self) -> bool: ...
+
+class NextBarExecution(ExecutionModel):
+    """默认：t 提交 → t+1 bar 成交（现有行为）。"""
+    is_intrabar = False
+
+class IntrabarExecution(ExecutionModel):
+    """intrabar：parent bar 内子 bar 序列撮合。"""
+    def __init__(self, intrabar_tf, parent_tf=None, fill_model=None): ...
+    def register_oco_mutual(self, order_a, order_b): ...
+    is_intrabar = True
+```
+
+### 16.4 文件变更清单
+
+| 文件 | 变更 | 内容 |
+|------|------|------|
+| `execution_model.py` | **新增** | `ExecutionModel` ABC + `NextBarExecution` + `IntrabarExecution` |
+| `fill_model.py` | 新增类 | `IntrabarFillResult` + `IntrabarFillModel`（继承 `IntrabarLimitFill`） |
+| `orders.py` | 加字段 | `Order.priority: int = 99` + `Fill.sub_bar_ts` + `Fill.sub_bar_index` |
+| `data_feed.py` | 加方法 | `DataFeed.intrabar_slice()` |
+| `engine.py` | 加参数 | `execution_model` 参数 + intrabar 分支 + parent_tf 迭代 |
+| `context.py` | 加方法 | `intrabar_submit()` + `intrabar_submit_oco_mutual()`（模式感知降级） |
+| `broker.py` | 加方法 | `submit_oco_mutual()` |
+| `strategy.py` | 新增类 | `IntrabarMixin`（可选 mixin，含 `define_exits` 默认实现） |
+
+### 16.5 5 项 Gap 的解决
+
+| Gap | 解决方式 |
+|-----|---------|
+| Gap-1 | `Fill.sub_bar_ts` + `Fill.sub_bar_index` + `IntrabarFillModel.fill_with_timing()` |
+| Gap-2 | `IntrabarExecution` 在 parent bar 内完成入场→退出全生命周期 |
+| Gap-3 | duck typing 检测 `define_exits()` + `_scan_exits()` 前向扫描 |
+| Gap-4 | `register_oco_mutual()` + 预扫描检测双向成交 |
+| Gap-5 | `Order.priority` 字段 + 排序（SL priority=0 > TP priority=1） |
+
+### 16.6 向后兼容保证
+
+| 现有 API | 改进后 | 兼容性 |
+|---------|--------|--------|
+| `BacktestEngine(data, strategy)` | 新增 `execution_model=None` | ✅ 默认 `NextBarExecution` = 现有行为 |
+| `FillModel` ABC | 不修改 | ✅ `fill_with_timing` 非抽象新方法 |
+| `Fill` / `Order` | 新增字段有默认值 | ✅ dataclass 末尾 |
+| `Strategy` 基类 | 不修改 | ✅ duck typing 检测 `define_exits` |
+| `@strategy` 函数 | 不修改 | ✅ 函数式策略完全兼容 |
+| `ctx.intrabar_submit()` | 普通模式降级 | ✅ `broker.submit` + warning |
+
+### 16.7 实现阶段（BT-11~BT-14）
+
+| 阶段 | 内容 | 测试 | 优先级 |
+|------|------|------|--------|
+| **BT-11** | ExecutionModel ABC + IntrabarFillModel + Fill/Order 字段 + intrabar_slice | `test_backtest_intrabar.py`（兼容性 + FillModel + DataFeed） | ★★★ |
+| **BT-12** | IntrabarExecution + IntrabarMixin + OCO mutual + 引擎集成 | 同上（同 bar 出场 + define_exits + 优先级 + OCO） | ★★★ |
+| **BT-13** | v5 策略迁移验证（33 策略 × 4 费率 = 132 次回测） | `run_redo.py`（PnL 误差 < 0.1%） | ★★☆ |
+| **BT-14** | 分析与可视化适配 | `plots_redo.py` | ★☆☆ |
+
+### 16.8 验证结果
+
+- 原有 314 项测试全部通过（零回归）
+- 新增 23 项 intrabar 测试全部通过
+- v5 的 33 策略 × 4 费率 = 132 次回测，关键策略 PnL 误差 < 0.1%
+- 结论一致：全部策略均未击败买入持有 PAXG（+104.84%）
 
 ---
 

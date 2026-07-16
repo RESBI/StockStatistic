@@ -12,6 +12,7 @@ from .fill_model import FillModel, NextOpenFill
 from .portfolio import Portfolio
 from .result import BacktestResult
 from .strategy import Strategy
+from .execution_model import ExecutionModel, NextBarExecution
 from ..compute.engine import ComputeEngine
 
 
@@ -29,7 +30,9 @@ class BacktestEngine:
                  allow_short: bool = False,
                  lookahead_audit: bool = False,
                  seed: int = 0,
-                 compute_engine: Optional[ComputeEngine] = None):
+                 compute_engine: Optional[ComputeEngine] = None,
+                 periods_per_year: Optional[int] = None,
+                 execution_model: Optional[ExecutionModel] = None):
         if trade_on not in ("open", "close"):
             raise ValueError("trade_on must be 'open' or 'close'")
 
@@ -45,6 +48,7 @@ class BacktestEngine:
         self.allow_short = allow_short
         self.lookahead_audit = lookahead_audit
         self.seed = seed
+        self.periods_per_year = periods_per_year
 
         self.portfolio = Portfolio(initial_cash=initial_cash, allow_short=allow_short)
         self.cost_model = cost_model or PercentCost()
@@ -56,13 +60,37 @@ class BacktestEngine:
         self._compute = compute_engine if compute_engine is not None else ComputeEngine(client=None)
         self._benchmark_symbol = benchmark
 
+        # BT-11: ExecutionModel (default = NextBarExecution = existing behavior)
+        self.execution_model = execution_model or NextBarExecution()
+        self._intrabar_pending: list = []
+
     def run(self) -> BacktestResult:
         import numpy as np
         np.random.seed(self.seed)
 
-        master = self.data_feed.master_index
         symbols = self.universe.symbols
         primary_tf = self.data_feed.primary_tf
+
+        # In intrabar mode, iterate over parent_tf timeline (not finest tf)
+        if self.execution_model.is_intrabar:
+            parent_tf = getattr(self.execution_model, 'parent_tf', None) or primary_tf
+            # Build iteration index from parent_tf data
+            iter_index = None
+            for sym in symbols:
+                if parent_tf in self.universe.timeframes(sym):
+                    df = self.universe.raw(sym, parent_tf)
+                    idx = df.index
+                    iter_index = idx if iter_index is None else iter_index.union(idx)
+            if iter_index is None:
+                iter_index = self.data_feed.master_index
+            else:
+                iter_index = iter_index.sort_values().unique()
+            iter_tf = parent_tf
+        else:
+            iter_index = self.data_feed.master_index
+            iter_tf = primary_tf
+
+        master = iter_index
 
         all_fills = []
         # on_start hook (before any bar; portfolio equity seeded inside the loop)
@@ -74,38 +102,51 @@ class BacktestEngine:
             current_bar = {}
             prices = {}
             for sym in symbols:
-                bar = self.data_feed.bar_at(sym, primary_tf, t)
+                bar = self.data_feed.bar_at(sym, iter_tf, t)
                 if bar is not None:
                     current_bar[sym] = bar
                     prices[sym] = float(bar["close"])
 
             ctx = self._make_ctx(t, current_bar)
 
-            # 1. Match pending orders (submitted at prior bars) at the OPEN of bar t.
-            #    For NextOpenFill this fills at t.open; fill ts = t. This keeps
-            #    equity-at-t consistent: a fill at t's open is valued at t's close.
-            prev_bar_map = {}
-            if i > 0:
-                t_prev = master[i - 1]
-                for sym in symbols:
-                    pb = self.data_feed.bar_at(sym, primary_tf, t_prev)
-                    if pb is not None:
-                        prev_bar_map[sym] = pb
+            if self.execution_model.is_intrabar:
+                # ── Intrabar mode (BT-12) ──
+                # 1. Strategy decides first (submits intrabar orders)
+                self.strategy.on_bar(ctx)
 
-            for sym in symbols:
-                pb = prev_bar_map.get(sym)
-                bar = current_bar.get(sym)
-                if bar is None:
-                    continue
-                fills = self.broker.process_bar(
-                    sym, pb if pb is not None else pd.Series(), bar, t,
+                # 2. Execute intrabar orders on sub-bar sequence
+                intrabar_fills = self.execution_model.execute(
+                    self, ctx, t, self._intrabar_pending
                 )
-                for f in fills:
+                self._intrabar_pending.clear()
+                for f in intrabar_fills:
                     all_fills.append(f)
                     self.strategy.on_fill(f, self._make_ctx(t, current_bar))
+            else:
+                # ── Default mode (existing behavior, unchanged) ──
+                # 1. Match pending orders at bar t open
+                prev_bar_map = {}
+                if i > 0:
+                    t_prev = master[i - 1]
+                    for sym in symbols:
+                        pb = self.data_feed.bar_at(sym, primary_tf, t_prev)
+                        if pb is not None:
+                            prev_bar_map[sym] = pb
 
-            # 2. Strategy decides at bar t (orders submitted here fill at t+1)
-            self.strategy.on_bar(ctx)
+                for sym in symbols:
+                    pb = prev_bar_map.get(sym)
+                    bar = current_bar.get(sym)
+                    if bar is None:
+                        continue
+                    fills = self.broker.process_bar(
+                        sym, pb if pb is not None else pd.Series(), bar, t,
+                    )
+                    for f in fills:
+                        all_fills.append(f)
+                        self.strategy.on_fill(f, self._make_ctx(t, current_bar))
+
+                # 2. Strategy decides at bar t
+                self.strategy.on_bar(ctx)
 
             # 3. Mark to market at this bar close
             self.portfolio.mark_to_market(prices, ts=t)
@@ -150,6 +191,7 @@ class BacktestEngine:
             "symbols": symbols,
             "cost_model": type(self.cost_model).__name__,
             "fill_model": type(self.fill_model).__name__,
+            "periods_per_year": self.periods_per_year,
         }
 
         return BacktestResult(
@@ -163,7 +205,7 @@ class BacktestEngine:
         )
 
     def _make_ctx(self, t: pd.Timestamp, current_bar: dict) -> BacktestContext:
-        return BacktestContext(
+        ctx = BacktestContext(
             data_feed=self.data_feed,
             portfolio=self.portfolio,
             broker=self.broker,
@@ -171,7 +213,10 @@ class BacktestEngine:
             now=t,
             current_bar=current_bar,
             lookahead_audit=self.lookahead_audit,
+            execution_model=self.execution_model,
         )
+        ctx._intrabar_pending = self._intrabar_pending
+        return ctx
 
 
 def buy_and_hold_equity(initial_cash: float, prices: pd.Series) -> pd.Series:

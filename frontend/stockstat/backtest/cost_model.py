@@ -91,3 +91,64 @@ class StampDutyCost(CostModel):
 class ZeroCost(CostModel):
     def compute(self, order: Order, fill_price: float, fill_qty: float) -> tuple[float, float]:
         return 0.0, 0.0
+
+
+@dataclass
+class MakerTakerCost(CostModel):
+    """Maker/Taker differentiated commission.
+
+    LIMIT orders use maker_rate (passive, provides liquidity).
+    MARKET/STOP orders use taker_rate (aggressive, takes liquidity).
+    """
+    maker_rate: float = 0.001
+    taker_rate: float = 0.001
+    slippage: float = 0.0001
+
+    def compute(self, order: Order, fill_price: float, fill_qty: float) -> tuple[float, float]:
+        from .orders import OrderType
+        gross = fill_price * fill_qty
+        is_maker = order.order_type == OrderType.LIMIT
+        rate = self.maker_rate if is_maker else self.taker_rate
+        comm = gross * rate
+        slip = gross * self.slippage
+        return comm, slip
+
+
+@dataclass
+class BinanceCost(CostModel):
+    """Binance exchange fee model with BNB discount support.
+
+    Spot:    maker 0.100% / taker 0.100%  (BNB: 0.075% / 0.075%, -25%)
+    Futures: maker 0.020% / taker 0.050%  (BNB: 0.018% / 0.045%, -10%)
+    """
+    venue: str = "spot"
+    bnb_discount: bool = False
+    slippage: float = 0.0001
+
+    _SPOT_RATES = {"maker": 0.001, "taker": 0.001}
+    _FUT_RATES = {"maker": 0.0002, "taker": 0.0005}
+    _SPOT_DISCOUNT = 0.25
+    _FUT_DISCOUNT = 0.10
+
+    @property
+    def _rates(self) -> dict:
+        base = self._SPOT_RATES if self.venue == "spot" else self._FUT_RATES
+        if not self.bnb_discount:
+            return base
+        discount = self._SPOT_DISCOUNT if self.venue == "spot" else self._FUT_DISCOUNT
+        return {k: v * (1 - discount) for k, v in base.items()}
+
+    def compute(self, order: Order, fill_price: float, fill_qty: float) -> tuple[float, float]:
+        from .orders import OrderType
+        gross = fill_price * fill_qty
+        is_maker = order.order_type == OrderType.LIMIT
+        rate = self._rates["maker"] if is_maker else self._rates["taker"]
+        comm = gross * rate
+        slip = gross * self.slippage
+        return comm, slip
+
+
+BINANCE_SPOT = BinanceCost(venue="spot", bnb_discount=False)
+BINANCE_SPOT_BNB = BinanceCost(venue="spot", bnb_discount=True)
+BINANCE_FUTURES = BinanceCost(venue="futures", bnb_discount=False)
+BINANCE_FUTURES_BNB = BinanceCost(venue="futures", bnb_discount=True)

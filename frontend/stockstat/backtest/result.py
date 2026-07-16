@@ -32,11 +32,16 @@ class BacktestResult:
         return M.drawdown_series(self.equity)
 
     def metrics(self, risk_free: float = 0.02, periods_per_year: int = 252) -> dict:
+        ppy = periods_per_year
+        if ppy is None or ppy == 252:
+            cfg_ppy = self.config.get("periods_per_year") if self.config else None
+            if cfg_ppy is not None:
+                ppy = cfg_ppy
         return M.compute_all_metrics(
             self.equity, fills=self.fills,
             realized_history=self.realized_history,
             benchmark=self.benchmark,
-            risk_free=risk_free, periods_per_year=periods_per_year,
+            risk_free=risk_free, periods_per_year=ppy,
         )
 
     def trades_df(self) -> pd.DataFrame:
@@ -58,6 +63,22 @@ class BacktestResult:
 
     def fills_df(self) -> pd.DataFrame:
         return self.trades_df()
+
+    def exit_reason_stats(self) -> dict[str, dict]:
+        """Statistics grouped by exit reason.
+
+        Returns {reason: {"count": n, "avg_pnl": float, "total_pnl": float}}.
+        """
+        from collections import defaultdict
+        stats = defaultdict(lambda: {"count": 0, "total_pnl": 0.0})
+        for ts, sym, pnl in self.realized_history:
+            matching = [f for f in self.fills if f.ts == ts and f.symbol == sym]
+            reason = matching[-1].exit_reason if matching else "unknown"
+            stats[reason]["count"] += 1
+            stats[reason]["total_pnl"] += pnl
+        for r in stats.values():
+            r["avg_pnl"] = r["total_pnl"] / r["count"] if r["count"] else 0.0
+        return dict(stats)
 
     def summary(self) -> str:
         m = self.metrics()
