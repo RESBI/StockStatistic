@@ -223,6 +223,39 @@ cd frontend && python -m pytest tests/test_backtest_*.py -v --ignore=tests/test_
 
 ---
 
+## BT-8~10: 回测引擎增强测试 (46 passed)
+
+BT-8~10 在 BT-0~7 基础上新增 intrabar 限价成交、Maker/Taker 费率、OCO 订单、批量回测、分析工具等能力。
+
+| 阶段 | 测试文件 | 测试数 | 验证内容 |
+|------|---------|--------|---------|
+| BT-8 | `test_backtest_p0.py` | ~20 | IntrabarLimitFill 成交、MakerTakerCost/BinanceCost 费率、OCO 撤销传播、exit_reason 标记 |
+| BT-9 | `test_backtest_p1.py` | ~15 | IntrabarSimulator 子 bar 成交、StrategyBatchRunner 多策略/多费率、BinanceCost 4 预设、exit_reason_stats |
+| BT-10 | `test_backtest_p2.py` | ~11 | 年化因子、dca_equity 定投基准、BacktestAnalyzer 子期间/状态分析、fee_sweep/maker_taker_sweep |
+
+---
+
+## BT-11~14: 可插拔执行模型测试 (23 passed)
+
+BT-11~14 将"订单如何成交"抽象为可插拔 `ExecutionModel`，支持 intrabar 子 bar 执行。
+
+| 阶段 | 测试文件 | 测试数 | 验证内容 |
+|------|---------|--------|---------|
+| BT-11~12 | `test_backtest_intrabar.py` | 23 | 兼容性（Fill/Order 默认值、默认引擎不变）、IntrabarFillModel 子 bar 扫描+时间追踪、DataFeed.intrabar_slice、IntrabarExecution 同 bar 入场+出场、define_exits 退出扫描、OCO mutual 双取消、订单优先级 SL>TP、ctx.intrabar_submit 模式感知降级 |
+| BT-13 | `run_redo.py` | — | v5 策略迁移验证：33 策略 × 4 费率 = 132 次回测，关键策略 PnL 误差 < 0.1% |
+| BT-14 | `plots_redo.py` | — | 分析与可视化适配，5 张关键图表生成 |
+
+**运行命令**：
+```bash
+cd frontend && python -m pytest tests/test_backtest_p0.py tests/test_backtest_p1.py tests/test_backtest_p2.py tests/test_backtest_intrabar.py -v
+# 69 passed (46 + 23)
+
+cd working/PAXG-Weekend-Monday-Law-v5-redo/phase2_backtest && python run_redo.py
+# 33 strategies × 4 fees = 132 runs, PnL error < 0.1% vs v5
+```
+
+---
+
 ## BT-V: 回测可视化子系统测试 (93 passed)
 
 回测可视化子系统分 4 个阶段实现，另含在线真实数据验证。**核心零 matplotlib 硬依赖**——安装 matplotlib 后自动激活。
@@ -290,4 +323,4 @@ SyntheticAdapter   → (无需代理)
 
 ---
 
-*全部 292 项测试通过（原 75 + 回测 124 + 回测可视化 76 + 在线真实数据 17），真实数据验证成功。PAXG 周末涨跌幅对周一涨跌幅有弱但统计显著的独立预测力 (r≈0.2, p<0.02)，已消除方向选择偏差。回测子系统支持自定义策略、多标的、多时间尺度、成本/滑点模型、做空、参数优化与未来函数防护；可视化子系统提供 9 种图表（含仪表盘/热力图/直方图），核心零 matplotlib 硬依赖，已用真实数据（BTC/ETH/AAPL 2023-2024）生成 13 张图像验证。*
+*全部 361 项测试通过（原 75 + 回测核心 124 + 回测可视化 76 + 在线真实数据 17 + 引擎增强 BT-8~10 46 + 可插拔执行 BT-11~14 23），真实数据验证成功。PAXG 周末涨跌幅对周一涨跌幅有弱但统计显著的独立预测力 (r≈0.2, p<0.02)，已消除方向选择偏差。回测子系统支持自定义策略、多标的、多时间尺度、成本/滑点模型、做空、参数优化与未来函数防护；可视化子系统提供 9 种图表（含仪表盘/热力图/直方图），核心零 matplotlib 硬依赖，已用真实数据（BTC/ETH/AAPL 2023-2024）生成 13 张图像验证。BT-8~14 新增 intrabar 限价成交、Maker/Taker/Binance 费率、OCO 订单、批量回测、可插拔 ExecutionModel（IntrabarExecution 同 bar 入场+出场 + define_exits 退出扫描 + OCO mutual + 订单优先级），已用 v5 的 33 策略 × 4 费率 = 132 次回测验证结果一致性。*

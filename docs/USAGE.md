@@ -7,17 +7,18 @@
 1. [Setup](#1-setup)
 2. [Data Ingestion](#2-data-ingestion)
 3. [Querying OHLCV Data](#3-querying-ohlcv-data)
-4. [Trend Indicators (MA / EMA / MACD)](#4-trend-indicators)
-5. [Oscillator Indicators (RSI / KDJ)](#5-oscillator-indicators)
-6. [Volatility Indicators (Bollinger / ATR / STD)](#6-volatility-indicators)
-7. [Statistics (Beta / Sharpe / Drawdown / Correlation)](#7-statistics)
+4. [Trend Indicators](#4-trend-indicators)
+5. [Oscillator Indicators](#5-oscillator-indicators)
+6. [Volatility Indicators](#6-volatility-indicators)
+7. [Statistics](#7-statistics)
 8. [DSL Queries](#8-dsl-queries)
 9. [Custom Indicators](#9-custom-indicators)
 10. [Visualization with Matplotlib](#10-visualization-with-matplotlib)
 11. [PAXG Weekend Correlation Analysis](#11-paxg-weekend-correlation-analysis)
 12. [Export Results](#12-export-results)
 13. [Backtesting](#13-backtesting)
-14. [Backtest Visualization](#14-backtest-visualization)
+14. [Advanced Backtest Features](#14-advanced-backtest-features)
+15. [Backtest Visualization](#15-backtest-visualization)
 
 ---
 
@@ -854,7 +855,11 @@ eng = BacktestEngine(data=data, strategy=s, lookahead_audit=True)
 # If the strategy accidentally accesses data > t, raises LookaheadError
 ```
 
-### Example 13.12: Binance fee models (4 presets)
+---
+
+## 14. Advanced Backtest Features
+
+### Example 14.1: Binance fee models (4 presets)
 
 ```python
 from stockstat.backtest import BinanceCost, BINANCE_SPOT, BINANCE_SPOT_BNB, \
@@ -875,7 +880,7 @@ custom = MakerTakerCost(maker_rate=0.0002, taker_rate=0.0005, slippage=0.0)
 # LIMIT → maker_rate, MARKET/STOP → taker_rate
 ```
 
-### Example 13.13: Intrabar execution (same-bar entry + exit)
+### Example 14.2: Intrabar execution (same-bar entry + exit)
 
 `IntrabarExecution` model simulates order matching within a parent bar (e.g. daily) using sub-bars (e.g. hourly) — completing the full entry→exit lifecycle within a single parent bar.
 
@@ -932,7 +937,7 @@ print(res.exit_reason_stats())
 
 > **Key**: default `execution_model=None` is equivalent to `NextBarExecution` (existing behavior). Only passing `IntrabarExecution(...)` enables intrabar mode.
 
-### Example 13.14: Mutual OCO (dual limit orders)
+### Example 14.3: Mutual OCO (dual limit orders)
 
 When both buy-limit and sell-limit fill within the same bar, the trade is cancelled (avoiding a net-zero position with wasted fees).
 
@@ -971,7 +976,7 @@ class DualLimit(Strategy, IntrabarMixin):
         ]
 ```
 
-### Example 13.15: Order priority (SL before TP)
+### Example 14.4: Order priority (SL before TP)
 
 When both SL and TP could trigger in the same sub-bar, use the `priority` field to control matching order (0 = highest).
 
@@ -1004,7 +1009,7 @@ class TPWithSL(Strategy, IntrabarMixin):
         ]
 ```
 
-### Example 13.16: Batch backtest (multi-strategy × multi-fee)
+### Example 14.5: Batch backtest (multi-strategy × multi-fee)
 
 ```python
 from stockstat.backtest import StrategyBatchRunner
@@ -1042,7 +1047,7 @@ results_all_fees = runner.run_all_fees(
 )
 ```
 
-### Example 13.17: Subperiod and regime analysis
+### Example 14.6: Subperiod and regime analysis
 
 ```python
 from stockstat.backtest import BacktestAnalyzer
@@ -1068,7 +1073,7 @@ exit_stats = res.exit_reason_stats()
 #  'close': {'count': 35, 'avg_pnl': -0.15}}
 ```
 
-### Example 13.18: DCA benchmark and fee sweep
+### Example 14.7: DCA benchmark and fee sweep
 
 ```python
 from stockstat.backtest import dca_equity, fee_sweep, maker_taker_sweep
@@ -1093,7 +1098,7 @@ mt_results = maker_taker_sweep(
 )
 ```
 
-Backtest visualization (dashboard, heatmaps, return distributions — 9 chart types) is covered in [§14 Backtest Visualization](#14-backtest-visualization).
+Backtest visualization (dashboard, heatmaps, return distributions — 9 chart types) is covered in [§15 Backtest Visualization](#15-backtest-visualization).
 
 ### Backtest API cheat sheet
 
@@ -1125,13 +1130,13 @@ Backtest visualization (dashboard, heatmaps, return distributions — 9 chart ty
 
 ---
 
-## 14. Backtest Visualization
+## 15. Backtest Visualization
 
 The backtest visualization subsystem provides 9 chart types with **zero matplotlib hard-dependency** in the core — auto-activates when installed. It reuses the protocol-based design from [§10 Visualization with Matplotlib](#10-visualization-with-matplotlib) but provides a backtest-dedicated `BacktestChartSpec` (supporting subplots, fill areas, heatmaps, histograms, and more). The examples below use real market data (Binance BTC/USDT 2023-2024); generated images are in `docs/images/backtest_*.png`.
 
-![BTC Backtest Dashboard](../docs/images/backtest_btc_dashboard.png)
+![BTC backtest dashboard](../docs/images/backtest_btc_dashboard.png)
 
-### Example 14.1: One-liner render and batch save
+### Example 15.1: One-liner render and batch save
 
 ```python
 res = BacktestEngine(data=data, strategy=ma_cross,

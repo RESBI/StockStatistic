@@ -21,8 +21,10 @@
 11. [开发路线图](#11-开发路线图)
 12. [回测子系统设计](#12-回测子系统设计)
 13. [回测可视化子系统设计](#13-回测可视化子系统设计)
-14. [回测阶段实现文档索引](#14-回测阶段实现文档索引)
-15. [回测引擎增强子系统设计](#15-回测引擎增强子系统设计)
+14. [回测引擎增强与可插拔执行模型](#15-回测引擎增强与可插拔执行模型)
+- [附录 A: 数据源兼容性矩阵](#附录-a-数据源兼容性矩阵)
+- [附录 B: OHLCV 数据量估算](#附录-b-ohlcv-数据量估算)
+- [附录 C: 回测阶段实现文档索引](#附录-c-回测阶段实现文档索引)
 
 ---
 
@@ -2124,49 +2126,16 @@ backtest_full = ["stockstat[backtest]", "stockstat[optimize]",
 
 ---
 
-## 14. 回测阶段实现文档索引
+## 15. 回测引擎增强与可插拔执行模型
 
-回测核心（BT-0~BT-7）与回测可视化（BT-V0~BT-V3 + 在线验证）的阶段文档统一索引如下，存放于 `docs/backtest/`：
+> **新增于 v1.5（BT-8~BT-10）**，**扩展于 v1.6（BT-11~BT-14）**。本章节合并两轮增强：BT-8~10 基于 v5 研究暴露的不足，新增 intrabar 限价成交、Maker/Taker 费率、OCO 订单、批量回测等能力；BT-11~14 将"订单如何成交"抽象为可插拔 `ExecutionModel`，支持 intrabar 子 bar 执行而**不新增引擎类**。所有增强以**向后兼容、组合优先、最小侵入**为原则。
 
-### 14.1 回测核心（BT 系列）
+### 15.1 BT-8~10：引擎增强子系统
 
-| 阶段 | 文档 | 代码 | 测试 |
-|------|------|------|------|
-| BT-0 | [docs/backtest/BT0_CN.md](docs/backtest/BT0_CN.md) | `backtest/` 包骨架 + dataclass | `test_backtest_iface.py` |
-| BT-1 | [docs/backtest/BT1_CN.md](docs/backtest/BT1_CN.md) | MVP 五大模块 | `test_backtest_mvp.py` |
-| BT-2 | [docs/backtest/BT2_CN.md](docs/backtest/BT2_CN.md) | 多标的/做空/订单扩展 | `test_backtest_portfolio.py` |
-| BT-3 | [docs/backtest/BT3_CN.md](docs/backtest/BT3_CN.md) | 多 tf 对齐/审计 | `test_backtest_multitf.py` |
-| BT-4 | [docs/backtest/BT4_CN.md](docs/backtest/BT4_CN.md) | 成本/成交模型 | `test_backtest_cost.py` |
-| BT-5 | [docs/backtest/BT5_CN.md](docs/backtest/BT5_CN.md) | 绩效/报告/可视化 | `test_backtest_metrics.py` |
-| BT-6 | [docs/backtest/BT6_CN.md](docs/backtest/BT6_CN.md) | 优化/走样/蒙特卡洛 | `test_backtest_optimize.py` |
-| BT-7 | [docs/backtest/BT7_CN.md](docs/backtest/BT7_CN.md) | DSL 集成/12 策略 | `test_backtest_strategies.py` |
-| BT-8 | [docs/backtest/BT8_CN.md](docs/backtest/BT8_CN.md) | P0 致命修复：IntrabarLimitFill + MakerTakerCost + OCO | `test_backtest_p0.py` |
-| BT-9 | [docs/backtest/BT9_CN.md](docs/backtest/BT9_CN.md) | P1 重要增强：IntrabarSimulator + BatchRunner + exit_reason | `test_backtest_p1.py` |
-| BT-10 | [docs/backtest/BT10_CN.md](docs/backtest/BT10_CN.md) | P2 分析工具：DCA + Analyzer + fee_sweep | `test_backtest_p2.py` |
-| BT-11 | `working/PAXG-Weekend-Monday-Law-v5-redo/STAGE_REPORT.md` | ExecutionModel ABC + IntrabarFillModel + Fill/Order 字段扩展 | `test_backtest_intrabar.py` |
-| BT-12 | 同上 | IntrabarExecution + IntrabarMixin + OCO mutual + 优先级 | `test_backtest_intrabar.py` |
-| BT-13 | 同上 | v5 策略迁移（33 策略 × 4 费率 = 132 次回测验证） | `run_redo.py` |
-| BT-14 | 同上 | 分析与可视化适配 | `plots_redo.py` |
-
-### 14.2 回测可视化（BT-V 系列 + 在线验证）
-
-| 阶段 | 文档 | 代码 | 测试 |
-|------|------|------|------|
-| BT-V0 | [docs/backtest/BTV0_CN.md](docs/backtest/BTV0_CN.md) | `chart_spec.py` + `chart_registry.py` + `null_charts.py` + `chart_factory.py` | `test_backtest_viz_iface.py` |
-| BT-V1 | [docs/backtest/BTV1_CN.md](docs/backtest/BTV1_CN.md) | `matplotlib_charts.py` 基础渲染 | `test_backtest_viz_mpl.py` |
-| BT-V2 | [docs/backtest/BTV2_CN.md](docs/backtest/BTV2_CN.md) | histogram/heatmap/bar 高级图表 | `test_backtest_viz_advanced.py` |
-| BT-V3 | [docs/backtest/BTV3_CN.md](docs/backtest/BTV3_CN.md) | dashboard 组合 + 交易标注 | `test_backtest_viz_dashboard.py` |
-| BT-V Online | [docs/backtest/BT_VIZ_ONLINE_REPORT_CN.md](docs/backtest/BT_VIZ_ONLINE_REPORT_CN.md) | 真实数据在线验证 + 13 张图像 | `test_backtest_viz_online.py` |
-
----
-
-## 15. 回测引擎增强子系统设计
-
-> **新增于 v1.5**。基于 v5 研究实践中暴露的 12 项不足（详见 `working/PAXG-Weekend-Monday-Law-v5/BACKTEST_IMPROVEMENT_REPORT.md`），对回测子系统（§12）进行增强。增强以**向后兼容、组合优先、最小侵入**为原则，通过新增类/方法实现，不破坏现有 API。
-
-### 15.1 设计目标
+#### 15.1.1 设计目标
 
 | 目标 | 说明 |
+|------|------|
 |------|------|
 | **限价单 intrabar 成交** | 限价单应在盘中价格穿越限价水平时成交，而非仅检查开盘价 |
 | **Maker/Taker 费率区分** | 加密货币交易所区分挂单/吃单费率，差异可达 5 倍 |
@@ -2316,13 +2285,13 @@ backtest_full = ["stockstat[backtest]", "stockstat[optimize]", "stockstat[matplo
 
 ---
 
-## 16. 可插拔执行模型设计
+### 15.7 BT-11~14：可插拔执行模型
 
-> **新增于 v1.6（BT-11~BT-14）**。在 §15 增强基础上，将"订单如何成交"抽象为可插拔的 `ExecutionModel`，通过组合注入 `BacktestEngine`，支持 intrabar 子 bar 执行而**不新增引擎类**。设计原则：general 方案丰富库能力 + simplified 接口保持简洁 + 严格向前兼容。
+> 在 §15.1-15.6（BT-8~10）基础上，将"订单如何成交"抽象为可插拔 `ExecutionModel`，通过组合注入 `BacktestEngine`，支持 intrabar 子 bar 执行而**不新增引擎类**。设计原则：general 方案丰富库能力 + simplified 接口保持简洁 + 严格向前兼容。
 
-### 16.1 设计动机
+#### 15.7.1 设计动机
 
-§15 的 BT-8~BT-10 解决了 intrabar 限价成交、Maker/Taker 费率、批量回测等需求，但 v5 研究中仍暴露 5 项结构性差距（详见 `working/PAXG-Weekend-Monday-Law-v5-redo/BACKTEST_IMPROVEMENT_REPORT_V2.md`）：
+§15.1 的 BT-8~BT-10 解决了 intrabar 限价成交、Maker/Taker 费率、批量回测等需求，但 v5 研究中仍暴露 5 项结构性差距（详见 `docs/backtest/BT11_BT14_CN.md`）：
 
 | Gap | 描述 | 根因 |
 |-----|------|------|
@@ -2334,7 +2303,7 @@ backtest_full = ["stockstat[backtest]", "stockstat[optimize]", "stockstat[matplo
 
 V1 方案（独立 `IntrabarExecutionEngine` 类）存在 8 项兼容性盲点。V2 方案以 `ExecutionModel` 可插拔架构解决，**一个引擎类 + 两种执行模式**。
 
-### 16.2 架构
+#### 15.7.2 架构
 
 ```mermaid
 graph TB
@@ -2367,7 +2336,7 @@ graph TB
     STR -.-> MIX
 ```
 
-### 16.3 核心接口
+#### 15.7.3 核心接口
 
 ```python
 # execution_model.py（新文件）
@@ -2391,7 +2360,7 @@ class IntrabarExecution(ExecutionModel):
     is_intrabar = True
 ```
 
-### 16.4 文件变更清单
+#### 15.7.4 文件变更清单
 
 | 文件 | 变更 | 内容 |
 |------|------|------|
@@ -2404,7 +2373,7 @@ class IntrabarExecution(ExecutionModel):
 | `broker.py` | 加方法 | `submit_oco_mutual()` |
 | `strategy.py` | 新增类 | `IntrabarMixin`（可选 mixin，含 `define_exits` 默认实现） |
 
-### 16.5 5 项 Gap 的解决
+#### 15.7.5 5 项 Gap 的解决
 
 | Gap | 解决方式 |
 |-----|---------|
@@ -2414,7 +2383,7 @@ class IntrabarExecution(ExecutionModel):
 | Gap-4 | `register_oco_mutual()` + 预扫描检测双向成交 |
 | Gap-5 | `Order.priority` 字段 + 排序（SL priority=0 > TP priority=1） |
 
-### 16.6 向后兼容保证
+#### 15.7.6 向后兼容保证
 
 | 现有 API | 改进后 | 兼容性 |
 |---------|--------|--------|
@@ -2425,7 +2394,7 @@ class IntrabarExecution(ExecutionModel):
 | `@strategy` 函数 | 不修改 | ✅ 函数式策略完全兼容 |
 | `ctx.intrabar_submit()` | 普通模式降级 | ✅ `broker.submit` + warning |
 
-### 16.7 实现阶段（BT-11~BT-14）
+#### 15.7.7 实现阶段（BT-11~BT-14）
 
 | 阶段 | 内容 | 测试 | 优先级 |
 |------|------|------|--------|
@@ -2434,7 +2403,7 @@ class IntrabarExecution(ExecutionModel):
 | **BT-13** | v5 策略迁移验证（33 策略 × 4 费率 = 132 次回测） | `run_redo.py`（PnL 误差 < 0.1%） | ★★☆ |
 | **BT-14** | 分析与可视化适配 | `plots_redo.py` | ★☆☆ |
 
-### 16.8 验证结果
+#### 15.7.8 验证结果
 
 - 原有 314 项测试全部通过（零回归）
 - 新增 23 项 intrabar 测试全部通过
@@ -2463,6 +2432,40 @@ class IntrabarExecution(ExecutionModel):
 | 加密1分钟数据(200标的) | 200 | 288K 行 | 73M 行 | ~5 GB |
 
 > TimescaleDB 压缩后可缩减至原始体积的 10%~20%。
+
+## 附录 C: 回测阶段实现文档索引
+
+回测核心（BT-0~BT-14）与回测可视化（BT-V0~BT-V3 + 在线验证）的阶段文档统一索引如下，存放于 `docs/backtest/`：
+
+### C.1 回测核心（BT 系列）
+
+| 阶段 | 文档 | 代码 | 测试 |
+|------|------|------|------|
+| BT-0 | [docs/backtest/BT0_CN.md](docs/backtest/BT0_CN.md) | `backtest/` 包骨架 + dataclass | `test_backtest_iface.py` |
+| BT-1 | [docs/backtest/BT1_CN.md](docs/backtest/BT1_CN.md) | MVP 五大模块 | `test_backtest_mvp.py` |
+| BT-2 | [docs/backtest/BT2_CN.md](docs/backtest/BT2_CN.md) | 多标的/做空/订单扩展 | `test_backtest_portfolio.py` |
+| BT-3 | [docs/backtest/BT3_CN.md](docs/backtest/BT3_CN.md) | 多 tf 对齐/审计 | `test_backtest_multitf.py` |
+| BT-4 | [docs/backtest/BT4_CN.md](docs/backtest/BT4_CN.md) | 成本/成交模型 | `test_backtest_cost.py` |
+| BT-5 | [docs/backtest/BT5_CN.md](docs/backtest/BT5_CN.md) | 绩效/报告/可视化 | `test_backtest_metrics.py` |
+| BT-6 | [docs/backtest/BT6_CN.md](docs/backtest/BT6_CN.md) | 优化/走样/蒙特卡洛 | `test_backtest_optimize.py` |
+| BT-7 | [docs/backtest/BT7_CN.md](docs/backtest/BT7_CN.md) | DSL 集成/12 策略 | `test_backtest_strategies.py` |
+| BT-8 | [docs/backtest/BT8_CN.md](docs/backtest/BT8_CN.md) | P0 致命修复：IntrabarLimitFill + MakerTakerCost + OCO | `test_backtest_p0.py` |
+| BT-9 | [docs/backtest/BT9_CN.md](docs/backtest/BT9_CN.md) | P1 重要增强：IntrabarSimulator + BatchRunner + exit_reason | `test_backtest_p1.py` |
+| BT-10 | [docs/backtest/BT10_CN.md](docs/backtest/BT10_CN.md) | P2 分析工具：DCA + Analyzer + fee_sweep | `test_backtest_p2.py` |
+| BT-11 | [docs/backtest/BT11_BT14_CN.md](docs/backtest/BT11_BT14_CN.md) | ExecutionModel ABC + IntrabarFillModel + Fill/Order 字段扩展 | `test_backtest_intrabar.py` |
+| BT-12 | 同上 | IntrabarExecution + IntrabarMixin + OCO mutual + 优先级 | `test_backtest_intrabar.py` |
+| BT-13 | 同上 | v5 策略迁移（33 策略 × 4 费率 = 132 次回测验证） | `run_redo.py` |
+| BT-14 | 同上 | 分析与可视化适配 | `plots_redo.py` |
+
+### C.2 回测可视化（BT-V 系列 + 在线验证）
+
+| 阶段 | 文档 | 代码 | 测试 |
+|------|------|------|------|
+| BT-V0 | [docs/backtest/BTV0_CN.md](docs/backtest/BTV0_CN.md) | `chart_spec.py` + `chart_registry.py` + `null_charts.py` + `chart_factory.py` | `test_backtest_viz_iface.py` |
+| BT-V1 | [docs/backtest/BTV1_CN.md](docs/backtest/BTV1_CN.md) | `matplotlib_charts.py` 基础渲染 | `test_backtest_viz_mpl.py` |
+| BT-V2 | [docs/backtest/BTV2_CN.md](docs/backtest/BTV2_CN.md) | histogram/heatmap/bar 高级图表 | `test_backtest_viz_advanced.py` |
+| BT-V3 | [docs/backtest/BTV3_CN.md](docs/backtest/BTV3_CN.md) | dashboard 组合 + 交易标注 | `test_backtest_viz_dashboard.py` |
+| BT-V Online | [docs/backtest/BT_VIZ_ONLINE_REPORT_CN.md](docs/backtest/BT_VIZ_ONLINE_REPORT_CN.md) | 真实数据在线验证 + 13 张图像 | `test_backtest_viz_online.py` |
 
 ---
 

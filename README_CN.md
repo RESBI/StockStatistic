@@ -108,6 +108,26 @@ result = client.run_dsl('''
 ''')
 ```
 
+## 可用指标
+
+| 类别 | 函数 | 说明 |
+|------|------|------|
+| 趋势 | `ma(x, window)` | 简单移动平均 |
+| | `ema(x, window)` | 指数移动平均 |
+| | `macd(x, fast, slow, signal)` | MACD（返回3条线） |
+| 震荡 | `rsi(x, window)` | 相对强弱指数 |
+| | `kdj(high, low, close, window)` | KDJ（返回3条线） |
+| 波动 | `std(x, window)` | 滚动标准差 |
+| | `atr(high, low, close, window)` | 平均真实波幅 |
+| | `bollinger(x, window, k)` | 布林带（返回3条线） |
+| 统计 | `corr(x, y)` | Pearson 相关系数 |
+| | `beta(asset, benchmark, window)` | 滚动 Beta |
+| | `sharpe(returns, risk_free, annualize)` | 夏普比率 |
+| | `max_drawdown(close)` | 最大回撤 |
+| | `var(returns, confidence)` | 历史在险价值 |
+| 变换 | `returns(x)` | 收益率 |
+| | `log_returns(x)` | 对数收益率 |
+
 ## 回测
 
 回测子系统（`stockstat.backtest`）支持自定义策略、多标的交易组、多时间尺度 K 线，并在策略内直接复用计算库的全部指标。
@@ -420,33 +440,13 @@ cd frontend && python -m pytest tests/test_integration.py -v -s
 cd frontend && python -m pytest tests/test_matplotlib_charts.py -v
 ```
 
-## 可用指标
-
-| 类别 | 函数 | 说明 |
-|------|------|------|
-| 趋势 | `ma(x, window)` | 简单移动平均 |
-| | `ema(x, window)` | 指数移动平均 |
-| | `macd(x, fast, slow, signal)` | MACD（返回3条线） |
-| 震荡 | `rsi(x, window)` | 相对强弱指数 |
-| | `kdj(high, low, close, window)` | KDJ（返回3条线） |
-| 波动 | `std(x, window)` | 滚动标准差 |
-| | `atr(high, low, close, window)` | 平均真实波幅 |
-| | `bollinger(x, window, k)` | 布林带（返回3条线） |
-| 统计 | `corr(x, y)` | Pearson 相关系数 |
-| | `beta(asset, benchmark, window)` | 滚动 Beta |
-| | `sharpe(returns, risk_free, annualize)` | 夏普比率 |
-| | `max_drawdown(close)` | 最大回撤 |
-| | `var(returns, confidence)` | 历史在险价值 |
-| 变换 | `returns(x)` | 收益率 |
-| | `log_returns(x)` | 对数收益率 |
-
 ## 文档
 
 - [使用文档](docs/USAGE_CN.md) — 详细示例与预期结果
-- [设计报告](DESIGN_CN.md) — 完整架构设计（含 [§12 回测子系统](DESIGN_CN.md#12-回测子系统设计) · [§13 回测可视化](DESIGN_CN.md#13-回测可视化子系统设计) · [§15 引擎增强](DESIGN_CN.md#15-回测引擎增强子系统设计) · [§16 可插拔执行模型](DESIGN_CN.md#16-可插拔执行模型设计)）
+- [设计报告](DESIGN_CN.md) — 完整架构设计（含 [§12 回测子系统](DESIGN_CN.md#12-回测子系统设计) · [§13 回测可视化](DESIGN_CN.md#13-回测可视化子系统设计) · [§15 引擎增强与可插拔执行模型](DESIGN_CN.md#15-回测引擎增强与可插拔执行模型)）
 - [回测阶段文档](docs/backtest/) — BT-0 ~ BT-14 + BT-V0 ~ V3 + 在线验证报告
-- [测试报告](reports/TEST_REPORT.md) — 测试结果
-- [PAXG 周末规律研究](working/PAXG-Weekend-Monday-Law-v5-redo/) — v1~v5 完整研究 + 引擎改进报告
+- [测试报告](reports/TEST_REPORT.md) — 测试结果（361 项）
+- PAXG 周末规律研究（`working/` 目录，未纳入版本控制）— v1~v5 完整研究 + 引擎改进报告，阶段报告已提取至 [docs/backtest/BT11_BT14_CN.md](docs/backtest/BT11_BT14_CN.md)
 
 ## 配置
 
@@ -473,15 +473,9 @@ Copyright (C) 2026 RESBI
 
 ---
 
-## 声明
+## 声明与免责声明
 
-本项目——包括所有源代码、文档、测试用例和图表——均由 **GLM-5.2**（AI 助手）完整设计、实现和编写。
-
-所有代码通过与用户的迭代对话生成，经自动化测试套件验证，并使用真实市场数据（Yahoo Finance + Binance）进行了验证。
-
----
-
-## 免责声明
+本项目——包括所有源代码、文档、测试用例和图表——均由 **GLM-5.2**（AI 助手）完整设计、实现和编写。所有代码通过与用户的迭代对话生成，经自动化测试套件验证，并使用真实市场数据（Yahoo Finance + Binance）进行了验证。
 
 本软件仅供**学习和研究目的**使用，**不构成**任何财务、投资或交易建议。
 

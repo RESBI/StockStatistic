@@ -108,6 +108,26 @@ result = client.run_dsl('''
 ''')
 ```
 
+## Available Indicators
+
+| Category | Function | Description |
+|----------|----------|-------------|
+| Trend | `ma(x, window)` | Simple moving average |
+| | `ema(x, window)` | Exponential moving average |
+| | `macd(x, fast, slow, signal)` | MACD (returns 3 series) |
+| Oscillator | `rsi(x, window)` | Relative Strength Index |
+| | `kdj(high, low, close, window)` | KDJ indicator (returns 3 series) |
+| Volatility | `std(x, window)` | Rolling standard deviation |
+| | `atr(high, low, close, window)` | Average True Range |
+| | `bollinger(x, window, k)` | Bollinger Bands (returns 3 series) |
+| Statistics | `corr(x, y)` | Pearson correlation |
+| | `beta(asset, benchmark, window)` | Rolling Beta |
+| | `sharpe(returns, risk_free, annualize)` | Sharpe ratio |
+| | `max_drawdown(close)` | Maximum drawdown |
+| | `var(returns, confidence)` | Historical VaR |
+| Transform | `returns(x)` | Percentage returns |
+| | `log_returns(x)` | Log returns |
+
 ## Backtesting
 
 The backtest subsystem (`stockstat.backtest`) supports custom strategies, multi-instrument trading groups, multi-timeframe bars, and reuses all compute-library indicators inside strategies.
@@ -378,32 +398,13 @@ cd frontend && python -m pytest tests/test_integration.py -v -s
 cd frontend && python -m pytest tests/test_matplotlib_charts.py -v
 ```
 
-## Available Indicators
-
-| Category | Function | Description |
-|----------|----------|-------------|
-| Trend | `ma(x, window)` | Simple moving average |
-| | `ema(x, window)` | Exponential moving average |
-| | `macd(x, fast, slow, signal)` | MACD (returns 3 series) |
-| Oscillator | `rsi(x, window)` | Relative Strength Index |
-| | `kdj(high, low, close, window)` | KDJ indicator (returns 3 series) |
-| Volatility | `std(x, window)` | Rolling standard deviation |
-| | `atr(high, low, close, window)` | Average True Range |
-| | `bollinger(x, window, k)` | Bollinger Bands (returns 3 series) |
-| Statistics | `corr(x, y)` | Pearson correlation |
-| | `beta(asset, benchmark, window)` | Rolling Beta |
-| | `sharpe(returns, risk_free, annualize)` | Sharpe ratio |
-| | `max_drawdown(close)` | Maximum drawdown |
-| | `var(returns, confidence)` | Historical VaR |
-| Transform | `returns(x)` | Percentage returns |
-| | `log_returns(x)` | Log returns |
-
 ## Documentation
 
 - [Usage Guide](docs/USAGE.md) — detailed examples with expected results
-- [Design Report](DESIGN.md) — full architecture design (incl. [§12 Backtest Subsystem](DESIGN.md#12-backtest-subsystem-design) · [§14 Backtest Visualization](DESIGN.md#13-backtest-visualization-subsystem-design))
-- [Backtest Phase Docs](docs/backtest/) — BT-0 through BT-7 + BT-V0 through V3 + online validation report
-- [Test Report](reports/TEST_REPORT.md) — test results
+- [Design Report](DESIGN.md) — full architecture design (incl. [§12 Backtest Subsystem](DESIGN.md#12-backtest-subsystem-design) · [§13 Backtest Visualization](DESIGN.md#13-backtest-visualization-subsystem-design) · [§15 Engine Enhancement & Pluggable Execution](DESIGN.md#15-backtest-engine-enhancement--pluggable-execution-model))
+- [Backtest Phase Docs](docs/backtest/) — BT-0 through BT-14 + BT-V0 through V3 + online validation report
+- [Test Report](reports/TEST_REPORT.md) — test results (361 tests)
+- PAXG Weekend-Monday research (`working/` directory, not version-controlled) — v1~v5 complete study + engine improvement reports; stage report extracted to [docs/backtest/BT11_BT14_CN.md](docs/backtest/BT11_BT14_CN.md)
 
 ## Configuration
 
@@ -430,15 +431,9 @@ This program is distributed in the hope that it will be useful, but WITHOUT ANY 
 
 ---
 
-## Acknowledgements
+## Acknowledgements & Disclaimer
 
-This project — including all source code, documentation, tests, and charts — was entirely designed, implemented, and documented by **GLM-5.2**, an AI assistant.
-
-All code was generated through iterative conversation with the user, verified by automated test suites, and validated against real market data (Yahoo Finance + Binance).
-
----
-
-## Disclaimer
+This project — including all source code, documentation, tests, and charts — was entirely designed, implemented, and documented by **GLM-5.2**, an AI assistant. All code was generated through iterative conversation with the user, verified by automated test suites, and validated against real market data (Yahoo Finance + Binance).
 
 This software is provided for **educational and research purposes only**. It is **not** financial, investment, or trading advice.
 

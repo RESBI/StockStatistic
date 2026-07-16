@@ -17,7 +17,8 @@
 11. [PAXG 周末相关性分析](#11-paxg-周末相关性分析)
 12. [结果导出](#12-结果导出)
 13. [回测](#13-回测)
-14. [回测可视化](#14-回测可视化)
+14. [回测高级功能](#14-回测高级功能)
+15. [回测可视化](#15-回测可视化)
 
 ---
 
@@ -855,7 +856,11 @@ eng = BacktestEngine(data=data, strategy=s, lookahead_audit=True)
 # 若策略误访问 > t 的数据，抛 LookaheadError
 ```
 
-### 示例 13.12：Binance 费率模型（4 种预设）
+---
+
+## 14. 回测高级功能
+
+### 示例 14.1：Binance 费率模型（4 种预设）
 
 ```python
 from stockstat.backtest import BinanceCost, BINANCE_SPOT, BINANCE_SPOT_BNB, \
@@ -876,7 +881,7 @@ custom = MakerTakerCost(maker_rate=0.0002, taker_rate=0.0005, slippage=0.0)
 # LIMIT → maker_rate, MARKET/STOP → taker_rate
 ```
 
-### 示例 13.13：Intrabar 执行（同 bar 入场+出场）
+### 示例 14.2：Intrabar 执行（同 bar 入场+出场）
 
 `IntrabarExecution` 模型在 parent bar（如日线）内部用子 bar（如 1h）模拟订单撮合——同 bar 内完成入场→退出全生命周期。
 
@@ -933,7 +938,7 @@ print(res.exit_reason_stats())
 
 > **关键**：默认 `execution_model=None` 等价于 `NextBarExecution`（现有行为）。只有传入 `IntrabarExecution(...)` 才启用 intrabar 模式。
 
-### 示例 13.14：双向挂单互斥（OCO Mutual）
+### 示例 14.3：双向挂单互斥（OCO Mutual）
 
 核心 B 策略族需要同时挂买限+卖限，若双向均成交则取消交易（避免净零持仓白付手续费）。
 
@@ -972,7 +977,7 @@ class DualLimit(Strategy, IntrabarMixin):
         ]
 ```
 
-### 示例 13.15：订单优先级（SL 优先于 TP）
+### 示例 14.4：订单优先级（SL 优先于 TP）
 
 同一子 bar 内止损和止盈都可能触发时，通过 `priority` 字段控制撮合顺序（0 = 最高优先）。
 
@@ -1005,7 +1010,7 @@ class TPWithSL(Strategy, IntrabarMixin):
         ]
 ```
 
-### 示例 13.16：批量回测（多策略 × 多费率）
+### 示例 14.5：批量回测（多策略 × 多费率）
 
 ```python
 from stockstat.backtest import StrategyBatchRunner
@@ -1045,7 +1050,7 @@ results_all_fees = runner.run_all_fees(
 df_all = results_all_fees.to_dataframe()
 ```
 
-### 示例 13.17：子期间与状态分析
+### 示例 14.6：子期间与状态分析
 
 ```python
 from stockstat.backtest import BacktestAnalyzer
@@ -1075,7 +1080,7 @@ exit_stats = res.exit_reason_stats()
 #  'close': {'count': 35, 'avg_pnl': -0.15}}
 ```
 
-### 示例 13.18：DCA 基准与费率扫描
+### 示例 14.7：DCA 基准与费率扫描
 
 ```python
 from stockstat.backtest import dca_equity, fee_sweep, maker_taker_sweep
@@ -1102,7 +1107,7 @@ mt_results = maker_taker_sweep(
 )
 ```
 
-回测可视化（仪表盘、热力图、收益分布等 9 种图表）见 [§14 回测可视化](#14-回测可视化)。
+回测可视化（仪表盘、热力图、收益分布等 9 种图表）见 [§15 回测可视化](#15-回测可视化)。
 
 ### 回测 API 速查
 
@@ -1134,13 +1139,13 @@ mt_results = maker_taker_sweep(
 
 ---
 
-## 14. 回测可视化
+## 15. 回测可视化
 
 回测可视化子系统提供 9 种图表类型，**核心零 matplotlib 硬依赖**——安装后自动激活。复用 [§10 matplotlib 可视化](#10-matplotlib-可视化) 的协议化设计，但提供回测专用的 `BacktestChartSpec`（支持多子图、填充区、热力图、直方图等丰富元素）。以下示例使用真实市场数据（Binance BTC/USDT 2023-2024）生成，图像见 `docs/images/backtest_*.png`。
 
 ![BTC 回测仪表盘](../docs/images/backtest_btc_dashboard.png)
 
-### 示例 14.1：一行渲染与批量保存
+### 示例 15.1：一行渲染与批量保存
 
 ```python
 res = BacktestEngine(data=data, strategy=ma_cross,

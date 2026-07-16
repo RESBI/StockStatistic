@@ -21,7 +21,10 @@
 11. [Development Roadmap](#11-development-roadmap)
 12. [Backtest Subsystem Design](#12-backtest-subsystem-design)
 13. [Backtest Visualization Subsystem Design](#13-backtest-visualization-subsystem-design)
-14. [Backtest Phase Documentation Index](#14-backtest-phase-documentation-index)
+14. [Backtest Engine Enhancement & Pluggable Execution Model](#15-backtest-engine-enhancement--pluggable-execution-model)
+- [Appendix A: Data Source Compatibility Matrix](#appendix-a-data-source-compatibility-matrix)
+- [Appendix B: OHLCV Data Volume Estimation](#appendix-b-ohlcv-data-volume-estimation)
+- [Appendix C: Backtest Phase Documentation Index](#appendix-c-backtest-phase-documentation-index)
 
 ---
 
@@ -2096,47 +2099,13 @@ backtest_full = ["stockstat[backtest]", "stockstat[optimize]",
 
 ---
 
-## 14. Backtest Phase Documentation Index
+## 15. Backtest Engine Enhancement & Pluggable Execution Model
 
-The backtest core (BT-0–BT-7) and backtest visualization (BT-V0–BT-V3 + online validation) phase docs are indexed below under `docs/backtest/`:
+> **Added in v1.5 (BT-8–BT-10)**, **extended in v1.6 (BT-11–BT-14)**. This section merges two rounds of enhancement: BT-8–10 adds intrabar limit fills, Maker/Taker fees, OCO orders, and batch backtesting based on v5 research findings; BT-11–14 abstracts "how orders fill" into a pluggable `ExecutionModel`, enabling intrabar sub-bar execution **without adding a new engine class**. All enhancements follow **backward-compatible, composition-first, minimal-invasion** principles.
 
-### 14.1 Backtest Core (BT series)
+### 15.1 BT-8–10: Engine Enhancement Subsystem
 
-| Phase | Document | Code | Tests |
-|-------|----------|------|-------|
-| BT-0 | [docs/backtest/BT0.md](docs/backtest/BT0.md) | `backtest/` skeleton + dataclasses | `test_backtest_iface.py` |
-| BT-1 | [docs/backtest/BT1.md](docs/backtest/BT1.md) | MVP five modules | `test_backtest_mvp.py` |
-| BT-2 | [docs/backtest/BT2.md](docs/backtest/BT2.md) | multi-asset/short/orders | `test_backtest_portfolio.py` |
-| BT-3 | [docs/backtest/BT3.md](docs/backtest/BT3.md) | multi-tf alignment/audit | `test_backtest_multitf.py` |
-| BT-4 | [docs/backtest/BT4.md](docs/backtest/BT4.md) | cost/fill models | `test_backtest_cost.py` |
-| BT-5 | [docs/backtest/BT5.md](docs/backtest/BT5.md) | metrics/report/viz | `test_backtest_metrics.py` |
-| BT-6 | [docs/backtest/BT6.md](docs/backtest/BT6.md) | optimization/walk-forward/MC | `test_backtest_optimize.py` |
-| BT-7 | [docs/backtest/BT7.md](docs/backtest/BT7.md) | DSL integration/12 strategies | `test_backtest_strategies.py` |
-| BT-8 | [docs/backtest/BT8.md](docs/backtest/BT8.md) | P0 fixes: IntrabarLimitFill + MakerTakerCost + OCO | `test_backtest_p0.py` |
-| BT-9 | [docs/backtest/BT9.md](docs/backtest/BT9.md) | P1 enhancements: BinanceCost + IntrabarSimulator + BatchRunner + exit_reason | `test_backtest_p1.py` |
-| BT-10 | [docs/backtest/BT10.md](docs/backtest/BT10.md) | P2 analysis: annualization + DCA + Analyzer + fee_sweep | `test_backtest_p2.py` |
-| BT-11 | `working/PAXG-Weekend-Monday-Law-v5-redo/STAGE_REPORT.md` | ExecutionModel ABC + IntrabarFillModel + Fill/Order field extensions | `test_backtest_intrabar.py` |
-| BT-12 | same | IntrabarExecution + IntrabarMixin + OCO mutual + priority | `test_backtest_intrabar.py` |
-| BT-13 | same | v5 strategy migration (33 strategies × 4 fees = 132 runs validated) | `run_redo.py` |
-| BT-14 | same | Analysis & visualization adaptation | `plots_redo.py` |
-
-### 14.2 Backtest Visualization (BT-V series + online validation)
-
-| Phase | Document | Code | Tests |
-|-------|----------|------|-------|
-| BT-V0 | [docs/backtest/BTV0.md](docs/backtest/BTV0.md) | `chart_spec.py` + `chart_registry.py` + `null_charts.py` + `chart_factory.py` | `test_backtest_viz_iface.py` |
-| BT-V1 | [docs/backtest/BTV1.md](docs/backtest/BTV1.md) | `matplotlib_charts.py` basic rendering | `test_backtest_viz_mpl.py` |
-| BT-V2 | [docs/backtest/BTV2.md](docs/backtest/BTV2.md) | histogram/heatmap/bar advanced charts | `test_backtest_viz_advanced.py` |
-| BT-V3 | [docs/backtest/BTV3.md](docs/backtest/BTV3.md) | dashboard combo + annotations | `test_backtest_viz_dashboard.py` |
-| BT-V Online | [docs/backtest/BT_VIZ_ONLINE_REPORT.md](docs/backtest/BT_VIZ_ONLINE_REPORT.md) | real-data online validation + 13 images | `test_backtest_viz_online.py` |
-
----
-
-## 15. Backtest Engine Enhancement Subsystem Design
-
-> **Added in v1.5.** Enhances the backtest subsystem (§12) based on 12 deficiencies exposed during v5 research (see `working/PAXG-Weekend-Monday-Law-v5/BACKTEST_IMPROVEMENT_REPORT.md`). Enhancements follow **backward-compatible, composition-first, minimal-invasion** principles — new classes/methods are added without breaking existing APIs.
-
-### 15.1 Design Goals
+#### 15.1.1 Design Goals
 
 | Goal | Description |
 |------|-------------|
@@ -2288,13 +2257,13 @@ No new external dependencies. All enhancements are pure Python + pandas/numpy.
 
 ---
 
-## 16. Pluggable Execution Model Design
+### 15.7 BT-11–14: Pluggable Execution Model
 
-> **Added in v1.6 (BT-11–BT-14).** Builds on §15 enhancements by abstracting "how orders fill" into a pluggable `ExecutionModel`, injected into `BacktestEngine` via composition. Supports intrabar sub-bar execution **without adding a new engine class**. Design principle: general solution enriches library + simplified interface stays concise + strict backward compatibility.
+> Builds on §15.1–15.6 (BT-8–10) by abstracting "how orders fill" into a pluggable `ExecutionModel`, injected into `BacktestEngine` via composition. Supports intrabar sub-bar execution **without adding a new engine class**. Design principle: general solution enriches library + simplified interface stays concise + strict backward compatibility.
 
-### 16.1 Design Motivation
+#### 15.7.1 Design Motivation
 
-§15's BT-8–BT-10 addressed intrabar limit fills, Maker/Taker fees, and batch backtesting, but v5 research still exposed 5 structural gaps (see `working/PAXG-Weekend-Monday-Law-v5-redo/BACKTEST_IMPROVEMENT_REPORT_V2.md`):
+§15.1's BT-8–BT-10 addressed intrabar limit fills, Maker/Taker fees, and batch backtesting, but v5 research still exposed 5 structural gaps (see `docs/backtest/BT11_BT14_CN.md`):
 
 | Gap | Description | Root Cause |
 |-----|-------------|------------|
@@ -2306,7 +2275,7 @@ No new external dependencies. All enhancements are pure Python + pandas/numpy.
 
 The V1 approach (a separate `IntrabarExecutionEngine` class) had 8 compatibility blind spots. The V2 approach uses a pluggable `ExecutionModel` architecture: **one engine class + two execution modes**.
 
-### 16.2 Architecture
+#### 15.7.2 Architecture
 
 ```mermaid
 graph TB
@@ -2339,7 +2308,7 @@ graph TB
     STR -.-> MIX
 ```
 
-### 16.3 Core Interfaces
+#### 15.7.3 Core Interfaces
 
 ```python
 # execution_model.py (new file)
@@ -2363,7 +2332,7 @@ class IntrabarExecution(ExecutionModel):
     is_intrabar = True
 ```
 
-### 16.4 File Changes
+#### 15.7.4 File Changes
 
 | File | Change | Content |
 |------|--------|---------|
@@ -2376,7 +2345,7 @@ class IntrabarExecution(ExecutionModel):
 | `broker.py` | New method | `submit_oco_mutual()` |
 | `strategy.py` | New class | `IntrabarMixin` (optional mixin with `define_exits` default) |
 
-### 16.5 Gap Resolution
+#### 15.7.5 Gap Resolution
 
 | Gap | Solution |
 |-----|----------|
@@ -2386,7 +2355,7 @@ class IntrabarExecution(ExecutionModel):
 | Gap-4 | `register_oco_mutual()` + pre-scan detects dual fills |
 | Gap-5 | `Order.priority` field + sort (SL priority=0 > TP priority=1) |
 
-### 16.6 Backward Compatibility Guarantee
+#### 15.7.6 Backward Compatibility Guarantee
 
 | Existing API | After Enhancement | Compatibility |
 |-------------|-------------------|---------------|
@@ -2397,7 +2366,7 @@ class IntrabarExecution(ExecutionModel):
 | `@strategy` functions | Unchanged | ✅ Function-style strategies fully compatible |
 | `ctx.intrabar_submit()` | Degrades in default mode | ✅ Falls back to `broker.submit` + warning |
 
-### 16.7 Implementation Phases (BT-11–BT-14)
+#### 15.7.7 Implementation Phases (BT-11–BT-14)
 
 | Phase | Content | Tests | Priority |
 |-------|---------|-------|----------|
@@ -2406,7 +2375,7 @@ class IntrabarExecution(ExecutionModel):
 | **BT-13** | v5 strategy migration validation (33 strategies × 4 fees = 132 runs) | `run_redo.py` (PnL error < 0.1%) | ★★☆ |
 | **BT-14** | Analysis & visualization adaptation | `plots_redo.py` | ★☆☆ |
 
-### 16.8 Validation Results
+#### 15.7.8 Validation Results
 
 - All 314 pre-existing tests pass (zero regression)
 - All 23 new intrabar tests pass
@@ -2435,6 +2404,40 @@ class IntrabarExecution(ExecutionModel):
 | Crypto 1-min data (200 instruments) | 200 | 288K rows | 73M rows | ~5 GB |
 
 > TimescaleDB compression can reduce this to 10%~20% of the raw volume.
+
+## Appendix C: Backtest Phase Documentation Index
+
+The backtest core (BT-0–BT-14) and backtest visualization (BT-V0–BT-V3 + online validation) phase docs are indexed below under `docs/backtest/`:
+
+### C.1 Backtest Core (BT series)
+
+| Phase | Document | Code | Tests |
+|-------|----------|------|-------|
+| BT-0 | [docs/backtest/BT0.md](docs/backtest/BT0.md) | `backtest/` skeleton + dataclasses | `test_backtest_iface.py` |
+| BT-1 | [docs/backtest/BT1.md](docs/backtest/BT1.md) | MVP five modules | `test_backtest_mvp.py` |
+| BT-2 | [docs/backtest/BT2.md](docs/backtest/BT2.md) | multi-asset/short/orders | `test_backtest_portfolio.py` |
+| BT-3 | [docs/backtest/BT3.md](docs/backtest/BT3.md) | multi-tf alignment/audit | `test_backtest_multitf.py` |
+| BT-4 | [docs/backtest/BT4.md](docs/backtest/BT4.md) | cost/fill models | `test_backtest_cost.py` |
+| BT-5 | [docs/backtest/BT5.md](docs/backtest/BT5.md) | metrics/report/viz | `test_backtest_metrics.py` |
+| BT-6 | [docs/backtest/BT6.md](docs/backtest/BT6.md) | optimization/walk-forward/MC | `test_backtest_optimize.py` |
+| BT-7 | [docs/backtest/BT7.md](docs/backtest/BT7.md) | DSL integration/12 strategies | `test_backtest_strategies.py` |
+| BT-8 | [docs/backtest/BT8.md](docs/backtest/BT8.md) | P0 fixes: IntrabarLimitFill + MakerTakerCost + OCO | `test_backtest_p0.py` |
+| BT-9 | [docs/backtest/BT9.md](docs/backtest/BT9.md) | P1 enhancements: BinanceCost + IntrabarSimulator + BatchRunner + exit_reason | `test_backtest_p1.py` |
+| BT-10 | [docs/backtest/BT10.md](docs/backtest/BT10.md) | P2 analysis: annualization + DCA + Analyzer + fee_sweep | `test_backtest_p2.py` |
+| BT-11 | [docs/backtest/BT11_BT14_CN.md](docs/backtest/BT11_BT14_CN.md) | ExecutionModel ABC + IntrabarFillModel + Fill/Order field extensions | `test_backtest_intrabar.py` |
+| BT-12 | same | IntrabarExecution + IntrabarMixin + OCO mutual + priority | `test_backtest_intrabar.py` |
+| BT-13 | same | v5 strategy migration (33 strategies × 4 fees = 132 runs validated) | `run_redo.py` |
+| BT-14 | same | Analysis & visualization adaptation | `plots_redo.py` |
+
+### C.2 Backtest Visualization (BT-V series + online validation)
+
+| Phase | Document | Code | Tests |
+|-------|----------|------|-------|
+| BT-V0 | [docs/backtest/BTV0.md](docs/backtest/BTV0.md) | `chart_spec.py` + `chart_registry.py` + `null_charts.py` + `chart_factory.py` | `test_backtest_viz_iface.py` |
+| BT-V1 | [docs/backtest/BTV1.md](docs/backtest/BTV1.md) | `matplotlib_charts.py` basic rendering | `test_backtest_viz_mpl.py` |
+| BT-V2 | [docs/backtest/BTV2.md](docs/backtest/BTV2.md) | histogram/heatmap/bar advanced charts | `test_backtest_viz_advanced.py` |
+| BT-V3 | [docs/backtest/BTV3.md](docs/backtest/BTV3.md) | dashboard combo + annotations | `test_backtest_viz_dashboard.py` |
+| BT-V Online | [docs/backtest/BT_VIZ_ONLINE_REPORT.md](docs/backtest/BT_VIZ_ONLINE_REPORT.md) | real-data online validation + 13 images | `test_backtest_viz_online.py` |
 
 ---
 
