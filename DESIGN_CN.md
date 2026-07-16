@@ -1,8 +1,8 @@
-# StockStat — 可编程金融标的统计计算平台 设计报告
+﻿# StockStat — 可编程金融标的统计计算平台 设计报告
 
-> **版本**: v1.5  
-> **日期**: 2026-07-16  
-> **状态**: 设计阶段（新增回测引擎增强子系统 BT-8~BT-10）
+> **版本**: v1.6  
+> **日期**: 2026-07-17  
+> **状态**: 已实现（含回测子系统、可插拔执行模型、可视化层、分析工具）
 
 ---
 
@@ -20,8 +20,20 @@
 10. [项目结构](#10-项目结构)
 11. [开发路线图](#11-开发路线图)
 12. [回测子系统设计](#12-回测子系统设计)
-13. [回测可视化子系统设计](#13-回测可视化子系统设计)
-14. [回测引擎增强与可插拔执行模型](#15-回测引擎增强与可插拔执行模型)
+    - 12.1 设计目标与原则
+    - 12.2 顶层架构
+    - 12.3 模块划分
+    - 12.4 核心接口签名
+    - 12.5 多 timeframe 对齐与未来函数防护
+    - 12.6 成本与成交模型
+    - 12.7 仓位规模算法
+    - 12.8 绩效指标
+    - 12.9 与既有模块集成
+    - 12.10 内置示例策略清单
+    - 12.11 依赖声明
+    - 12.12 可插拔执行模型
+    - 12.13 回测可视化
+    - 12.14 分析工具与批量回测
 - [附录 A: 数据源兼容性矩阵](#附录-a-数据源兼容性矩阵)
 - [附录 B: OHLCV 数据量估算](#附录-b-ohlcv-数据量估算)
 - [附录 C: 回测阶段实现文档索引](#附录-c-回测阶段实现文档索引)
@@ -103,13 +115,16 @@ graph TB
         CE[计算引擎<br/>Compute Engine]
         DSL[DSL 解析器<br/>DSL Parser]
         IL[指标库<br/>Indicator Library]
+        BT[回测子系统<br/>Backtest Engine + ExecutionModel<br/>+ 可视化 + 分析工具]
         EXP[结果导出<br/>Export]
 
         CONN --> DAL
         DSL --> CE
         DAL --> CE
         IL --> CE
+        CE --> BT
         CE --> EXP
+        BT --> EXP
     end
 
     subgraph "用户层"
@@ -1599,30 +1614,35 @@ StockStatistic/
 │   │   │   ├── engine.py            # 核心引擎
 │   │   │   ├── context.py           # 计算上下文
 │   │   │   └── registry.py          # 指标注册表
-│   │   ├── backtest/                # 回测子系统（v1.3 新增）
-│   │   │   ├── __init__.py          # 对外导出 BacktestEngine/Strategy/...
-│   │   │   ├── engine.py            # 主循环 + 事件分发
-│   │   │   ├── context.py           # BacktestContext（策略可见世界）
-│   │   │   ├── data_feed.py         # DataFeed + Universe 多标的多 tf 对齐
-│   │   │   ├── strategy.py          # Strategy 基类 + @strategy 装饰器
-│   │   │   ├── orders.py            # Order/Fill/OrderType 数据类
-│   │   │   ├── broker.py            # SimulatedBroker 撮合引擎
-│   │   │   ├── portfolio.py         # Portfolio/Position 账户与持仓
-│   │   │   ├── cost_model.py        # 手续费/滑点模型
-│   │   │   ├── fill_model.py        # 成交价决定模型
+│   │   ├── backtest/                # 回测子系统
+│   │   │   ├── __init__.py          # 对外导出 BacktestEngine/Strategy/IntrabarMixin/...
+│   │   │   ├── engine.py            # BacktestEngine 主循环（含 execution_model 参数）
+│   │   │   ├── execution_model.py   # ExecutionModel ABC + NextBarExecution + IntrabarExecution
+│   │   │   ├── context.py           # BacktestContext（含 intrabar_submit）
+│   │   │   ├── data_feed.py         # DataFeed + Universe（含 intrabar_slice）
+│   │   │   ├── strategy.py          # Strategy 基类 + @strategy + IntrabarMixin
+│   │   │   ├── orders.py            # Order/Fill（含 exit_reason/priority/sub_bar_ts）
+│   │   │   ├── broker.py            # SimulatedBroker（含 submit_oco/submit_oco_mutual）
+│   │   │   ├── portfolio.py         # Portfolio/Position
+│   │   │   ├── cost_model.py        # CostModel + MakerTaker/Binance（4 预设）
+│   │   │   ├── fill_model.py        # FillModel + IntrabarLimitFill + IntrabarFillModel
+│   │   │   ├── intrabar.py          # IntrabarSimulator（独立工具）
 │   │   │   ├── sizing.py            # 仓位规模算法
-│   │   │   ├── metrics.py           # 绩效聚合（复用 indicators.statistics）
-│   │   │   ├── result.py            # BacktestResult + 报告
-│   │   │   ├── benchmark.py         # 买入持有等基准
-│   │   │   ├── optimizer.py         # 参数网格/optuna（可选 extras）
+│   │   │   ├── metrics.py           # 绩效聚合
+│   │   │   ├── result.py            # BacktestResult（含 exit_reason_stats）
+│   │   │   ├── benchmark.py         # buy_and_hold / dca_equity
+│   │   │   ├── analyzer.py          # BacktestAnalyzer
+│   │   │   ├── batch_runner.py      # StrategyBatchRunner
+│   │   │   ├── fee_sweep.py         # fee_sweep / maker_taker_sweep
+│   │   │   ├── optimizer.py         # 参数网格/optuna（可选）
 │   │   │   ├── walkforward.py       # 走样分析（可选）
-│   │   │   ├── montecarlo.py        # 蒙特卡洛扰动（可选）
+│   │   │   ├── montecarlo.py        # 蒙特卡洛（可选）
 │   │   │   ├── plot_adapter.py      # equity/trades → PlotSpec（向后兼容）
-│   │   │   ├── chart_spec.py        # BacktestChartSpec 专用规格（v1.4）
-│   │   │   ├── chart_registry.py    # 回测图表类型注册表（v1.4）
-│   │   │   ├── chart_factory.py     # detect + get_chart_renderer（v1.4）
-│   │   │   ├── null_charts.py       # NullBacktestRenderer 零依赖兜底（v1.4）
-│   │   │   └── matplotlib_charts.py # MatplotlibBacktestRenderer 延迟导入（v1.4）
+│   │   │   ├── chart_spec.py        # BacktestChartSpec 专用规格
+│   │   │   ├── chart_registry.py    # 回测图表注册表
+│   │   │   ├── chart_factory.py     # detect + get_chart_renderer
+│   │   │   ├── null_charts.py       # NullBacktestRenderer（零依赖兜底）
+│   │   │   └── matplotlib_charts.py # MatplotlibBacktestRenderer（延迟导入）
 │   │   ├── indicators/              # 内置指标库
 │   │   │   ├── __init__.py
 │   │   │   ├── trend.py             # MA/EMA/MACD
@@ -1709,6 +1729,15 @@ gantt
     BTV2 高级图表(热力/分布)    :btv2, after btv1, 3d
     BTV3 组合仪表盘与标注       :btv3, after btv2, 3d
 
+    section 引擎增强与可插拔执行
+    BT8 IntrabarLimit+OCO+费率  :bt8, after btv3, 3d
+    BT9 BatchRunner+Simulator   :bt9, after bt8, 3d
+    BT10 Analyzer+DCA+Sweep     :bt10, after bt9, 3d
+    BT11 ExecutionModel基础     :bt11, after bt10, 3d
+    BT12 IntrabarExecution      :bt12, after bt11, 4d
+    BT13 v5策略迁移验证         :bt13, after bt12, 3d
+    BT14 分析与可视化适配       :bt14, after bt13, 2d
+
     section 测试与部署
     测试用例编写               :c1, after b3, 14d
     PAXG周末相关性测试          :c2, after b3, 7d
@@ -1737,51 +1766,76 @@ gantt
 | **BT-V1** | matplotlib 基础渲染 | line/fill/scatter/多子图 + equity/drawdown/trades 三图 |
 | **BT-V2** | 高级图表 | histogram/heatmap/bar + 收益分布/月度热力/参数热力 |
 | **BT-V3** | 组合仪表盘 | dashboard 多子图 + 交易标注 + 批量 savefig |
+| **BT-8** | 引擎增强 P0 | IntrabarLimitFill + MakerTakerCost + BinanceCost + OCO |
+| **BT-9** | 引擎增强 P1 | IntrabarSimulator + StrategyBatchRunner + exit_reason_stats |
+| **BT-10** | 引擎增强 P2 | BacktestAnalyzer + DCA 基准 + fee_sweep |
+| **BT-11** | 可插拔执行 | ExecutionModel ABC + IntrabarFillModel + Fill/Order 字段扩展 |
+| **BT-12** | intrabar 引擎 | IntrabarExecution + IntrabarMixin + OCO mutual + 订单优先级 |
+| **BT-13** | 策略迁移验证 | v5 的 33 策略 × 4 费率 = 132 次回测，PnL 误差 < 0.1% |
+| **BT-14** | 分析适配 | 可视化与分析工具适配 intrabar 执行结果 |
 
 ---
 
 ## 12. 回测子系统设计
 
-> **新增于 v1.3**。回测子系统是计算前端的可选增强模块，位于 `frontend/stockstat/backtest/`，纯前端实现，不修改存储后端。
+> 回测子系统是计算前端的可选增强模块，位于 `frontend/stockstat/backtest/`，纯前端实现，不修改存储后端。本章节涵盖回测引擎核心、可插拔执行模型、可视化层、分析工具与批量回测的完整设计。
 
 ### 12.1 设计目标与原则
 
 | 目标 | 说明 |
 |------|------|
 | **可配置** | 自定义策略函数、多标的交易组、多时间尺度 K 线、复用计算库指标 |
-| **可编程优先** | 不内置固定策略，提供 Strategy 基类 + `@strategy` 函数装饰器两种粒度 |
+| **可编程优先** | 不内置固定策略，提供 Strategy 基类 + `@strategy` 函数装饰器 + `IntrabarMixin` 三种粒度 |
 | **数据与计算分离** | 回测纯前端运行，数据经 `DataClient` 拉取后注入 `DataFeed` |
-| **零硬依赖** | 核心仅依赖 pandas/numpy；optuna 等走 `[optimize]` extras |
-| **未来函数防护** | 策略 `on_bar(t)` 只能访问 `≤ t` 数据；订单默认在 `t+1` open 成交 |
+| **零硬依赖** | 核心仅依赖 pandas/numpy；optuna/matplotlib 走 extras |
+| **未来函数防护** | 策略 `on_bar(t)` 只能访问 `≤ t` 数据；订单默认在 `t+1` open 成交；intrabar 模式下遮蔽 parent bar 的 close/high/low |
 | **可复现** | seed + 数据快照版本号记录于 `BacktestResult` |
+| **可插拔执行** | `ExecutionModel` ABC 支持 `NextBarExecution`（默认）和 `IntrabarExecution`（intrabar 子 bar 撮合） |
+| **向后兼容** | 所有新参数有默认值，默认行为 = 既有行为；现有代码零修改 |
 
 ### 12.2 顶层架构
 
 ```mermaid
 graph TB
     subgraph "用户策略代码 Strategy"
-        US["on_bar(ctx):<br/>ctx.compute.rsi(...)<br/>ctx.broker.buy(...)"]
+        US["on_bar(ctx):<br/>ctx.compute.rsi(...)<br/>ctx.broker.submit(...)<br/>ctx.intrabar_submit(...)<br/>define_exits(fill, ctx)"]
     end
 
-    subgraph "回测核心"
-        CTX["BacktestContext<br/>get(sym,tf,lookback) 切片<br/>compute: ComputeEngine 代理<br/>portfolio 只读视图"]
-        BRK["Broker<br/>submit/cancel<br/>撮合 → Fill"]
-        DF["DataFeed + Universe<br/>多标的多 tf 对齐<br/>时间游标 + 防未来函数"]
-        PF["Portfolio<br/>cash / positions<br/>update_fill / mark_to_market"]
-        ENG["BacktestEngine<br/>事件循环 + 钩子 + 结果收集"]
-        RES["BacktestResult<br/>trades / positions / equity<br/>metrics / plot / to_dict"]
+    subgraph "回测核心 BacktestEngine"
+        CTX["BacktestContext<br/>get/intrabar_submit<br/>compute/portfolio/history"]
+        BRK["SimulatedBroker<br/>submit/cancel/submit_oco<br/>submit_oco_mutual"]
+        DF["DataFeed + Universe<br/>多标的多 tf 对齐<br/>intrabar_slice()"]
+        PF["Portfolio<br/>cash / positions<br/>apply_fill / mark_to_market"]
+        EM["ExecutionModel<br/>NextBarExecution（默认）<br/>IntrabarExecution（intrabar 子 bar 撮合）"]
+        RES["BacktestResult<br/>fills / equity / metrics<br/>chart() / render() / exit_reason_stats()"]
+    end
+
+    subgraph "成本与成交模型"
+        CM["CostModel<br/>Percent/Fixed/Tiered/StampDuty<br/>MakerTaker/Binance（4 预设）"]
+        FM["FillModel<br/>NextOpen/NextClose/VWAP<br/>IntrabarLimit/IntrabarFillModel"]
+    end
+
+    subgraph "可视化层（零硬依赖 · 延迟激活）"
+        VIZ["BacktestChartSpec<br/>chart_registry / chart_factory<br/>Null / Matplotlib renderer"]
+    end
+
+    subgraph "分析工具"
+        ANA["BacktestAnalyzer<br/>subperiod / regime / rolling<br/>StrategyBatchRunner / fee_sweep"]
     end
 
     US -->|读| CTX
     US -->|写订单| BRK
+    US -->|intrabar 订单| EM
     CTX -->|提供对齐 bar| US
     BRK -->|推送成交| PF
+    EM -->|撮合| BRK
     DF --> CTX
+    DF --> EM
     PF --> CTX
-    ENG --> CTX
-    ENG --> BRK
-    ENG --> DF
-    ENG --> RES
+    CM --> BRK
+    FM --> EM
+    RES --> VIZ
+    RES --> ANA
 ```
 
 ### 12.3 模块划分
@@ -1789,23 +1843,33 @@ graph TB
 ```
 frontend/stockstat/backtest/
 ├── __init__.py              # 对外导出
-├── engine.py                # BacktestEngine：主循环、事件分发
-├── context.py               # BacktestContext：策略可见的世界
-├── data_feed.py             # DataFeed + Universe
-├── strategy.py              # Strategy 基类、@strategy 装饰器
-├── orders.py                # Order/Fill 数据类
-├── broker.py                # SimulatedBroker
+├── engine.py                # BacktestEngine：主循环、事件分发、execution_model 参数
+├── execution_model.py       # ExecutionModel ABC + NextBarExecution + IntrabarExecution
+├── context.py               # BacktestContext：策略可见的世界 + intrabar_submit()
+├── data_feed.py             # DataFeed + Universe + intrabar_slice()
+├── strategy.py              # Strategy 基类、@strategy 装饰器、IntrabarMixin
+├── orders.py                # Order/Fill 数据类（含 exit_reason、priority、sub_bar_ts）
+├── broker.py                # SimulatedBroker（含 submit_oco / submit_oco_mutual）
 ├── portfolio.py             # Portfolio/Position
-├── cost_model.py            # CostModel 抽象 + 多实现
-├── fill_model.py            # FillModel：成交价决定
+├── cost_model.py            # CostModel + Percent/Fixed/Tiered/StampDuty/MakerTaker/Binance
+├── fill_model.py            # FillModel + NextOpen/Close/VWAP/IntrabarLimit/IntrabarFillModel
+├── intrabar.py              # IntrabarSimulator（独立工具）
 ├── sizing.py                # 仓位规模算法
 ├── metrics.py               # 绩效聚合
-├── result.py                # BacktestResult + 报告
-├── benchmark.py             # 基准对比
+├── result.py                # BacktestResult + exit_reason_stats()
+├── benchmark.py             # buy_and_hold / dca_equity
+├── analyzer.py              # BacktestAnalyzer：subperiod/regime/rolling
+├── batch_runner.py          # StrategyBatchRunner + BatchResults
+├── fee_sweep.py             # fee_sweep() / maker_taker_sweep()
 ├── optimizer.py             # 参数优化（可选 extras）
 ├── walkforward.py           # 走样分析（可选）
 ├── montecarlo.py            # 蒙特卡洛（可选）
-└── plot_adapter.py          # equity/trades → PlotSpec
+├── plot_adapter.py          # equity/trades → PlotSpec（向后兼容）
+├── chart_spec.py            # BacktestChartSpec 专用规格
+├── chart_registry.py        # 图表类型注册表
+├── chart_factory.py         # detect + get_chart_renderer
+├── null_charts.py           # NullBacktestRenderer（零依赖兜底）
+└── matplotlib_charts.py     # MatplotlibBacktestRenderer（延迟导入）
 ```
 
 ### 12.4 核心接口签名
@@ -1819,8 +1883,30 @@ class Strategy:
     def on_bar_close(self, ctx: BacktestContext) -> None: ...
     def on_fill(self, fill: Fill, ctx: BacktestContext) -> None: ...
 
+class IntrabarMixin:
+    """可选 mixin：声明策略支持 intrabar 执行 + define_exits。"""
+    def define_exits(self, entry_fill: Fill, ctx: BacktestContext) -> list[Order]: ...
+
 def strategy(fn=None, *, name: str | None = None):
     """函数式策略装饰器：def on_bar(ctx) 简化写法。"""
+
+# execution_model.py
+class ExecutionModel(ABC):
+    """订单执行模型：决定订单如何在 bar 内成交。"""
+    def execute(self, engine, ctx, t, pending_orders) -> list[Fill]: ...
+    @property
+    def is_intrabar(self) -> bool: ...
+
+class NextBarExecution(ExecutionModel):
+    """默认：t 提交 → t+1 bar 成交。"""
+    is_intrabar = False
+
+class IntrabarExecution(ExecutionModel):
+    """intrabar：parent bar 内子 bar 序列撮合。"""
+    def __init__(self, intrabar_tf: str, parent_tf: str | None = None,
+                 fill_model: IntrabarFillModel | None = None): ...
+    def register_oco_mutual(self, order_a: Order, order_b: Order): ...
+    is_intrabar = True
 
 # context.py
 class BacktestContext:
@@ -1828,6 +1914,8 @@ class BacktestContext:
     current_bar: dict[str, pd.Series]
     def get(self, symbol: str, timeframe: str = "1d",
             lookback: int | None = None) -> pd.DataFrame: ...
+    def intrabar_submit(self, order: Order) -> str: ...         # intrabar 下单
+    def intrabar_submit_oco_mutual(self, a: Order, b: Order) -> tuple[str, str]: ...
     @property
     def compute(self) -> ComputeEngine: ...
     @property
@@ -1848,6 +1936,23 @@ class Order:
     stop_price: float | None = None
     time_in_force: Literal["day","gtc","ioc"] = "gtc"
     tag: str = ""
+    exit_reason: str = ""
+    priority: int = 99          # 0=最高（SL），99=默认最低
+
+@dataclass
+class Fill:
+    order_id: str
+    symbol: str
+    side: OrderSide | str
+    qty: float
+    price: float
+    commission: float = 0.0
+    slippage_cost: float = 0.0
+    ts: object = None
+    tag: str = ""
+    exit_reason: str = ""
+    sub_bar_ts: object = None   # intrabar 成交的子 bar 时间戳
+    sub_bar_index: int = -1     # 子 bar 序列位置
 
 # engine.py
 class BacktestEngine:
@@ -1857,10 +1962,13 @@ class BacktestEngine:
                  initial_cash: float = 1_000_000.0,
                  cost_model: CostModel = PercentCost(commission=0.0003, slippage=0.0002),
                  fill_model: FillModel = NextOpenFill(),
+                 execution_model: ExecutionModel | None = None,  # 默认 NextBarExecution
                  benchmark: str | None = None,
                  trade_on: Literal["open","close"] = "open",
                  allow_short: bool = False,
-                 seed: int = 0): ...
+                 lookahead_audit: bool = False,
+                 seed: int = 0,
+                 periods_per_year: int | None = None): ...
     def run(self) -> BacktestResult: ...
 ```
 
@@ -1884,17 +1992,28 @@ return df.iloc[-lookback:] if lookback else df
 
 ### 12.6 成本与成交模型
 
-| 模型 | 实现 | 说明 |
-|------|------|------|
-| `PercentCost` | 默认 | 比例手续费 + 比例滑点（bps） |
-| `FixedCost` | | 固定每笔费用 |
-| `TieredCost` | | 阶梯费率 |
-| `MinCost` | | 最小手续费兜底 |
-| `StampDutyCost` | | 印花税（股票卖出方） |
-| `FundingRateCost` | 可选 | 永续合约资金费率 |
-| `NextOpenFill` | 默认 | 下一 bar open 成交，最强防未来函数 |
-| `NextCloseFill` / `ThisCloseFill` | | 其他成交时点（告警） |
-| `VWAPFill` / `WorstPriceFill` | | 模拟冲击 |
+**成本模型**（`CostModel` ABC）：
+
+| 模型 | 说明 |
+|------|------|
+| `PercentCost` | 默认：比例手续费 + 比例滑点（bps） |
+| `FixedCost` | 固定每笔费用 |
+| `TieredCost` | 阶梯费率（按交易额） |
+| `MinCost` | 最小手续费兜底 |
+| `StampDutyCost` | 印花税（股票卖出方） |
+| `ZeroCost` | 零成本（测试用） |
+| `MakerTakerCost` | Maker/Taker 区分：LIMIT→maker_rate，MARKET/STOP→taker_rate |
+| `BinanceCost` | Binance 现货/合约 × BNB 抵扣（4 预设：`BINANCE_SPOT`/`_BNB`/`FUTURES`/`_BNB`） |
+
+**成交模型**（`FillModel` ABC）：
+
+| 模型 | 说明 |
+|------|------|
+| `NextOpenFill` | 默认：下一 bar open 成交，最强防未来函数 |
+| `NextCloseFill` / `ThisCloseFill` | 其他成交时点（`ThisCloseFill` 有告警） |
+| `VWAPFill` / `WorstPriceFill` | 模拟冲击成本 |
+| `IntrabarLimitFill` | 限价单在盘中价格穿越限价水平时成交（检查 next_bar high/low） |
+| `IntrabarFillModel` | 子 bar 序列扫描成交，返回 `IntrabarFillResult`（含 `sub_bar_ts`/`sub_bar_index`）；继承 `IntrabarLimitFill` |
 
 ### 12.7 仓位规模算法
 
@@ -1941,369 +2060,22 @@ return df.iloc[-lookback:] if lookback else df
 
 ```toml
 [project.optional-dependencies]
-backtest = ["stockstat"]                  # 核心回测，无额外依赖
-optimize = ["optuna>=3.5"]                # BT-6 参数优化
-backtest_full = ["stockstat[backtest]", "stockstat[optimize]", "stockstat[matplotlib]"]
-```
-
----
-
-## 13. 回测可视化子系统设计
-
-> **新增于 v1.4**。在回测子系统（§12）之上叠加**零硬依赖**的可视化层：回测核心不依赖 matplotlib，但安装后自动激活丰富的回测专用图表。
-
-### 13.1 背景与问题
-
-回测子系统已通过 `backtest/plot_adapter.py` 复用通用 `PlotSpec` 协议产出 equity/drawdown/trades 三种基础图，但存在以下不足：
-
-| 不足 | 说明 |
-|------|------|
-| PlotSpec 表达力有限 | 仅支持 line/bar/scatter + markers，无法表达**填充区域**（drawdown 填色）、**直方图**（收益分布）、**热力图**（月度/年度收益、参数网格）、**多子图组合**（仪表盘） |
-| 通用协议被污染风险 | 若直接扩展 PlotSpec 加入回测专用字段，会破坏通用 plot 协议的简洁性 |
-| matplotlib 耦合 | 当前 `MatplotlibRenderer` 只能渲染单 ax，回测需要的填充/热力/子图无法用通用 renderer 表达 |
-
-### 13.2 设计原则
-
-| 原则 | 说明 |
-|------|------|
-| **回测核心零硬依赖** | `backtest/` 包导入不触发 matplotlib；`import stockstat.backtest` 永远成功 |
-| **专用 spec 层** | 新增 `BacktestChartSpec`（回测专用），与通用 `PlotSpec` 平行，互不污染 |
-| **延迟激活** | matplotlib 安装后通过 `backtest.matplotlib_charts` 模块延迟导入激活 |
-| **协议化** | 定义 `BacktestChartRenderer` 协议，Null/Matplotlib 多后端可插拔 |
-| **渐进式** | 基础图（equity/drawdown）→ 高级图（热力/分布）→ 组合仪表盘 |
-
-### 13.3 架构
-
-```mermaid
-graph TB
-    subgraph "回测核心 backtest/（零 matplotlib 依赖）"
-        RES["BacktestResult"]
-        ADAPTER["plot_adapter.py<br/>基础 PlotSpec 构建器"]
-        CHARTSPEC["chart_spec.py<br/>BacktestChartSpec 专用规格"]
-        REG["chart_registry.py<br/>图表注册表"]
-    end
-
-    subgraph "通用 plot 协议（已有）"
-        PS["PlotSpec"]
-        PR["PlotRenderer<br/>Null/Matplotlib"]
-    end
-
-    subgraph "回测可视化后端（延迟导入 · 可选）"
-        BCMPL["backtest/matplotlib_charts.py<br/>MatplotlibBacktestRenderer<br/>（matplotlib 安装后才激活）"]
-        BCNULL["backtest/null_charts.py<br/>NullBacktestRenderer"]
-        FACTORY["chart_factory.py<br/>detect + get_chart_renderer"]
-    end
-
-    RES --> ADAPTER --> PS
-    RES --> CHARTSPEC
-    CHARTSPEC --> REG
-    REG --> FACTORY
-    FACTORY --> BCMPL
-    FACTORY --> BCNULL
-    BCMPL -.->|延迟 import| PR
-```
-
-### 13.4 模块划分（新增于 `frontend/stockstat/backtest/`）
-
-```
-frontend/stockstat/backtest/
-├── chart_spec.py            # BacktestChartSpec + 子规格数据类
-├── chart_registry.py        # 图表类型注册表
-├── chart_factory.py         # detect + get_chart_renderer
-├── null_charts.py           # NullBacktestRenderer（零依赖兜底）
-├── matplotlib_charts.py     # MatplotlibBacktestRenderer（延迟导入）
-└── plot_adapter.py          # （已有）扩展：同时返回 PlotSpec 与 BacktestChartSpec
-```
-
-### 13.5 BacktestChartSpec 设计
-
-```python
-# chart_spec.py
-@dataclass
-class ChartSeries:
-    name: str
-    data: pd.Series | pd.DataFrame
-    kind: str = "line"          # line/bar/scatter/fill/histogram/heatmap
-    color: str | None = None
-    secondary_y: bool = False
-    alpha: float = 1.0
-
-@dataclass
-class SubplotSpec:
-    title: str = ""
-    y_label: str = ""
-    series: list[ChartSeries] = field(default_factory=list)
-    share_x: bool = True
-
-@dataclass
-class BacktestChartSpec:
-    """回测专用图表规格，支持多子图、填充、热力、直方图。"""
-    title: str = ""
-    x_label: str = ""
-    subplots: list[SubplotSpec] = field(default_factory=list)
-    layout: tuple[int, int] = (1, 1)   # (rows, cols)
-    figsize: tuple[float, float] = (12, 6)
-    annotate_trades: bool = False
-    source_result: object = None       # 反向引用 BacktestResult（用于交易标注）
-
-    def add_subplot(self, title="", y_label="") -> SubplotSpec: ...
-    def to_dict(self) -> dict: ...     # 可序列化（用于 Web 前端）
-
-class BacktestChartRenderer(Protocol):
-    def render(self, spec: BacktestChartSpec) -> Any: ...
-    def savefig(self, path: str) -> None: ...
-    def show(self) -> None: ...
-    def available(self) -> bool: ...
-```
-
-### 13.6 图表类型清单
-
-| 图表 | 类型 | 用途 | 阶段 |
-|------|------|------|------|
-| `equity_curve` | 多 line + 基准 | 资金曲线对比 | BT-V0 |
-| `drawdown` | line + fill | 回撤填充区 | BT-V0 |
-| `trades_overlay` | line + scatter 标注 | 交易点叠加 | BT-V0 |
-| `returns_distribution` | histogram | 收益率分布 | BT-V2 |
-| `monthly_heatmap` | heatmap | 月度收益热力 | BT-V2 |
-| `yearly_returns` | bar | 年度收益对比 | BT-V2 |
-| `parameter_heatmap` | heatmap | 网格搜索参数热力 | BT-V2 |
-| `underwater_curve` | fill | 水下曲线（回撤持续） | BT-V2 |
-| `dashboard` | 多子图组合 | 综合仪表盘 | BT-V3 |
-
-### 13.7 与既有模块集成
-
-| 集成点 | 方式 |
-|-------|------|
-| `BacktestResult` | 新增 `result.chart(name)` 方法返回 `BacktestChartSpec` |
-| `plot_adapter.py` | 保留原 `plot_equity/plot_drawdown/plot_trades`（返回通用 PlotSpec，向后兼容） |
-| `plot/base.py` | **不修改**——通用协议保持简洁 |
-| `matplotlib_backend.py` | **不修改**——通用 renderer 保持单 ax 简单语义 |
-| `client.backtest()` | 返回的 `BacktestResult` 自动具备 `.chart()` 与 `.render()` |
-
-### 13.8 使用方式
-
-```python
-from stockstat.backtest import BacktestEngine, strategy, Order
-from stockstat.backtest.chart_factory import get_chart_renderer
-
-res = BacktestEngine(...).run()
-
-# 方式 A：获取专用 spec，自行渲染
-spec = res.chart("equity_curve")        # 返回 BacktestChartSpec
-renderer = get_chart_renderer()         # 自动检测 matplotlib
-renderer.render(spec)
-renderer.savefig("equity.png")
-
-# 方式 B：一行渲染
-res.render("drawdown", path="dd.png")
-
-# 方式 C：组合仪表盘
-spec = res.chart("dashboard")           # 多子图组合
-renderer.render(spec)
-
-# 方式 D：向后兼容——通用 PlotSpec（无 matplotlib 也能用）
-spec = res.plot_equity()                # 返回 PlotSpec（已有）
-```
-
-### 13.9 依赖声明
-
-```toml
-[project.optional-dependencies]
-backtest = ["stockstat"]                          # 核心，无 matplotlib
+backtest = ["stockstat"]                  # 核心回测（含 ExecutionModel + IntrabarExecution）
+optimize = ["optuna>=3.5"]                # 参数优化
 backtest_viz = ["stockstat[backtest]", "matplotlib>=3.8"]   # 回测可视化
 backtest_full = ["stockstat[backtest]", "stockstat[optimize]",
                  "stockstat[matplotlib]", "matplotlib>=3.8"]
 ```
 
-### 13.10 实现阶段（BT-V 系列）
-
-| 阶段 | 内容 | 测试 |
-|------|------|------|
-| **BT-V0** | 接口冻结：`BacktestChartSpec` + `BacktestChartRenderer` 协议 + Null 实现 + 基础 spec 构建器 | `test_backtest_viz_iface.py` |
-| **BT-V1** | matplotlib backend：渲染 line/fill/scatter/多子图，equity/drawdown/trades 三图完整 | `test_backtest_viz_mpl.py` |
-| **BT-V2** | 高级图表：histogram/heatmap/bar，returns_distribution/monthly_heatmap/yearly/parameter_heatmap | `test_backtest_viz_advanced.py` |
-| **BT-V3** | 组合仪表盘 + 交易标注 + savefig 批量 + 优雅降级 | `test_backtest_viz_dashboard.py` |
+回测核心零硬依赖 matplotlib。所有增强纯 Python + pandas/numpy 实现。
 
 ---
 
-## 15. 回测引擎增强与可插拔执行模型
+### 12.12 可插拔执行模型
 
-> **新增于 v1.5（BT-8~BT-10）**，**扩展于 v1.6（BT-11~BT-14）**。本章节合并两轮增强：BT-8~10 基于 v5 研究暴露的不足，新增 intrabar 限价成交、Maker/Taker 费率、OCO 订单、批量回测等能力；BT-11~14 将"订单如何成交"抽象为可插拔 `ExecutionModel`，支持 intrabar 子 bar 执行而**不新增引擎类**。所有增强以**向后兼容、组合优先、最小侵入**为原则。
+`ExecutionModel` 是回测引擎的核心抽象——决定订单如何在 bar 内成交。通过组合注入 `BacktestEngine`，支持两种执行模式而**不新增引擎类**。
 
-### 15.1 BT-8~10：引擎增强子系统
-
-#### 15.1.1 设计目标
-
-| 目标 | 说明 |
-|------|------|
-|------|------|
-| **限价单 intrabar 成交** | 限价单应在盘中价格穿越限价水平时成交，而非仅检查开盘价 |
-| **Maker/Taker 费率区分** | 加密货币交易所区分挂单/吃单费率，差异可达 5 倍 |
-| **OCO 订单** | 一对限价单，任一成交则撤销另一方（双向挂单策略必需） |
-| **Binance 费率模型** | 现货/合约 × BNB 抵扣四组合预设 |
-| **多策略批量回测** | 一次运行多个策略并汇总对比 |
-| **退出原因标记** | 交易记录区分 TP/SL/收盘/时间/打平/利润退出 |
-| **子期间/状态分析** | 回测后按子期间或市场状态分组分析绩效 |
-| **DCA 基准** | 定投基准对比 |
-| **手续费敏感性扫描** | 扫描费率参数输出绩效曲线 |
-
-### 15.2 文件变更清单
-
-| 文件 | 变更类型 | 内容 |
-|------|---------|------|
-| `fill_model.py` | 修改 | 新增 `IntrabarLimitFill` |
-| `cost_model.py` | 修改 | 新增 `MakerTakerCost`、`BinanceCost` + 4 预设 |
-| `orders.py` | 修改 | `Fill`/`Order` 新增 `exit_reason` 字段 |
-| `broker.py` | 修改 | 新增 `submit_oco()` + OCO 撤销传播 |
-| `engine.py` | 修改 | 新增 `periods_per_year` 参数 |
-| `result.py` | 修改 | 新增 `exit_reason_stats()` |
-| `benchmark.py` | 修改 | 新增 `dca_equity()` |
-| `intrabar.py` | **新增** | `IntrabarSimulator` |
-| `batch_runner.py` | **新增** | `StrategyBatchRunner` + `BatchResults` |
-| `analyzer.py` | **新增** | `BacktestAnalyzer` |
-| `fee_sweep.py` | **新增** | `fee_sweep()` + `maker_taker_sweep()` |
-| `__init__.py` | 修改 | 导出新组件 |
-
-### 15.3 核心新增接口
-
-#### 15.3.1 IntrabarLimitFill
-
-```python
-class IntrabarLimitFill(FillModel):
-    """限价单在盘中价格穿越限价水平时成交。
-    LIMIT buy: next_bar["low"] <= limit_price → 以 limit_price 成交
-    LIMIT sell: next_bar["high"] >= limit_price → 以 limit_price 成交
-    MARKET: 以 next_bar["open"] 成交（同 NextOpenFill）
-    """
-```
-
-与 `NextOpenFill` 平行存在，策略显式选择。`NextOpenFill` 保留原逻辑不变。
-
-#### 15.3.2 MakerTakerCost / BinanceCost
-
-```python
-@dataclass
-class MakerTakerCost(CostModel):
-    maker_rate: float = 0.001
-    taker_rate: float = 0.001
-    slippage: float = 0.0001
-    # LIMIT → maker_rate, MARKET/STOP → taker_rate
-
-@dataclass
-class BinanceCost(CostModel):
-    venue: str = "spot"          # "spot" | "futures"
-    bnb_discount: bool = False
-    slippage: float = 0.0001
-    # Spot:  maker 0.1% / taker 0.1%  (BNB: -25%)
-    # Futures: maker 0.02% / taker 0.05%  (BNB: -10%)
-
-# 便捷预设
-BINANCE_SPOT = BinanceCost(venue="spot", bnb_discount=False)
-BINANCE_SPOT_BNB = BinanceCost(venue="spot", bnb_discount=True)
-BINANCE_FUTURES = BinanceCost(venue="futures", bnb_discount=False)
-BINANCE_FUTURES_BNB = BinanceCost(venue="futures", bnb_discount=True)
-```
-
-#### 15.3.3 OCO 订单
-
-```python
-class SimulatedBroker:
-    def submit_oco(self, order_a: Order, order_b: Order) -> tuple[str, str]:
-        """提交 OCO 对。任一成交时自动撤销另一方。"""
-```
-
-不新增 `OrderType`，在 Broker 层管理关联关系。
-
-#### 15.3.4 IntrabarSimulator
-
-```python
-class IntrabarSimulator:
-    """用更细粒度 K 线模拟限价单盘中成交时序。"""
-    def __init__(self, fine_data: pd.DataFrame): ...
-    def check_fill(self, price_level, side, start_ts, end_ts) -> tuple: ...
-    def first_to_fill(self, levels, start_ts, end_ts) -> tuple | None: ...
-```
-
-#### 15.3.5 StrategyBatchRunner
-
-```python
-class StrategyBatchRunner:
-    def run_all(self, strategies: dict) -> BatchResults: ...
-    def run_all_fees(self, strategies: dict, cost_models: dict) -> BatchResults: ...
-
-class BatchResults:
-    def to_dataframe(self) -> pd.DataFrame: ...
-    def equity_curves(self) -> dict: ...
-    def best_by(self, metric: str) -> tuple: ...
-    def rank(self, metric: str) -> pd.DataFrame: ...
-```
-
-#### 15.3.6 BacktestAnalyzer
-
-```python
-class BacktestAnalyzer:
-    @staticmethod
-    def subperiod_metrics(result, split_dates) -> dict: ...
-    @staticmethod
-    def regime_conditional_metrics(result, regime_series) -> dict: ...
-    @staticmethod
-    def rolling_metric(result, metric, window) -> pd.Series: ...
-    @staticmethod
-    def trade_analysis_by_exit(result) -> pd.DataFrame: ...
-```
-
-### 15.4 实现阶段（BT-8~BT-10）
-
-| 阶段 | 内容 | 测试 | 优先级 |
-|------|------|------|--------|
-| **BT-8** | P0 致命修复：`IntrabarLimitFill` + `MakerTakerCost` + OCO 订单 | `test_backtest_p0.py` | ★★★ |
-| **BT-9** | P1 重要增强：`BinanceCost` + `IntrabarSimulator` + `StrategyBatchRunner` + `exit_reason` | `test_backtest_p1.py` | ★★☆ |
-| **BT-10** | P2 分析工具：年化因子 + DCA + `BacktestAnalyzer` + `fee_sweep` | `test_backtest_p2.py` | ★☆☆ |
-
-### 15.5 向后兼容保证
-
-| 现有 API | 改进后 | 兼容性 |
-|---------|--------|--------|
-| `NextOpenFill()` | 保留原逻辑 | ✅ 完全兼容 |
-| `PercentCost(commission=0.001)` | 保留 | ✅ 完全兼容 |
-| `Order(symbol, side, qty)` | 新增 `exit_reason=""` 默认值 | ✅ 完全兼容 |
-| `Fill(...)` | 新增 `exit_reason=""` 默认值 | ✅ 完全兼容 |
-| `BacktestEngine(data, strategy)` | 新增 `periods_per_year=None` | ✅ 完全兼容 |
-
-现有用户代码无需修改。新功能通过显式选择新类/参数启用。
-
-### 15.6 依赖声明
-
-```toml
-[project.optional-dependencies]
-backtest = ["stockstat"]                  # 核心（含 BT-8~10 增强）
-optimize = ["optuna>=3.5"]                # BT-6 参数优化
-backtest_full = ["stockstat[backtest]", "stockstat[optimize]", "stockstat[matplotlib]"]
-```
-
-无新增外部依赖。所有增强纯 Python + pandas/numpy 实现。
-
----
-
-### 15.7 BT-11~14：可插拔执行模型
-
-> 在 §15.1-15.6（BT-8~10）基础上，将"订单如何成交"抽象为可插拔 `ExecutionModel`，通过组合注入 `BacktestEngine`，支持 intrabar 子 bar 执行而**不新增引擎类**。设计原则：general 方案丰富库能力 + simplified 接口保持简洁 + 严格向前兼容。
-
-#### 15.7.1 设计动机
-
-§15.1 的 BT-8~BT-10 解决了 intrabar 限价成交、Maker/Taker 费率、批量回测等需求，但 v5 研究中仍暴露 5 项结构性差距（详见 `docs/backtest/BT11_BT14_CN.md`）：
-
-| Gap | 描述 | 根因 |
-|-----|------|------|
-| Gap-1 | Intrabar 成交时间不追踪 | `FillModel` 只返回价格 |
-| Gap-2 | 同一 parent bar 内入场+出场 | 事件循环 t→t+1 约束 |
-| Gap-3 | 成交后条件退出扫描 | 无 intrabar 前向扫描 hook |
-| Gap-4 | 双向均成交→双取消 | OCO 语义不足 |
-| Gap-5 | 同 bar 内 SL 优先于 TP | broker 无优先级排序 |
-
-V1 方案（独立 `IntrabarExecutionEngine` 类）存在 8 项兼容性盲点。V2 方案以 `ExecutionModel` 可插拔架构解决，**一个引擎类 + 两种执行模式**。
-
-#### 15.7.2 架构
+**设计动机**：intrabar 子 bar 执行需要解决 5 项结构性差距——成交时间追踪（Gap-1）、同 bar 入场+出场（Gap-2）、成交后退出扫描（Gap-3）、双向均成交→双取消（Gap-4）、同 bar 内 SL 优先于 TP（Gap-5）。
 
 ```mermaid
 graph TB
@@ -2336,44 +2108,7 @@ graph TB
     STR -.-> MIX
 ```
 
-#### 15.7.3 核心接口
-
-```python
-# execution_model.py（新文件）
-
-class ExecutionModel(ABC):
-    """订单执行模型：决定订单如何在 bar 内成交。"""
-    @abstractmethod
-    def execute(self, engine, ctx, t, pending_orders) -> list[Fill]: ...
-    @property
-    @abstractmethod
-    def is_intrabar(self) -> bool: ...
-
-class NextBarExecution(ExecutionModel):
-    """默认：t 提交 → t+1 bar 成交（现有行为）。"""
-    is_intrabar = False
-
-class IntrabarExecution(ExecutionModel):
-    """intrabar：parent bar 内子 bar 序列撮合。"""
-    def __init__(self, intrabar_tf, parent_tf=None, fill_model=None): ...
-    def register_oco_mutual(self, order_a, order_b): ...
-    is_intrabar = True
-```
-
-#### 15.7.4 文件变更清单
-
-| 文件 | 变更 | 内容 |
-|------|------|------|
-| `execution_model.py` | **新增** | `ExecutionModel` ABC + `NextBarExecution` + `IntrabarExecution` |
-| `fill_model.py` | 新增类 | `IntrabarFillResult` + `IntrabarFillModel`（继承 `IntrabarLimitFill`） |
-| `orders.py` | 加字段 | `Order.priority: int = 99` + `Fill.sub_bar_ts` + `Fill.sub_bar_index` |
-| `data_feed.py` | 加方法 | `DataFeed.intrabar_slice()` |
-| `engine.py` | 加参数 | `execution_model` 参数 + intrabar 分支 + parent_tf 迭代 |
-| `context.py` | 加方法 | `intrabar_submit()` + `intrabar_submit_oco_mutual()`（模式感知降级） |
-| `broker.py` | 加方法 | `submit_oco_mutual()` |
-| `strategy.py` | 新增类 | `IntrabarMixin`（可选 mixin，含 `define_exits` 默认实现） |
-
-#### 15.7.5 5 项 Gap 的解决
+**5 项 Gap 的解决**：
 
 | Gap | 解决方式 |
 |-----|---------|
@@ -2383,32 +2118,116 @@ class IntrabarExecution(ExecutionModel):
 | Gap-4 | `register_oco_mutual()` + 预扫描检测双向成交 |
 | Gap-5 | `Order.priority` 字段 + 排序（SL priority=0 > TP priority=1） |
 
-#### 15.7.6 向后兼容保证
+**向后兼容**：`execution_model=None` 默认 `NextBarExecution` = 既有行为。`ctx.intrabar_submit()` 在非 intrabar 模式下降级为 `broker.submit` + warning。现有策略代码零修改。
 
-| 现有 API | 改进后 | 兼容性 |
-|---------|--------|--------|
-| `BacktestEngine(data, strategy)` | 新增 `execution_model=None` | ✅ 默认 `NextBarExecution` = 现有行为 |
-| `FillModel` ABC | 不修改 | ✅ `fill_with_timing` 非抽象新方法 |
-| `Fill` / `Order` | 新增字段有默认值 | ✅ dataclass 末尾 |
-| `Strategy` 基类 | 不修改 | ✅ duck typing 检测 `define_exits` |
-| `@strategy` 函数 | 不修改 | ✅ 函数式策略完全兼容 |
-| `ctx.intrabar_submit()` | 普通模式降级 | ✅ `broker.submit` + warning |
+---
 
-#### 15.7.7 实现阶段（BT-11~BT-14）
+### 12.13 回测可视化
 
-| 阶段 | 内容 | 测试 | 优先级 |
-|------|------|------|--------|
-| **BT-11** | ExecutionModel ABC + IntrabarFillModel + Fill/Order 字段 + intrabar_slice | `test_backtest_intrabar.py`（兼容性 + FillModel + DataFeed） | ★★★ |
-| **BT-12** | IntrabarExecution + IntrabarMixin + OCO mutual + 引擎集成 | 同上（同 bar 出场 + define_exits + 优先级 + OCO） | ★★★ |
-| **BT-13** | v5 策略迁移验证（33 策略 × 4 费率 = 132 次回测） | `run_redo.py`（PnL 误差 < 0.1%） | ★★☆ |
-| **BT-14** | 分析与可视化适配 | `plots_redo.py` | ★☆☆ |
+回测可视化子系统在回测核心之上叠加**零硬依赖**的可视化层：回测核心不依赖 matplotlib，但安装后自动激活丰富的回测专用图表。
 
-#### 15.7.8 验证结果
+**设计原则**：
 
-- 原有 314 项测试全部通过（零回归）
-- 新增 23 项 intrabar 测试全部通过
-- v5 的 33 策略 × 4 费率 = 132 次回测，关键策略 PnL 误差 < 0.1%
-- 结论一致：全部策略均未击败买入持有 PAXG（+104.84%）
+| 原则 | 说明 |
+|------|------|
+| **回测核心零硬依赖** | `backtest/` 包导入不触发 matplotlib；`import stockstat.backtest` 永远成功 |
+| **专用 spec 层** | `BacktestChartSpec`（回测专用），与通用 `PlotSpec` 平行，互不污染 |
+| **延迟激活** | matplotlib 安装后通过 `matplotlib_charts` 模块延迟导入激活 |
+| **协议化** | `BacktestChartRenderer` 协议，Null/Matplotlib 多后端可插拔 |
+
+**架构**：
+
+```mermaid
+graph TB
+    subgraph "回测核心 backtest/（零 matplotlib 依赖）"
+        RES["BacktestResult"]
+        ADAPTER["plot_adapter.py<br/>基础 PlotSpec 构建器"]
+        CHARTSPEC["chart_spec.py<br/>BacktestChartSpec 专用规格"]
+        REG["chart_registry.py<br/>图表注册表"]
+    end
+
+    subgraph "通用 plot 协议（已有）"
+        PS["PlotSpec"]
+        PR["PlotRenderer<br/>Null/Matplotlib"]
+    end
+
+    subgraph "回测可视化后端（延迟导入 · 可选）"
+        BCMPL["matplotlib_charts.py<br/>MatplotlibBacktestRenderer<br/>（matplotlib 安装后才激活）"]
+        BCNULL["null_charts.py<br/>NullBacktestRenderer"]
+        FACTORY["chart_factory.py<br/>detect + get_chart_renderer"]
+    end
+
+    RES --> ADAPTER --> PS
+    RES --> CHARTSPEC
+    CHARTSPEC --> REG
+    REG --> FACTORY
+    FACTORY --> BCMPL
+    FACTORY --> BCNULL
+    BCMPL -.->|延迟 import| PR
+```
+
+**图表类型清单**（9 种）：
+
+| 图表 | 类型 | 用途 |
+|------|------|------|
+| `equity_curve` | 多 line + 基准 | 资金曲线对比 |
+| `drawdown` | line + fill | 回撤填充区 |
+| `trades_overlay` | line + scatter 标注 | 交易点叠加 |
+| `returns_distribution` | histogram | 收益率分布 |
+| `monthly_heatmap` | heatmap | 月度收益热力 |
+| `yearly_returns` | bar | 年度收益对比 |
+| `parameter_heatmap` | heatmap | 网格搜索参数热力 |
+| `underwater_curve` | fill | 水下曲线（回撤持续） |
+| `dashboard` | 多子图组合 | 综合仪表盘 |
+
+**使用方式**：
+
+```python
+res = BacktestEngine(...).run()
+
+# 一行渲染（自动检测 matplotlib，不可用时优雅降级）
+res.render("equity_curve", path="equity.png")
+res.render("dashboard", path="dashboard.png")
+
+# 批量保存全部图表
+out = res.render_all("./charts")
+
+# 向后兼容——通用 PlotSpec（无 matplotlib 也能用）
+spec = res.plot_equity()
+```
+
+---
+
+### 12.14 分析工具与批量回测
+
+**BacktestAnalyzer** — 回测后分析：
+
+| 方法 | 用途 |
+|------|------|
+| `subperiod_metrics(result, split_dates)` | 按 split_dates 分割资金曲线计算子期间指标 |
+| `regime_conditional_metrics(result, regime_series)` | 按状态序列分组计算指标 |
+| `rolling_metric(result, metric, window)` | 滚动 Sharpe/波动率/回撤/收益 |
+| `trade_analysis_by_exit(result)` | 按退出原因分组统计交易 |
+
+**StrategyBatchRunner** — 多策略批量回测：
+
+```python
+runner = StrategyBatchRunner(data=data, initial_cash=10000, cost_model=BINANCE_SPOT)
+results = runner.run_all({"ma_cross": s1, "rsi": s2})         # 多策略
+results = runner.run_all_fees({"ma_cross": s1}, fee_models)    # 多策略 × 多费率
+df = results.to_dataframe()                                    # 汇总 DataFrame
+ranked = results.rank("sharpe")                                # 按 Sharpe 排名
+```
+
+**费率扫描**：
+
+- `fee_sweep(data, strategy, commissions=[...])` — 均匀费率扫描
+- `maker_taker_sweep(data, strategy, maker_rates=[...], taker_rates=[...])` — Maker×Taker 网格扫描
+
+**基准**：
+
+- `buy_and_hold(initial_cash, prices)` — 买入持有
+- `dca_equity(initial_cash, prices, schedule="weekly")` — 定投基准（auto/weekly/monthly）
 
 ---
 
