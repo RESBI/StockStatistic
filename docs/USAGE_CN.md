@@ -1,6 +1,6 @@
 # StockStat 使用文档
 
-> 本文档所有示例均在本地使用真实市场数据（Yahoo Finance + Binance，通过代理）测试通过。预期结果来自 2025-07-15 的实际测试运行。
+> 本文档所有示例均在本地使用真实市场数据（Yahoo Finance + Binance，通过代理）测试通过。预期结果来自 2026-07-16 的实际测试运行。
 
 ## 目录
 
@@ -16,6 +16,8 @@
 10. [matplotlib 可视化](#10-matplotlib-可视化)
 11. [PAXG 周末相关性分析](#11-paxg-周末相关性分析)
 12. [结果导出](#12-结果导出)
+13. [回测](#13-回测)
+14. [回测可视化](#14-回测可视化)
 
 ---
 
@@ -587,6 +589,364 @@ records = to_dict(data)  # 字典列表
 ```python
 spec = client.plot.spec(title="我的图表", series=[...])
 payload = spec.to_dict()  # 可 JSON 序列化的字典
+```
+
+---
+
+## 13. 回测
+
+回测子系统位于 `stockstat.backtest`，支持自定义策略、多标的交易组、多时间尺度 K 线，策略内可直接调用计算库全部指标与自定义指标。
+
+### 示例 13.1：最简回测（函数式策略）
+
+```python
+from stockstat import StockStatClient
+from stockstat.backtest import BacktestEngine, strategy, Order, ZeroCost
+
+client = StockStatClient(host="localhost", port=8000)
+data = {"BTC/USDT": {"1d": client.ohlcv("BTC/USDT", start="2024-01-01")}}
+
+@strategy
+def ma_cross(ctx):
+    d = ctx.get("BTC/USDT", "1d", lookback=30)
+    if len(d) < 21:
+        return
+    ma5  = d.close.rolling(5).mean().iloc[-1]
+    ma20 = d.close.rolling(20).mean().iloc[-1]
+    pos  = ctx.portfolio.get_position("BTC/USDT")
+    if ma5 > ma20 and pos.qty == 0:
+        ctx.broker.submit(Order("BTC/USDT", "buy", 0.1, tag="entry"))
+    elif ma5 < ma20 and pos.qty > 0:
+        ctx.broker.submit(Order("BTC/USDT", "sell", pos.qty, tag="exit"))
+
+eng = BacktestEngine(data=data, strategy=ma_cross,
+                     initial_cash=10000, cost_model=ZeroCost(),
+                     benchmark="BTC/USDT")
+res = eng.run()
+print(res.summary())
+```
+
+**预期输出（结构）**：
+```
+=== Backtest Summary ===
+Total Return:      x.xx%
+Annualized Return: x.xx%
+Sharpe:            x.xxx
+Sortino:           x.xxx
+Max Drawdown:      -x.xx%
+Calmar:            x.xxx
+Volatility:        x.xx%
+Win Rate:          xx.xx%
+Profit Factor:     x.xxx
+# Trades:          xx
+Information Ratio: x.xxx
+```
+
+### 示例 13.2：通过 client 便捷入口
+
+```python
+res = client.backtest(data, ma_cross, initial_cash=10000, benchmark="BTC/USDT")
+# client.backtest 自动注入 client 的 ComputeEngine，策略内 ctx.compute 可用全部指标
+```
+
+### 示例 13.3：类式策略 + 钩子
+
+```python
+from stockstat.backtest import Strategy, Order
+
+class RSIStrategy(Strategy):
+    def on_start(self, ctx):
+        ctx.history["trade_count"] = 0
+
+    def on_bar(self, ctx):
+        d = ctx.get("BTC/USDT", "1d", lookback=30)
+        if len(d) < 15:
+            return
+        r = ctx.compute.rsi(d.close, window=14).iloc[-1]
+        pos = ctx.portfolio.get_position("BTC/USDT")
+        if r < 30 and pos.qty == 0:
+            ctx.broker.submit(Order("BTC/USDT", "buy", 0.1))
+            ctx.history["trade_count"] += 1
+        elif r > 70 and pos.qty > 0:
+            ctx.broker.submit(Order("BTC/USDT", "sell", pos.qty))
+
+    def on_fill(self, fill, ctx):
+        print(f"成交 {fill.side.value} {fill.qty} @ {fill.price:.2f}")
+```
+
+### 示例 13.4：自定义指标（策略内注册）
+
+```python
+@strategy
+def custom(ctx):
+    if not ctx.history.get("init"):
+        def donchian(high, low, window=20):
+            return high.rolling(window).max(), low.rolling(window).min()
+        ctx.compute.register("donchian", donchian, category="custom")
+        ctx.history["init"] = True
+    d = ctx.get("BTC/USDT", "1d", lookback=30)
+    if len(d) < 21:
+        return
+    hh, ll = ctx.compute.call("donchian", high=d.high, low=d.low, window=20)
+    pos = ctx.portfolio.get_position("BTC/USDT")
+    if d.close.iloc[-1] > hh.iloc[-1] and pos.qty == 0:
+        ctx.broker.submit(Order("BTC/USDT", "buy", 0.1))
+```
+
+### 示例 13.5：多标的配对交易 + 做空
+
+```python
+import numpy as np
+from stockstat.backtest import BacktestEngine, strategy, Order
+
+data = {
+    "BTC/USDT": {"1d": client.ohlcv("BTC/USDT", start="2024-01-01")},
+    "ETH/USDT": {"1d": client.ohlcv("ETH/USDT", start="2024-01-01")},
+}
+
+@strategy
+def pair(ctx):
+    btc = ctx.get("BTC/USDT", "1d", lookback=60)
+    eth = ctx.get("ETH/USDT", "1d", lookback=60)
+    if len(btc) < 40:
+        return
+    spread = np.log(btc.close) - np.log(eth.close)
+    z = (spread - spread.rolling(20).mean()) / spread.rolling(20).std()
+    last = z.iloc[-1]
+    if np.isnan(last):
+        return
+    pb = ctx.portfolio.get_position("BTC/USDT")
+    pe = ctx.portfolio.get_position("ETH/USDT")
+    if last > 1.5 and pb.qty == 0:
+        ctx.broker.submit(Order("BTC/USDT", "sell", 0.1))
+        ctx.broker.submit(Order("ETH/USDT", "buy", 0.1))
+    elif last < -1.5 and pb.qty == 0:
+        ctx.broker.submit(Order("BTC/USDT", "buy", 0.1))
+        ctx.broker.submit(Order("ETH/USDT", "sell", 0.1))
+    elif abs(last) < 0.3 and pb.qty != 0:
+        # 平仓
+        if pb.qty > 0: ctx.broker.submit(Order("BTC/USDT", "sell", abs(pb.qty)))
+        else:          ctx.broker.submit(Order("BTC/USDT", "buy", abs(pb.qty)))
+        if pe.qty > 0: ctx.broker.submit(Order("ETH/USDT", "sell", abs(pe.qty)))
+        else:          ctx.broker.submit(Order("ETH/USDT", "buy", abs(pe.qty)))
+
+res = BacktestEngine(data=data, strategy=pair,
+                     initial_cash=10000, allow_short=True).run()
+```
+
+### 示例 13.6：多时间尺度共振
+
+```python
+# 同时注入日线与小时线
+hourly = client.ohlcv("BTC/USDT", start="2024-01-01", timeframe="1h")
+daily  = client.ohlcv("BTC/USDT", start="2024-01-01", timeframe="1d")
+data = {"BTC/USDT": {"1h": hourly, "1d": daily}}
+
+@strategy
+def multi_tf(ctx):
+    h = ctx.get("BTC/USDT", "1h", lookback=50)
+    d = ctx.get("BTC/USDT", "1d", lookback=30)
+    if len(d) < 21 or len(h) < 2:
+        return
+    trend_up = d.close.iloc[-1] > d.close.rolling(20).mean().iloc[-1]
+    breakout = h.close.iloc[-1] > h.close.iloc[-2]
+    pos = ctx.portfolio.get_position("BTC/USDT")
+    if trend_up and breakout and pos.qty == 0:
+        ctx.broker.submit(Order("BTC/USDT", "buy", 0.1))
+    elif not trend_up and pos.qty > 0:
+        ctx.broker.submit(Order("BTC/USDT", "sell", pos.qty))
+
+# DataFeed 自动以 1h 为主索引，日线 ffill 对齐
+res = BacktestEngine(data=data, strategy=multi_tf).run()
+```
+
+### 示例 13.7：成本与成交模型
+
+```python
+from stockstat.backtest import PercentCost, FixedCost, StampDutyCost, NextOpenFill, VWAPFill
+
+# 股票：佣金 + 印花税
+eng = BacktestEngine(data={"AAPL": {"1d": df}}, strategy=s,
+                     cost_model=StampDutyCost(commission=0.0003, stamp_duty=0.001),
+                     fill_model=NextOpenFill())
+
+# 加密货币：比例成本 + VWAP 成交
+eng = BacktestEngine(data={"BTC/USDT": {"1d": df}}, strategy=s,
+                     cost_model=PercentCost(commission=0.0002, slippage=0.0003),
+                     fill_model=VWAPFill())
+```
+
+### 示例 13.8：订单类型
+
+```python
+from stockstat.backtest import Order, OrderType
+
+# 限价买单（价格跌至 limit 才成交）
+ctx.broker.submit(Order("X", "buy", 10, order_type=OrderType.LIMIT, limit_price=95000))
+
+# 止损卖单（价格跌至 stop 触发）
+ctx.broker.submit(Order("X", "sell", 10, order_type=OrderType.STOP, stop_price=90000))
+
+# 移动止损（跟踪极值，回撤 stop_price 触发）
+ctx.broker.submit(Order("X", "sell", 10, order_type=OrderType.TRAILING_STOP, stop_price=2000))
+```
+
+### 示例 13.9：绩效与可视化
+
+```python
+res = eng.run()
+
+# 文本摘要
+print(res.summary())
+
+# 指标字典
+m = res.metrics()
+# {'total_return', 'sharpe', 'sortino', 'max_drawdown', 'calmar',
+#  'volatility', 'win_rate', 'profit_factor', 'num_trades', ...}
+
+# 可视化（返回 PlotSpec，可被 matplotlib 渲染）
+spec = res.plot_equity()       # 资金曲线 + 基准
+spec_dd = res.plot_drawdown()  # 回撤
+spec_t = res.plot_trades()     # 交易点
+
+from stockstat.plot.base import get_renderer
+r = get_renderer("matplotlib")
+r.render(spec)
+r.savefig("equity.png")
+
+# 导出
+res.to_csv("trades.csv")
+d = res.to_dict()
+```
+
+### 示例 13.10：参数网格搜索
+
+```python
+from stockstat.backtest.optimizer import grid_search
+
+def make_engine(params):
+    @strategy
+    def s(ctx):
+        d = ctx.get("BTC/USDT", "1d", lookback=params["long"]+5)
+        if len(d) < params["long"]+1:
+            return
+        ma_s = d.close.rolling(params["short"]).mean().iloc[-1]
+        ma_l = d.close.rolling(params["long"]).mean().iloc[-1]
+        pos = ctx.portfolio.get_position("BTC/USDT")
+        if ma_s > ma_l and pos.qty == 0:
+            ctx.broker.submit(Order("BTC/USDT", "buy", 0.1))
+        elif ma_s < ma_l and pos.qty > 0:
+            ctx.broker.submit(Order("BTC/USDT", "sell", pos.qty))
+    return BacktestEngine(data=data, strategy=s, initial_cash=10000)
+
+results = grid_search(make_engine,
+                      {"short": [3, 5, 8], "long": [10, 20, 30]},
+                      metric="sharpe")
+best_params, best_val, best_res = results[0]
+print(f"最佳参数: {best_params}, Sharpe: {best_val:.3f}")
+```
+
+### 示例 13.11：未来函数防护
+
+```python
+# 默认 NextOpenFill：订单在 t 提交 → t+1 open 成交
+# 开启运行时审计
+eng = BacktestEngine(data=data, strategy=s, lookahead_audit=True)
+# 若策略误访问 > t 的数据，抛 LookaheadError
+```
+
+回测可视化（仪表盘、热力图、收益分布等 9 种图表）见 [§14 回测可视化](#14-回测可视化)。
+
+### 回测 API 速查
+
+| 类/函数 | 说明 |
+|---------|------|
+| `BacktestEngine(data, strategy, ...)` | 主引擎 |
+| `@strategy` / `Strategy` | 策略定义 |
+| `ctx.get(sym, tf, lookback)` | 获取 ≤ t 切片 |
+| `ctx.compute` | ComputeEngine 代理（含 register/call） |
+| `ctx.broker.submit(Order)` | 下单 |
+| `ctx.portfolio.get_position(sym)` | 查持仓 |
+| `ctx.history` | 策略状态 scratchpad |
+| `Order(sym, side, qty, order_type=...)` | 订单 |
+| `PercentCost / FixedCost / StampDutyCost / ZeroCost` | 成本模型 |
+| `NextOpenFill / VWAPFill / WorstPriceFill` | 成交模型 |
+| `res.summary() / metrics() / plot_equity() / to_csv()` | 结果 |
+| `res.chart(name) / render(name, path) / render_all(dir)` | 回测可视化（§14） |
+| `grid_search / optuna_search / walk_forward / monte_carlo_equity` | 优化 |
+
+---
+
+## 14. 回测可视化
+
+回测可视化子系统提供 9 种图表类型，**核心零 matplotlib 硬依赖**——安装后自动激活。复用 [§10 matplotlib 可视化](#10-matplotlib-可视化) 的协议化设计，但提供回测专用的 `BacktestChartSpec`（支持多子图、填充区、热力图、直方图等丰富元素）。以下示例使用真实市场数据（Binance BTC/USDT 2023-2024）生成，图像见 `docs/images/backtest_*.png`。
+
+![BTC 回测仪表盘](../docs/images/backtest_btc_dashboard.png)
+
+### 示例 14.1：一行渲染与批量保存
+
+```python
+res = BacktestEngine(data=data, strategy=ma_cross,
+                     initial_cash=10000, benchmark="BTC/USDT").run()
+
+# 一行渲染（自动检测 matplotlib，不可用时优雅降级）
+res.render("equity_curve", path="equity.png")
+res.render("drawdown", path="drawdown.png")
+
+# 组合仪表盘（2×2：equity + drawdown + 收益分布 + 月度热力）
+res.render("dashboard", path="dashboard.png")
+
+# 批量保存全部图表到目录
+out = res.render_all("./charts")
+# {'equity_curve': './charts/equity_curve.png', 'drawdown': ..., ...}
+
+# 高级图表
+res.render("returns_distribution", path="dist.png")   # 收益率分布直方图
+res.render("monthly_heatmap", path="monthly.png")      # 月度收益热力图
+res.render("yearly_returns", path="yearly.png")        # 年度收益柱状图
+res.render("underwater_curve", path="underwater.png")  # 水下曲线
+```
+
+### 示例 14.2：参数网格热力图
+
+```python
+from stockstat.backtest.optimizer import grid_search
+
+results = grid_search(make_engine,
+                      {"short": [3, 5, 8], "long": [10, 20, 30]},
+                      metric="sharpe")
+
+# 渲染参数热力图（x=short, y=long, color=sharpe）
+res.render("parameter_heatmap", grid_results=results, metric="sharpe",
+           path="param_heatmap.png")
+
+# 也可在 dashboard 中替换第 4 面板
+res.render("dashboard", grid_results=results, path="dashboard_with_params.png")
+```
+
+### 示例 14.3：获取 BacktestChartSpec（不渲染）
+
+```python
+from stockstat.backtest.chart_factory import get_chart_renderer
+
+# 获取专用 spec（含多子图、fill、heatmap 等丰富元素）
+spec = res.chart("equity_curve")           # BacktestChartSpec
+spec = res.chart("dashboard")              # 4 子图组合
+spec = res.chart("drawdown")               # 含 fill 填充
+
+# 可序列化为 dict（用于 Web 前端）
+payload = spec.to_dict()
+
+# 自行渲染
+renderer = get_chart_renderer()            # 自动检测 matplotlib
+if renderer.available():
+    fig = renderer.render(spec)
+    renderer.savefig("custom.png")
+
+# 查看可用图表类型
+print(res.available_chart_types)
+# ['dashboard', 'drawdown', 'equity_curve', 'monthly_heatmap', 'parameter_heatmap',
+#  'returns_distribution', 'trades_overlay', 'underwater_curve', 'yearly_returns']
 ```
 
 ---

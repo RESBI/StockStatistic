@@ -108,6 +108,93 @@ result = client.run_dsl('''
 ''')
 ```
 
+## 回测
+
+回测子系统（`stockstat.backtest`）支持自定义策略、多标的交易组、多时间尺度 K 线，并在策略内直接复用计算库的全部指标。
+
+### 快速示例：双均线交叉
+
+```python
+from stockstat import StockStatClient
+from stockstat.backtest import BacktestEngine, strategy, Order
+
+client = StockStatClient(host="localhost", port=8000)
+data = {"BTC/USDT": {"1d": client.ohlcv("BTC/USDT", start="2024-01-01")}}
+
+@strategy
+def ma_cross(ctx):
+    d = ctx.get("BTC/USDT", "1d", lookback=30)
+    if len(d) < 21:
+        return
+    ma5  = d.close.rolling(5).mean().iloc[-1]
+    ma20 = d.close.rolling(20).mean().iloc[-1]
+    pos  = ctx.portfolio.get_position("BTC/USDT")
+    if ma5 > ma20 and pos.qty == 0:
+        ctx.broker.submit(Order("BTC/USDT", "buy", 0.1))
+    elif ma5 < ma20 and pos.qty > 0:
+        ctx.broker.submit(Order("BTC/USDT", "sell", pos.qty))
+
+# 方式 A：通过 client 便捷入口（自动注入 ComputeEngine）
+res = client.backtest(data, ma_cross, initial_cash=10000)
+
+# 方式 B：直接构造引擎
+res = BacktestEngine(data=data, strategy=ma_cross,
+                     initial_cash=10000,
+                     benchmark="BTC/USDT").run()
+
+print(res.summary())
+spec = res.plot_equity()  # 返回 PlotSpec，可被 matplotlib 渲染
+```
+
+### 自定义指标 + 多标的配对交易
+
+```python
+from stockstat.backtest import strategy, Order, BacktestEngine
+
+@strategy
+def pair_trade(ctx):
+    if not ctx.history.get("init"):
+        # 注册自定义指标
+        def donchian(high, low, window=20):
+            return high.rolling(window).max(), low.rolling(window).min()
+        ctx.compute.register("donchian", donchian)
+        ctx.history["init"] = True
+
+    btc = ctx.get("BTC/USDT", "1d", lookback=60)
+    eth = ctx.get("ETH/USDT", "1d", lookback=60)
+    if len(btc) < 40:
+        return
+    spread = np.log(btc.close) - np.log(eth.close)
+    z = (spread - spread.rolling(20).mean()) / spread.rolling(20).std()
+    last = z.iloc[-1]
+    if last > 1.5:
+        ctx.broker.submit(Order("BTC/USDT", "sell", 0.1))
+        ctx.broker.submit(Order("ETH/USDT", "buy", 0.1))
+    # ... 平仓逻辑
+
+res = BacktestEngine(data=data, strategy=pair_trade,
+                     initial_cash=10000, allow_short=True).run()
+```
+
+### 回测能力一览
+
+| 能力 | 说明 |
+|------|------|
+| 自定义策略 | `Strategy` 基类 / `@strategy` 函数装饰器 |
+| 多标的交易组 | `{symbol: {tf: df}}` Universe |
+| 多时间尺度 | 自动以最细 tf 为主索引，高 tf ffill 对齐 |
+| 计算库指标 | `ctx.compute` 代理 `ComputeEngine`，含 `register()` |
+| 订单类型 | 市价 / 限价 / 止损 / 移动止损 |
+| 成本模型 | 比例 / 固定 / 阶梯 / 印花税 / 零成本 |
+| 做空 | `allow_short=True` |
+| 绩效 | Sharpe / Sortino / Calmar / 回撤 / 胜率 / 盈亏比 |
+| 可视化 | `plot_equity/plot_drawdown/plot_trades` 返回 PlotSpec |
+| **高级可视化** | `result.chart(name)` 返回 BacktestChartSpec；dashboard/heatmap/histogram；零 matplotlib 硬依赖 |
+| 参数优化 | 网格搜索 / optuna（extras）/ 走样 / 蒙特卡洛 |
+| 未来函数防护 | 默认 NextOpenFill + lookahead_audit |
+
+回测设计详见 [DESIGN_CN.md §12-13](DESIGN_CN.md#12-回测子系统设计)，阶段实现文档见 [docs/backtest/](docs/backtest/)。回测可视化示例见下文 [matplotlib 可视化](#matplotlib-可视化) 章节。
+
 ## matplotlib 可视化
 
 核心库**零硬依赖** matplotlib。可选安装：
@@ -170,6 +257,59 @@ renderer.savefig("btc.png")
 #### 周末涨跌幅分布
 ![PAXG 周末直方图](docs/images/paxg_weekend_hist.png)
 
+### 回测可视化
+
+回测可视化子系统提供 9 种图表类型，核心**零 matplotlib 硬依赖**——安装 matplotlib 后自动激活。以下图表使用真实市场数据（Binance BTC/USDT 2023-2024）生成。
+
+#### 综合仪表盘（2×2：资金曲线 + 回撤 + 收益分布 + 月度热力）
+![BTC 回测仪表盘](docs/images/backtest_btc_dashboard.png)
+
+#### 资金曲线 + 基准对比
+![BTC 资金曲线](docs/images/backtest_btc_equity.png)
+
+#### 回撤（填充区）
+![BTC 回撤](docs/images/backtest_btc_drawdown.png)
+
+#### 交易点标注（B/S 箭头）
+![BTC 交易标注](docs/images/backtest_btc_trades.png)
+
+#### 月度收益热力图
+![BTC 月度热力](docs/images/backtest_btc_monthly_heatmap.png)
+
+#### 参数网格热力图（AAPL 双均线 short × long → Sharpe）
+![参数热力图](docs/images/backtest_param_heatmap.png)
+
+#### 配对交易仪表盘（BTC/ETH）
+![配对交易仪表盘](docs/images/backtest_pair_dashboard.png)
+
+```python
+res = BacktestEngine(data=data, strategy=ma_cross,
+                     initial_cash=10000, benchmark="BTC/USDT").run()
+
+# 一行渲染（自动检测 matplotlib）
+res.render("equity_curve", path="equity.png")
+res.render("drawdown", path="drawdown.png")
+
+# 组合仪表盘（2×2 四面板）
+res.render("dashboard", path="dashboard.png")
+
+# 批量保存全部图表
+res.render_all("./charts")
+
+# 高级图表
+res.render("returns_distribution", path="dist.png")   # 收益分布直方图
+res.render("monthly_heatmap", path="monthly.png")      # 月度收益热力图
+res.render("yearly_returns", path="yearly.png")        # 年度收益柱状图
+
+# 参数网格热力图（配合 grid_search）
+from stockstat.backtest.optimizer import grid_search
+results = grid_search(make_engine, {"short": [3,5,8], "long": [10,20,30]}, metric="sharpe")
+res.chart("parameter_heatmap", grid_results=results)  # 返回 BacktestChartSpec
+res.render("parameter_heatmap", grid_results=results, path="param.png")
+```
+
+无 matplotlib 时自动降级为 `NullBacktestChartRenderer`（发告警、不崩溃）。
+
 ## 数据源
 
 | 数据源 | 类型 | 需联网 | 标的数目 | 说明 |
@@ -210,6 +350,15 @@ cd backend && python -m pytest tests/test_backend.py -v
 # 前端单元测试（指标、DSL、可视化）
 cd frontend && python -m pytest tests/test_frontend.py -v
 
+# 回测测试（接口、MVP、组合、多 tf、成本、绩效、优化、12 策略、可视化、在线真实数据）
+cd frontend && python -m pytest tests/test_backtest_iface.py tests/test_backtest_mvp.py \
+    tests/test_backtest_portfolio.py tests/test_backtest_multitf.py \
+    tests/test_backtest_cost.py tests/test_backtest_metrics.py \
+    tests/test_backtest_optimize.py tests/test_backtest_strategies.py \
+    tests/test_backtest_viz_iface.py tests/test_backtest_viz_mpl.py \
+    tests/test_backtest_viz_advanced.py tests/test_backtest_viz_dashboard.py \
+    tests/test_backtest_viz_online.py -v
+
 # 集成测试（真实数据：经典统计 + PAXG 周末相关性）
 cd frontend && python -m pytest tests/test_integration.py -v -s
 
@@ -240,7 +389,8 @@ cd frontend && python -m pytest tests/test_matplotlib_charts.py -v
 ## 文档
 
 - [使用文档](docs/USAGE_CN.md) — 详细示例与预期结果
-- [设计报告](docs/DESIGN_CN.md) — 完整架构设计
+- [设计报告](DESIGN_CN.md) — 完整架构设计（含 [§12 回测子系统](DESIGN_CN.md#12-回测子系统设计) · [§14 回测可视化](DESIGN_CN.md#13-回测可视化子系统设计)）
+- [回测阶段文档](docs/backtest/) — BT-0 ~ BT-7 + BT-V0 ~ V3 + 在线验证报告
 - [测试报告](reports/TEST_REPORT.md) — 测试结果
 
 ## 配置

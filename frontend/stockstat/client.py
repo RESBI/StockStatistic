@@ -117,5 +117,17 @@ class StockStatClient:
     def plot(self) -> PlotAPI:
         return self._plot
 
+    def backtest(self, data, strategy, **kwargs):
+        """Convenience wrapper to run a backtest using this client's ComputeEngine.
+
+        ``data`` may be a dict ``{symbol: {timeframe: df}}`` or a ``Universe``.
+        ``strategy`` is a ``Strategy`` instance or ``@strategy``-decorated function.
+        Keyword args are forwarded to ``BacktestEngine``.
+        """
+        from .backtest import BacktestEngine
+        kwargs.setdefault("compute_engine", self._compute)
+        engine = BacktestEngine(data=data, strategy=strategy, **kwargs)
+        return engine.run()
+
     def run_dsl(self, dsl_string: str) -> pd.DataFrame:
         return self._dsl.eval(dsl_string)

@@ -1,8 +1,8 @@
 # StockStat — 可编程金融标的统计计算平台 设计报告
 
-> **版本**: v1.2  
-> **日期**: 2026-07-15  
-> **状态**: 设计阶段
+> **版本**: v1.4  
+> **日期**: 2026-07-16  
+> **状态**: 设计阶段（新增回测可视化子系统）
 
 ---
 
@@ -19,6 +19,9 @@
 9. [部署方案](#9-部署方案)
 10. [项目结构](#10-项目结构)
 11. [开发路线图](#11-开发路线图)
+12. [回测子系统设计](#12-回测子系统设计)
+13. [回测可视化子系统设计](#13-回测可视化子系统设计)
+14. [回测阶段实现文档索引](#14-回测阶段实现文档索引)
 
 ---
 
@@ -1593,6 +1596,30 @@ StockStatistic/
 │   │   │   ├── engine.py            # 核心引擎
 │   │   │   ├── context.py           # 计算上下文
 │   │   │   └── registry.py          # 指标注册表
+│   │   ├── backtest/                # 回测子系统（v1.3 新增）
+│   │   │   ├── __init__.py          # 对外导出 BacktestEngine/Strategy/...
+│   │   │   ├── engine.py            # 主循环 + 事件分发
+│   │   │   ├── context.py           # BacktestContext（策略可见世界）
+│   │   │   ├── data_feed.py         # DataFeed + Universe 多标的多 tf 对齐
+│   │   │   ├── strategy.py          # Strategy 基类 + @strategy 装饰器
+│   │   │   ├── orders.py            # Order/Fill/OrderType 数据类
+│   │   │   ├── broker.py            # SimulatedBroker 撮合引擎
+│   │   │   ├── portfolio.py         # Portfolio/Position 账户与持仓
+│   │   │   ├── cost_model.py        # 手续费/滑点模型
+│   │   │   ├── fill_model.py        # 成交价决定模型
+│   │   │   ├── sizing.py            # 仓位规模算法
+│   │   │   ├── metrics.py           # 绩效聚合（复用 indicators.statistics）
+│   │   │   ├── result.py            # BacktestResult + 报告
+│   │   │   ├── benchmark.py         # 买入持有等基准
+│   │   │   ├── optimizer.py         # 参数网格/optuna（可选 extras）
+│   │   │   ├── walkforward.py       # 走样分析（可选）
+│   │   │   ├── montecarlo.py        # 蒙特卡洛扰动（可选）
+│   │   │   ├── plot_adapter.py      # equity/trades → PlotSpec（向后兼容）
+│   │   │   ├── chart_spec.py        # BacktestChartSpec 专用规格（v1.4）
+│   │   │   ├── chart_registry.py    # 回测图表类型注册表（v1.4）
+│   │   │   ├── chart_factory.py     # detect + get_chart_renderer（v1.4）
+│   │   │   ├── null_charts.py       # NullBacktestRenderer 零依赖兜底（v1.4）
+│   │   │   └── matplotlib_charts.py # MatplotlibBacktestRenderer 延迟导入（v1.4）
 │   │   ├── indicators/              # 内置指标库
 │   │   │   ├── __init__.py
 │   │   │   ├── trend.py             # MA/EMA/MACD
@@ -1617,7 +1644,20 @@ StockStatistic/
 │   │   ├── test_indicators.py
 │   │   ├── test_dsl.py
 │   │   ├── test_paxg_weekend.py     # PAXG 周末相关性测试
-│   │   └── test_classic_stats.py    # 经典统计测试
+│   │   ├── test_classic_stats.py    # 经典统计测试
+│   │   ├── test_backtest_iface.py   # 回测接口骨架测试 (BT-0)
+│   │   ├── test_backtest_mvp.py     # 回测 MVP 测试 (BT-1)
+│   │   ├── test_backtest_portfolio.py # 多标的/做空测试 (BT-2)
+│   │   ├── test_backtest_multitf.py # 多 timeframe 测试 (BT-3)
+│   │   ├── test_backtest_cost.py    # 成本模型测试 (BT-4)
+│   │   ├── test_backtest_metrics.py # 绩效统计测试 (BT-5)
+│   │   ├── test_backtest_optimize.py # 优化器测试 (BT-6)
+│   │   ├── test_backtest_strategies.py # 12 个策略全套测试 (BT-7)
+│   │   ├── test_backtest_viz_iface.py    # 回测可视化接口测试 (BT-V0)
+│   │   ├── test_backtest_viz_mpl.py      # 回测可视化 matplotlib 测试 (BT-V1)
+│   │   ├── test_backtest_viz_advanced.py # 回测可视化高级图表测试 (BT-V2)
+│   │   ├── test_backtest_viz_dashboard.py # 回测可视化仪表盘测试 (BT-V3)
+│   │   └── test_backtest_viz_online.py   # 回测可视化在线真实数据测试 (BT-V Online)
 │   └── pyproject.toml
 │
 ├── docker-compose.yml               # 后端部署编排
@@ -1650,6 +1690,22 @@ gantt
     DSL 解析器                 :b4, after b3, 21d
     可视化协议与mpl适配         :b5, after b3, 10d
 
+    section 回测子系统
+    BT0 接口与数据结构冻结      :bt0, after b5, 3d
+    BT1 单标的单tf MVP          :bt1, after bt0, 5d
+    BT2 多标的组合与做空        :bt2, after bt1, 5d
+    BT3 多timeframe对齐        :bt3, after bt2, 4d
+    BT4 成本与成交模型          :bt4, after bt3, 4d
+    BT5 绩效统计与可视化        :bt5, after bt4, 5d
+    BT6 参数优化与走样          :bt6, after bt5, 6d
+    BT7 DSL集成与全套策略       :bt7, after bt6, 4d
+
+    section 回测可视化
+    BTV0 接口冻结与Null兜底     :btv0, after bt7, 2d
+    BTV1 matplotlib基础渲染     :btv1, after btv0, 3d
+    BTV2 高级图表(热力/分布)    :btv2, after btv1, 3d
+    BTV3 组合仪表盘与标注       :btv3, after btv2, 3d
+
     section 测试与部署
     测试用例编写               :c1, after b3, 14d
     PAXG周末相关性测试          :c2, after b3, 7d
@@ -1666,6 +1722,433 @@ gantt
 | **P3** | 完整指标库 | 趋势/震荡/波动/统计 全套指标 |
 | **P4** | 可视化层 | PlotSpec + PlotRenderer 协议 + matplotlib 适配（可选 extras） |
 | **P5** | 测试与部署 | 全部测试用例 + Docker + 文档 |
+| **BT-0** | 回测接口冻结 | 核心 dataclass + 抽象基类签名 + 接口骨架测试 |
+| **BT-1** | 单标的 MVP | DataFeed/Portfolio/Broker/Context/Engine/Result + 双均线策略 |
+| **BT-2** | 多标的组合 | Universe + 做空 + 限价/止损单 + 仓位算法 + 配对交易 |
+| **BT-3** | 多 timeframe | {sym:{tf:df}} 对齐 + 未来函数审计 + 多 tf 共振策略 |
+| **BT-4** | 成本模型 | 手续费/滑点/印花税/资金费率 + 涨跌停 + 部分成交 |
+| **BT-5** | 绩效与报告 | Sharpe/Sortino/Calmar + 回撤 + 交易明细 + PlotSpec 可视化 |
+| **BT-6** | 优化与走样 | 网格搜索 + optuna + Walk-forward + 蒙特卡洛（可选 extras） |
+| **BT-7** | DSL 集成 | Signal.from_dsl + 12 策略全套测试 + 文档 |
+| **BT-V0** | 可视化接口冻结 | BacktestChartSpec + Renderer 协议 + Null 兜底 |
+| **BT-V1** | matplotlib 基础渲染 | line/fill/scatter/多子图 + equity/drawdown/trades 三图 |
+| **BT-V2** | 高级图表 | histogram/heatmap/bar + 收益分布/月度热力/参数热力 |
+| **BT-V3** | 组合仪表盘 | dashboard 多子图 + 交易标注 + 批量 savefig |
+
+---
+
+## 12. 回测子系统设计
+
+> **新增于 v1.3**。回测子系统是计算前端的可选增强模块，位于 `frontend/stockstat/backtest/`，纯前端实现，不修改存储后端。
+
+### 12.1 设计目标与原则
+
+| 目标 | 说明 |
+|------|------|
+| **可配置** | 自定义策略函数、多标的交易组、多时间尺度 K 线、复用计算库指标 |
+| **可编程优先** | 不内置固定策略，提供 Strategy 基类 + `@strategy` 函数装饰器两种粒度 |
+| **数据与计算分离** | 回测纯前端运行，数据经 `DataClient` 拉取后注入 `DataFeed` |
+| **零硬依赖** | 核心仅依赖 pandas/numpy；optuna 等走 `[optimize]` extras |
+| **未来函数防护** | 策略 `on_bar(t)` 只能访问 `≤ t` 数据；订单默认在 `t+1` open 成交 |
+| **可复现** | seed + 数据快照版本号记录于 `BacktestResult` |
+
+### 12.2 顶层架构
+
+```mermaid
+graph TB
+    subgraph "用户策略代码 Strategy"
+        US["on_bar(ctx):<br/>ctx.compute.rsi(...)<br/>ctx.broker.buy(...)"]
+    end
+
+    subgraph "回测核心"
+        CTX["BacktestContext<br/>get(sym,tf,lookback) 切片<br/>compute: ComputeEngine 代理<br/>portfolio 只读视图"]
+        BRK["Broker<br/>submit/cancel<br/>撮合 → Fill"]
+        DF["DataFeed + Universe<br/>多标的多 tf 对齐<br/>时间游标 + 防未来函数"]
+        PF["Portfolio<br/>cash / positions<br/>update_fill / mark_to_market"]
+        ENG["BacktestEngine<br/>事件循环 + 钩子 + 结果收集"]
+        RES["BacktestResult<br/>trades / positions / equity<br/>metrics / plot / to_dict"]
+    end
+
+    US -->|读| CTX
+    US -->|写订单| BRK
+    CTX -->|提供对齐 bar| US
+    BRK -->|推送成交| PF
+    DF --> CTX
+    PF --> CTX
+    ENG --> CTX
+    ENG --> BRK
+    ENG --> DF
+    ENG --> RES
+```
+
+### 12.3 模块划分
+
+```
+frontend/stockstat/backtest/
+├── __init__.py              # 对外导出
+├── engine.py                # BacktestEngine：主循环、事件分发
+├── context.py               # BacktestContext：策略可见的世界
+├── data_feed.py             # DataFeed + Universe
+├── strategy.py              # Strategy 基类、@strategy 装饰器
+├── orders.py                # Order/Fill 数据类
+├── broker.py                # SimulatedBroker
+├── portfolio.py             # Portfolio/Position
+├── cost_model.py            # CostModel 抽象 + 多实现
+├── fill_model.py            # FillModel：成交价决定
+├── sizing.py                # 仓位规模算法
+├── metrics.py               # 绩效聚合
+├── result.py                # BacktestResult + 报告
+├── benchmark.py             # 基准对比
+├── optimizer.py             # 参数优化（可选 extras）
+├── walkforward.py           # 走样分析（可选）
+├── montecarlo.py            # 蒙特卡洛（可选）
+└── plot_adapter.py          # equity/trades → PlotSpec
+```
+
+### 12.4 核心接口签名
+
+```python
+# strategy.py
+class Strategy:
+    """策略基类。子类重写钩子。"""
+    def on_start(self, ctx: BacktestContext) -> None: ...
+    def on_bar(self, ctx: BacktestContext) -> None: ...        # 主入口
+    def on_bar_close(self, ctx: BacktestContext) -> None: ...
+    def on_fill(self, fill: Fill, ctx: BacktestContext) -> None: ...
+
+def strategy(fn=None, *, name: str | None = None):
+    """函数式策略装饰器：def on_bar(ctx) 简化写法。"""
+
+# context.py
+class BacktestContext:
+    now: pd.Timestamp
+    current_bar: dict[str, pd.Series]
+    def get(self, symbol: str, timeframe: str = "1d",
+            lookback: int | None = None) -> pd.DataFrame: ...
+    @property
+    def compute(self) -> ComputeEngine: ...
+    @property
+    def broker(self) -> Broker: ...
+    @property
+    def portfolio(self) -> Portfolio: ...
+    @property
+    def history(self) -> ContextHistory: ...
+
+# orders.py
+@dataclass
+class Order:
+    symbol: str
+    side: Literal["buy", "sell"]
+    qty: float
+    order_type: Literal["market","limit","stop","stop_limit","trailing_stop"] = "market"
+    limit_price: float | None = None
+    stop_price: float | None = None
+    time_in_force: Literal["day","gtc","ioc"] = "gtc"
+    tag: str = ""
+
+# engine.py
+class BacktestEngine:
+    def __init__(self, *,
+                 data: dict[str, dict[str, pd.DataFrame]],  # {symbol: {tf: df}}
+                 strategy: Strategy,
+                 initial_cash: float = 1_000_000.0,
+                 cost_model: CostModel = PercentCost(commission=0.0003, slippage=0.0002),
+                 fill_model: FillModel = NextOpenFill(),
+                 benchmark: str | None = None,
+                 trade_on: Literal["open","close"] = "open",
+                 allow_short: bool = False,
+                 seed: int = 0): ...
+    def run(self) -> BacktestResult: ...
+```
+
+### 12.5 多 timeframe 对齐与未来函数防护
+
+以**最低粒度 timeframe** 为驱动游标 `t`，更高 tf 的 bar 通过 `asof/ffill` 对齐到 `t`：
+
+```python
+# DataFeed 内部
+master_index = union_of_all timestamps at finest tf
+aligned[sym][tf] = df[sym][tf].reindex(master_index, method="ffill")
+
+# Context.get(symbol, tf, lookback) 返回 ≤ t 切片（闭区间）
+df = aligned[sym][tf].loc[:t]
+return df.iloc[-lookback:] if lookback else df
+```
+
+- **未来函数防护**：策略 `on_bar(t)` 只能拿到 `≤ t` 数据；订单默认 `t+1` open 成交（`NextOpenFill`）
+- **lookahead_audit**：可选运行时检测，访问 `> t` 数据抛 `LookaheadError`
+- 指标计算基于 `≤ t` 切片，避免 lookahead
+
+### 12.6 成本与成交模型
+
+| 模型 | 实现 | 说明 |
+|------|------|------|
+| `PercentCost` | 默认 | 比例手续费 + 比例滑点（bps） |
+| `FixedCost` | | 固定每笔费用 |
+| `TieredCost` | | 阶梯费率 |
+| `MinCost` | | 最小手续费兜底 |
+| `StampDutyCost` | | 印花税（股票卖出方） |
+| `FundingRateCost` | 可选 | 永续合约资金费率 |
+| `NextOpenFill` | 默认 | 下一 bar open 成交，最强防未来函数 |
+| `NextCloseFill` / `ThisCloseFill` | | 其他成交时点（告警） |
+| `VWAPFill` / `WorstPriceFill` | | 模拟冲击 |
+
+### 12.7 仓位规模算法
+
+`fixed_size / fixed_amount / percent_equity / kelly / atr_risk_budget`，由策略调用 `ctx.broker.submit(order)` 前计算 `qty`，或通过 `sizing` 辅助函数。
+
+### 12.8 绩效指标
+
+复用 `indicators.statistics` 与新增 `metrics.py`：
+
+总收益、年化收益、Sharpe、Sortino、Calmar、Omega、信息比率、最大回撤、回撤持续/恢复时间、胜率、盈亏比、Profit Factor、期望值、连胜连跌、月度/年度热力、收益分布、VaR。
+
+### 12.9 与既有模块集成
+
+| 集成点 | 方式 |
+|-------|------|
+| `ComputeEngine` | `Context.compute` 直接持有 client 的 ComputeEngine |
+| 自定义指标 | `ctx.compute.register("divergence", fn)` → `ctx.compute.call(...)` |
+| DSL | `Signal.from_dsl("SELECT ... WHERE rsi<30")` 信号生成（BT-7） |
+| `indicators.statistics` | `metrics.py` 调用 sharpe/max_drawdown/var/returns |
+| `plot` 协议 | `result.plot_equity()` 返回 PlotSpec，任意 renderer 渲染 |
+| `export` | `result.to_csv()/to_json()` 复用 serializers |
+| `data_access` | `DataFeed` 接受 DataFrame 或 client 懒加载 |
+
+### 12.10 内置示例策略清单
+
+12 个策略覆盖从简单到复杂，每个对应 `test_backtest_strategies.py` 测试用例：
+
+| # | 策略 | 标的 | tf | 用到的指标/设计点 | 验证目标 |
+|---|------|------|----|------------------|---------|
+| 1 | 双均线交叉 | 单 | 单 | ma(5)×ma(20) | MVP 闭环 |
+| 2 | 布林带突破 | 单 | 单 | bollinger | 限价单/止损 |
+| 3 | RSI 超买超卖 | 单 | 单 | rsi | 反向开仓/止盈 |
+| 4 | MACD 背离 | 单 | 单 | macd + 自定义指标 | register() |
+| 5 | ATR 通道突破 | 单 | 单 | atr + Donchian | ATR 风险预算 |
+| 6 | 网格交易 | 单 | 单 | 价格分档 | 多挂单/资金分桶 |
+| 7 | 配对交易 | 多(2) | 单 | beta/corr + z-score | 多标的/做空对冲 |
+| 8 | 风险平价 | 多(N) | 单 | beta/std | 定期再平衡 |
+| 9 | 动量轮动 | 多(N) | 单 | 6月动量排名 | Top-K 调仓 |
+| 10 | 多 tf 共振 | 单 | 多 | 日线 MA + 小时突破 | 多 tf 对齐 |
+| 11 | PAXG 周末效应 | 单 | 单 | weekday 信号 | 事件驱动 |
+| 12 | 马丁格尔 | 单 | 单 | 亏损翻倍 | 仓位限制/风险警示 |
+
+### 12.11 依赖声明
+
+```toml
+[project.optional-dependencies]
+backtest = ["stockstat"]                  # 核心回测，无额外依赖
+optimize = ["optuna>=3.5"]                # BT-6 参数优化
+backtest_full = ["stockstat[backtest]", "stockstat[optimize]", "stockstat[matplotlib]"]
+```
+
+---
+
+## 13. 回测可视化子系统设计
+
+> **新增于 v1.4**。在回测子系统（§12）之上叠加**零硬依赖**的可视化层：回测核心不依赖 matplotlib，但安装后自动激活丰富的回测专用图表。
+
+### 13.1 背景与问题
+
+回测子系统已通过 `backtest/plot_adapter.py` 复用通用 `PlotSpec` 协议产出 equity/drawdown/trades 三种基础图，但存在以下不足：
+
+| 不足 | 说明 |
+|------|------|
+| PlotSpec 表达力有限 | 仅支持 line/bar/scatter + markers，无法表达**填充区域**（drawdown 填色）、**直方图**（收益分布）、**热力图**（月度/年度收益、参数网格）、**多子图组合**（仪表盘） |
+| 通用协议被污染风险 | 若直接扩展 PlotSpec 加入回测专用字段，会破坏通用 plot 协议的简洁性 |
+| matplotlib 耦合 | 当前 `MatplotlibRenderer` 只能渲染单 ax，回测需要的填充/热力/子图无法用通用 renderer 表达 |
+
+### 13.2 设计原则
+
+| 原则 | 说明 |
+|------|------|
+| **回测核心零硬依赖** | `backtest/` 包导入不触发 matplotlib；`import stockstat.backtest` 永远成功 |
+| **专用 spec 层** | 新增 `BacktestChartSpec`（回测专用），与通用 `PlotSpec` 平行，互不污染 |
+| **延迟激活** | matplotlib 安装后通过 `backtest.matplotlib_charts` 模块延迟导入激活 |
+| **协议化** | 定义 `BacktestChartRenderer` 协议，Null/Matplotlib 多后端可插拔 |
+| **渐进式** | 基础图（equity/drawdown）→ 高级图（热力/分布）→ 组合仪表盘 |
+
+### 13.3 架构
+
+```mermaid
+graph TB
+    subgraph "回测核心 backtest/（零 matplotlib 依赖）"
+        RES["BacktestResult"]
+        ADAPTER["plot_adapter.py<br/>基础 PlotSpec 构建器"]
+        CHARTSPEC["chart_spec.py<br/>BacktestChartSpec 专用规格"]
+        REG["chart_registry.py<br/>图表注册表"]
+    end
+
+    subgraph "通用 plot 协议（已有）"
+        PS["PlotSpec"]
+        PR["PlotRenderer<br/>Null/Matplotlib"]
+    end
+
+    subgraph "回测可视化后端（延迟导入 · 可选）"
+        BCMPL["backtest/matplotlib_charts.py<br/>MatplotlibBacktestRenderer<br/>（matplotlib 安装后才激活）"]
+        BCNULL["backtest/null_charts.py<br/>NullBacktestRenderer"]
+        FACTORY["chart_factory.py<br/>detect + get_chart_renderer"]
+    end
+
+    RES --> ADAPTER --> PS
+    RES --> CHARTSPEC
+    CHARTSPEC --> REG
+    REG --> FACTORY
+    FACTORY --> BCMPL
+    FACTORY --> BCNULL
+    BCMPL -.->|延迟 import| PR
+```
+
+### 13.4 模块划分（新增于 `frontend/stockstat/backtest/`）
+
+```
+frontend/stockstat/backtest/
+├── chart_spec.py            # BacktestChartSpec + 子规格数据类
+├── chart_registry.py        # 图表类型注册表
+├── chart_factory.py         # detect + get_chart_renderer
+├── null_charts.py           # NullBacktestRenderer（零依赖兜底）
+├── matplotlib_charts.py     # MatplotlibBacktestRenderer（延迟导入）
+└── plot_adapter.py          # （已有）扩展：同时返回 PlotSpec 与 BacktestChartSpec
+```
+
+### 13.5 BacktestChartSpec 设计
+
+```python
+# chart_spec.py
+@dataclass
+class ChartSeries:
+    name: str
+    data: pd.Series | pd.DataFrame
+    kind: str = "line"          # line/bar/scatter/fill/histogram/heatmap
+    color: str | None = None
+    secondary_y: bool = False
+    alpha: float = 1.0
+
+@dataclass
+class SubplotSpec:
+    title: str = ""
+    y_label: str = ""
+    series: list[ChartSeries] = field(default_factory=list)
+    share_x: bool = True
+
+@dataclass
+class BacktestChartSpec:
+    """回测专用图表规格，支持多子图、填充、热力、直方图。"""
+    title: str = ""
+    x_label: str = ""
+    subplots: list[SubplotSpec] = field(default_factory=list)
+    layout: tuple[int, int] = (1, 1)   # (rows, cols)
+    figsize: tuple[float, float] = (12, 6)
+    annotate_trades: bool = False
+    source_result: object = None       # 反向引用 BacktestResult（用于交易标注）
+
+    def add_subplot(self, title="", y_label="") -> SubplotSpec: ...
+    def to_dict(self) -> dict: ...     # 可序列化（用于 Web 前端）
+
+class BacktestChartRenderer(Protocol):
+    def render(self, spec: BacktestChartSpec) -> Any: ...
+    def savefig(self, path: str) -> None: ...
+    def show(self) -> None: ...
+    def available(self) -> bool: ...
+```
+
+### 13.6 图表类型清单
+
+| 图表 | 类型 | 用途 | 阶段 |
+|------|------|------|------|
+| `equity_curve` | 多 line + 基准 | 资金曲线对比 | BT-V0 |
+| `drawdown` | line + fill | 回撤填充区 | BT-V0 |
+| `trades_overlay` | line + scatter 标注 | 交易点叠加 | BT-V0 |
+| `returns_distribution` | histogram | 收益率分布 | BT-V2 |
+| `monthly_heatmap` | heatmap | 月度收益热力 | BT-V2 |
+| `yearly_returns` | bar | 年度收益对比 | BT-V2 |
+| `parameter_heatmap` | heatmap | 网格搜索参数热力 | BT-V2 |
+| `underwater_curve` | fill | 水下曲线（回撤持续） | BT-V2 |
+| `dashboard` | 多子图组合 | 综合仪表盘 | BT-V3 |
+
+### 13.7 与既有模块集成
+
+| 集成点 | 方式 |
+|-------|------|
+| `BacktestResult` | 新增 `result.chart(name)` 方法返回 `BacktestChartSpec` |
+| `plot_adapter.py` | 保留原 `plot_equity/plot_drawdown/plot_trades`（返回通用 PlotSpec，向后兼容） |
+| `plot/base.py` | **不修改**——通用协议保持简洁 |
+| `matplotlib_backend.py` | **不修改**——通用 renderer 保持单 ax 简单语义 |
+| `client.backtest()` | 返回的 `BacktestResult` 自动具备 `.chart()` 与 `.render()` |
+
+### 13.8 使用方式
+
+```python
+from stockstat.backtest import BacktestEngine, strategy, Order
+from stockstat.backtest.chart_factory import get_chart_renderer
+
+res = BacktestEngine(...).run()
+
+# 方式 A：获取专用 spec，自行渲染
+spec = res.chart("equity_curve")        # 返回 BacktestChartSpec
+renderer = get_chart_renderer()         # 自动检测 matplotlib
+renderer.render(spec)
+renderer.savefig("equity.png")
+
+# 方式 B：一行渲染
+res.render("drawdown", path="dd.png")
+
+# 方式 C：组合仪表盘
+spec = res.chart("dashboard")           # 多子图组合
+renderer.render(spec)
+
+# 方式 D：向后兼容——通用 PlotSpec（无 matplotlib 也能用）
+spec = res.plot_equity()                # 返回 PlotSpec（已有）
+```
+
+### 13.9 依赖声明
+
+```toml
+[project.optional-dependencies]
+backtest = ["stockstat"]                          # 核心，无 matplotlib
+backtest_viz = ["stockstat[backtest]", "matplotlib>=3.8"]   # 回测可视化
+backtest_full = ["stockstat[backtest]", "stockstat[optimize]",
+                 "stockstat[matplotlib]", "matplotlib>=3.8"]
+```
+
+### 13.10 实现阶段（BT-V 系列）
+
+| 阶段 | 内容 | 测试 |
+|------|------|------|
+| **BT-V0** | 接口冻结：`BacktestChartSpec` + `BacktestChartRenderer` 协议 + Null 实现 + 基础 spec 构建器 | `test_backtest_viz_iface.py` |
+| **BT-V1** | matplotlib backend：渲染 line/fill/scatter/多子图，equity/drawdown/trades 三图完整 | `test_backtest_viz_mpl.py` |
+| **BT-V2** | 高级图表：histogram/heatmap/bar，returns_distribution/monthly_heatmap/yearly/parameter_heatmap | `test_backtest_viz_advanced.py` |
+| **BT-V3** | 组合仪表盘 + 交易标注 + savefig 批量 + 优雅降级 | `test_backtest_viz_dashboard.py` |
+
+---
+
+## 14. 回测阶段实现文档索引
+
+回测核心（BT-0~BT-7）与回测可视化（BT-V0~BT-V3 + 在线验证）的阶段文档统一索引如下，存放于 `docs/backtest/`：
+
+### 14.1 回测核心（BT 系列）
+
+| 阶段 | 文档 | 代码 | 测试 |
+|------|------|------|------|
+| BT-0 | [docs/backtest/BT0_CN.md](docs/backtest/BT0_CN.md) | `backtest/` 包骨架 + dataclass | `test_backtest_iface.py` |
+| BT-1 | [docs/backtest/BT1_CN.md](docs/backtest/BT1_CN.md) | MVP 五大模块 | `test_backtest_mvp.py` |
+| BT-2 | [docs/backtest/BT2_CN.md](docs/backtest/BT2_CN.md) | 多标的/做空/订单扩展 | `test_backtest_portfolio.py` |
+| BT-3 | [docs/backtest/BT3_CN.md](docs/backtest/BT3_CN.md) | 多 tf 对齐/审计 | `test_backtest_multitf.py` |
+| BT-4 | [docs/backtest/BT4_CN.md](docs/backtest/BT4_CN.md) | 成本/成交模型 | `test_backtest_cost.py` |
+| BT-5 | [docs/backtest/BT5_CN.md](docs/backtest/BT5_CN.md) | 绩效/报告/可视化 | `test_backtest_metrics.py` |
+| BT-6 | [docs/backtest/BT6_CN.md](docs/backtest/BT6_CN.md) | 优化/走样/蒙特卡洛 | `test_backtest_optimize.py` |
+| BT-7 | [docs/backtest/BT7_CN.md](docs/backtest/BT7_CN.md) | DSL 集成/12 策略 | `test_backtest_strategies.py` |
+
+### 14.2 回测可视化（BT-V 系列 + 在线验证）
+
+| 阶段 | 文档 | 代码 | 测试 |
+|------|------|------|------|
+| BT-V0 | [docs/backtest/BTV0_CN.md](docs/backtest/BTV0_CN.md) | `chart_spec.py` + `chart_registry.py` + `null_charts.py` + `chart_factory.py` | `test_backtest_viz_iface.py` |
+| BT-V1 | [docs/backtest/BTV1_CN.md](docs/backtest/BTV1_CN.md) | `matplotlib_charts.py` 基础渲染 | `test_backtest_viz_mpl.py` |
+| BT-V2 | [docs/backtest/BTV2_CN.md](docs/backtest/BTV2_CN.md) | histogram/heatmap/bar 高级图表 | `test_backtest_viz_advanced.py` |
+| BT-V3 | [docs/backtest/BTV3_CN.md](docs/backtest/BTV3_CN.md) | dashboard 组合 + 交易标注 | `test_backtest_viz_dashboard.py` |
+| BT-V Online | [docs/backtest/BT_VIZ_ONLINE_REPORT_CN.md](docs/backtest/BT_VIZ_ONLINE_REPORT_CN.md) | 真实数据在线验证 + 13 张图像 | `test_backtest_viz_online.py` |
 
 ---
 

@@ -1,8 +1,8 @@
 # StockStat — Programmable Financial Instrument Statistical Computing Platform Design Report
 
-> **Version**: v1.2  
-> **Date**: 2026-07-15  
-> **Status**: Design Phase
+> **Version**: v1.4  
+> **Date**: 2026-07-16  
+> **Status**: Design Phase (backtest visualization subsystem added)
 
 ---
 
@@ -19,6 +19,9 @@
 9. [Deployment](#9-deployment)
 10. [Project Structure](#10-project-structure)
 11. [Development Roadmap](#11-development-roadmap)
+12. [Backtest Subsystem Design](#12-backtest-subsystem-design)
+13. [Backtest Visualization Subsystem Design](#13-backtest-visualization-subsystem-design)
+14. [Backtest Phase Documentation Index](#14-backtest-phase-documentation-index)
 
 ---
 
@@ -1597,6 +1600,30 @@ StockStatistic/
 │   │   │   ├── engine.py            # Core engine
 │   │   │   ├── context.py           # Computation context
 │   │   │   └── registry.py          # Indicator registry
+│   │   ├── backtest/                # Backtest subsystem (v1.3)
+│   │   │   ├── __init__.py          # Public exports
+│   │   │   ├── engine.py            # Main loop + event dispatch
+│   │   │   ├── context.py           # BacktestContext
+│   │   │   ├── data_feed.py         # DataFeed + Universe multi-tf alignment
+│   │   │   ├── strategy.py          # Strategy base + @strategy decorator
+│   │   │   ├── orders.py            # Order/Fill dataclasses
+│   │   │   ├── broker.py            # SimulatedBroker
+│   │   │   ├── portfolio.py         # Portfolio/Position
+│   │   │   ├── cost_model.py        # Fee/slippage models
+│   │   │   ├── fill_model.py        # Fill price model
+│   │   │   ├── sizing.py            # Position sizing algorithms
+│   │   │   ├── metrics.py           # Performance aggregation
+│   │   │   ├── result.py            # BacktestResult + report
+│   │   │   ├── benchmark.py         # Buy-and-hold benchmarks
+│   │   │   ├── optimizer.py         # Grid/optuna (optional extras)
+│   │   │   ├── walkforward.py       # Walk-forward (optional)
+│   │   │   ├── montecarlo.py            # Monte Carlo (optional)
+│   │   │   ├── plot_adapter.py          # equity/trades → PlotSpec (back-compat)
+│   │   │   ├── chart_spec.py            # BacktestChartSpec (v1.4)
+│   │   │   ├── chart_registry.py        # chart type registry (v1.4)
+│   │   │   ├── chart_factory.py         # detect + get_chart_renderer (v1.4)
+│   │   │   ├── null_charts.py           # NullBacktestRenderer (v1.4)
+│   │   │   └── matplotlib_charts.py     # MatplotlibBacktestRenderer lazy (v1.4)
 │   │   ├── indicators/              # Built-in indicator library
 │   │   │   ├── __init__.py
 │   │   │   ├── trend.py             # MA/EMA/MACD
@@ -1615,7 +1642,20 @@ StockStatistic/
 │   │   ├── test_indicators.py
 │   │   ├── test_dsl.py
 │   │   ├── test_paxg_weekend.py     # PAXG weekend correlation test
-│   │   └── test_classic_stats.py    # Classic statistics tests
+│   │   ├── test_classic_stats.py    # Classic statistics tests
+│   │   ├── test_backtest_iface.py   # Backtest interface skeleton (BT-0)
+│   │   ├── test_backtest_mvp.py     # Backtest MVP (BT-1)
+│   │   ├── test_backtest_portfolio.py # Multi-asset/short (BT-2)
+│   │   ├── test_backtest_multitf.py # Multi-timeframe (BT-3)
+│   │   ├── test_backtest_cost.py    # Cost models (BT-4)
+│   │   ├── test_backtest_metrics.py # Performance metrics (BT-5)
+│   │   ├── test_backtest_optimize.py # Optimizer (BT-6)
+│   │   ├── test_backtest_strategies.py # 12 strategies (BT-7)
+│   │   ├── test_backtest_viz_iface.py    # Backtest viz interface (BT-V0)
+│   │   ├── test_backtest_viz_mpl.py      # Backtest viz matplotlib (BT-V1)
+│   │   ├── test_backtest_viz_advanced.py # Backtest viz advanced (BT-V2)
+│   │   ├── test_backtest_viz_dashboard.py # Backtest viz dashboard (BT-V3)
+│   │   └── test_backtest_viz_online.py   # Backtest viz online real-data (BT-V Online)
 │   └── pyproject.toml
 │
 ├── docker-compose.yml               # Backend deployment orchestration
@@ -1649,6 +1689,22 @@ gantt
     DSL parser                         :b4, after b3, 21d
     Visualization protocol & mpl adapter :b5, after b3, 10d
 
+    section Backtest Subsystem
+    BT0 Interface freeze               :bt0, after b5, 3d
+    BT1 Single-asset MVP               :bt1, after bt0, 5d
+    BT2 Multi-asset & short            :bt2, after bt1, 5d
+    BT3 Multi-timeframe alignment      :bt3, after bt2, 4d
+    BT4 Cost & fill models             :bt4, after bt3, 4d
+    BT5 Metrics & reporting            :bt5, after bt4, 5d
+    BT6 Optimization & walk-forward    :bt6, after bt5, 6d
+    BT7 DSL integration & strategies   :bt7, after bt6, 4d
+
+    section Backtest Visualization
+    BTV0 Interface freeze & null       :btv0, after bt7, 2d
+    BTV1 matplotlib basic rendering    :btv1, after btv0, 3d
+    BTV2 Advanced charts (heatmap/dist) :btv2, after btv1, 3d
+    BTV3 Dashboard & annotations       :btv3, after btv2, 3d
+
     section Testing & Deployment
     Test case writing                  :c1, after b3, 14d
     PAXG weekend correlation test      :c2, after b3, 7d
@@ -1665,6 +1721,407 @@ gantt
 | **P3** | Full indicator library | Trend/oscillator/volatility/statistics full suite |
 | **P4** | Visualization layer | PlotSpec + PlotRenderer protocol + matplotlib adapter (optional extras) |
 | **P5** | Testing & deployment | All test cases + Docker + documentation |
+| **BT-0** | Backtest interface freeze | Core dataclasses + abstract base signatures + interface skeleton tests |
+| **BT-1** | Single-asset MVP | DataFeed/Portfolio/Broker/Context/Engine/Result + MA crossover strategy |
+| **BT-2** | Multi-asset portfolio | Universe + short selling + limit/stop orders + sizing + pair trading |
+| **BT-3** | Multi-timeframe | {sym:{tf:df}} alignment + lookahead audit + multi-tf resonance strategy |
+| **BT-4** | Cost models | Commission/slippage/stamp duty/funding rate + limit-up/down + partial fills |
+| **BT-5** | Performance & reporting | Sharpe/Sortino/Calmar + drawdown + trade ledger + PlotSpec visualization |
+| **BT-6** | Optimization & walk-forward | Grid search + optuna + walk-forward + Monte Carlo (optional extras) |
+| **BT-7** | DSL integration | Signal.from_dsl + 12-strategy full test suite + documentation |
+| **BT-V0** | Visualization interface freeze | BacktestChartSpec + Renderer protocol + Null fallback |
+| **BT-V1** | matplotlib basic rendering | line/fill/scatter/subplots + equity/drawdown/trades |
+| **BT-V2** | Advanced charts | histogram/heatmap/bar + returns dist/monthly heatmap/param heatmap |
+| **BT-V3** | Dashboard | multi-subplot dashboard + trade annotations + batch savefig |
+
+---
+
+## 12. Backtest Subsystem Design
+
+> **Added in v1.3.** The backtest subsystem is an optional enhancement of the computation frontend, located at `frontend/stockstat/backtest/`. It is purely frontend and does not modify the storage backend.
+
+### 12.1 Goals & Principles
+
+| Goal | Description |
+|------|-------------|
+| **Configurable** | Custom strategy functions, multi-instrument trading groups, multi-timeframe bars, reuse compute-library indicators |
+| **Programmable-first** | No built-in fixed strategies; provides `Strategy` base class + `@strategy` function decorator |
+| **Data/compute separation** | Pure frontend; data fetched via `DataClient` then injected into `DataFeed` |
+| **Zero hard dependency** | Core depends only on pandas/numpy; optuna etc. via `[optimize]` extras |
+| **Lookahead protection** | `on_bar(t)` may only access data `≤ t`; orders default to fill at `t+1` open |
+| **Reproducible** | seed + data snapshot version recorded in `BacktestResult` |
+
+### 12.2 Top-level Architecture
+
+```mermaid
+graph TB
+    subgraph "User Strategy"
+        US["on_bar(ctx):<br/>ctx.compute.rsi(...)<br/>ctx.broker.buy(...)"]
+    end
+    subgraph "Backtest Core"
+        CTX["BacktestContext<br/>get(sym,tf,lookback) slice<br/>compute: ComputeEngine proxy<br/>portfolio read-only"]
+        BRK["Broker<br/>submit/cancel<br/>match → Fill"]
+        DF["DataFeed + Universe<br/>multi-tf alignment<br/>cursor + lookahead guard"]
+        PF["Portfolio<br/>cash / positions<br/>update_fill / mark_to_market"]
+        ENG["BacktestEngine<br/>event loop + hooks + result"]
+        RES["BacktestResult<br/>trades / positions / equity<br/>metrics / plot / to_dict"]
+    end
+    US -->|read| CTX
+    US -->|orders| BRK
+    CTX -->|aligned bars| US
+    BRK -->|fills| PF
+    DF --> CTX
+    PF --> CTX
+    ENG --> CTX
+    ENG --> BRK
+    ENG --> DF
+    ENG --> RES
+```
+
+### 12.3 Module Layout
+
+```
+frontend/stockstat/backtest/
+├── __init__.py              # public exports
+├── engine.py                # main loop + event dispatch
+├── context.py               # BacktestContext
+├── data_feed.py             # DataFeed + Universe
+├── strategy.py              # Strategy base + @strategy decorator
+├── orders.py                # Order/Fill dataclasses
+├── broker.py                # SimulatedBroker
+├── portfolio.py             # Portfolio/Position
+├── cost_model.py            # CostModel abstract + implementations
+├── fill_model.py            # FillModel
+├── sizing.py                # position sizing
+├── metrics.py               # performance aggregation
+├── result.py                # BacktestResult + report
+├── benchmark.py             # benchmark comparison
+├── optimizer.py             # parameter optimization (optional)
+├── walkforward.py           # walk-forward (optional)
+├── montecarlo.py            # Monte Carlo (optional)
+└── plot_adapter.py          # equity/trades → PlotSpec
+```
+
+### 12.4 Core Interface Signatures
+
+```python
+class Strategy:
+    def on_start(self, ctx: BacktestContext) -> None: ...
+    def on_bar(self, ctx: BacktestContext) -> None: ...
+    def on_bar_close(self, ctx: BacktestContext) -> None: ...
+    def on_fill(self, fill: Fill, ctx: BacktestContext) -> None: ...
+
+def strategy(fn=None, *, name: str | None = None): ...
+
+class BacktestContext:
+    now: pd.Timestamp
+    current_bar: dict[str, pd.Series]
+    def get(self, symbol: str, timeframe: str = "1d",
+            lookback: int | None = None) -> pd.DataFrame: ...
+    @property
+    def compute(self) -> ComputeEngine: ...
+    @property
+    def broker(self) -> Broker: ...
+    @property
+    def portfolio(self) -> Portfolio: ...
+
+@dataclass
+class Order:
+    symbol: str
+    side: Literal["buy", "sell"]
+    qty: float
+    order_type: Literal["market","limit","stop","stop_limit","trailing_stop"] = "market"
+    limit_price: float | None = None
+    stop_price: float | None = None
+    time_in_force: Literal["day","gtc","ioc"] = "gtc"
+    tag: str = ""
+
+class BacktestEngine:
+    def __init__(self, *,
+                 data: dict[str, dict[str, pd.DataFrame]],
+                 strategy: Strategy,
+                 initial_cash: float = 1_000_000.0,
+                 cost_model: CostModel = PercentCost(commission=0.0003, slippage=0.0002),
+                 fill_model: FillModel = NextOpenFill(),
+                 benchmark: str | None = None,
+                 trade_on: Literal["open","close"] = "open",
+                 allow_short: bool = False,
+                 seed: int = 0): ...
+    def run(self) -> BacktestResult: ...
+```
+
+### 12.5 Multi-timeframe Alignment & Lookahead Protection
+
+The **finest timeframe** drives the cursor `t`; higher-timeframe bars align via `asof/ffill`:
+
+```python
+master_index = union of all timestamps at finest tf
+aligned[sym][tf] = df[sym][tf].reindex(master_index, method="ffill")
+
+# Context.get(symbol, tf, lookback) returns ≤ t slice (closed)
+df = aligned[sym][tf].loc[:t]
+return df.iloc[-lookback:] if lookback else df
+```
+
+- Orders default to `NextOpenFill` (fill at `t+1` open)
+- Optional `lookahead_audit` raises `LookaheadError` on access to `> t`
+- Indicator computation also based on `≤ t` slice
+
+### 12.6 Cost & Fill Models
+
+| Model | Description |
+|-------|-------------|
+| `PercentCost` (default) | Percentage commission + percentage slippage (bps) |
+| `FixedCost` / `TieredCost` / `MinCost` | Fixed / tiered / minimum fee |
+| `StampDutyCost` | Stamp duty (equity sell-side) |
+| `FundingRateCost` (optional) | Perpetual funding rate |
+| `NextOpenFill` (default) | Fill at next bar open — strongest lookahead protection |
+| `NextCloseFill` / `ThisCloseFill` | Alternative fill timing (warned) |
+| `VWAPFill` / `WorstPriceFill` | Impact simulation |
+
+### 12.7 Performance Metrics
+
+Reuses `indicators.statistics` plus new `metrics.py`: total/annualized return, Sharpe, Sortino, Calmar, Omega, information ratio, max drawdown, drawdown duration/recovery, win rate, profit factor, expectancy, streaks, monthly/yearly heatmap, return distribution, VaR.
+
+### 12.8 Integration with Existing Modules
+
+| Integration point | Mechanism |
+|-------------------|-----------|
+| `ComputeEngine` | `Context.compute` holds the client's ComputeEngine |
+| Custom indicators | `ctx.compute.register("divergence", fn)` → `ctx.compute.call(...)` |
+| DSL | `Signal.from_dsl("SELECT ... WHERE rsi<30")` (BT-7) |
+| `indicators.statistics` | `metrics.py` calls sharpe/max_drawdown/var/returns |
+| `plot` protocol | `result.plot_equity()` returns PlotSpec |
+| `export` | `result.to_csv()/to_json()` reuses serializers |
+| `data_access` | `DataFeed` accepts DataFrames or lazy client |
+
+### 12.9 Built-in Example Strategies
+
+| # | Strategy | Universe | tf | Indicators/Design | Validates |
+|---|----------|----------|----|-------------------|-----------|
+| 1 | MA crossover | single | single | ma(5)×ma(20) | MVP loop |
+| 2 | Bollinger breakout | single | single | bollinger | limit/stop |
+| 3 | RSI reversal | single | single | rsi | reverse/TP |
+| 4 | MACD divergence | single | single | macd + custom | register() |
+| 5 | ATR channel (turtle) | single | single | atr + Donchian | ATR sizing |
+| 6 | Grid trading | single | single | price ladder | multi-orders |
+| 7 | Pair trading | multi(2) | single | beta/corr + z-score | short/hedge |
+| 8 | Risk parity | multi(N) | single | beta/std | rebalance |
+| 9 | Momentum rotation | multi(N) | single | 6M rank | Top-K |
+| 10 | Multi-tf resonance | single | multi | daily MA + hourly | multi-tf |
+| 11 | PAXG weekend effect | single | single | weekday signal | event-driven |
+| 12 | Martingale | single | single | doubling down | risk limits |
+
+### 12.10 Dependency Declaration
+
+```toml
+[project.optional-dependencies]
+backtest = ["stockstat"]
+optimize = ["optuna>=3.5"]
+backtest_full = ["stockstat[backtest]", "stockstat[optimize]", "stockstat[matplotlib]"]
+```
+
+---
+
+## 13. Backtest Visualization Subsystem Design
+
+> **Added in v1.4.** A **zero-hard-dependency** visualization layer on top of the backtest subsystem (§12): the backtest core never depends on matplotlib, but rich backtest-specific charts auto-activate when matplotlib is installed.
+
+### 13.1 Background & Problem
+
+The backtest subsystem already produces equity/drawdown/trades charts via `backtest/plot_adapter.py` reusing the generic `PlotSpec` protocol, but has these gaps:
+
+| Gap | Description |
+|-----|-------------|
+| PlotSpec expressiveness | Only line/bar/scatter + markers; cannot express **fill areas** (drawdown shading), **histograms** (return distribution), **heatmaps** (monthly/yearly returns, parameter grids), **multi-subplot layouts** (dashboards) |
+| Protocol pollution risk | Extending PlotSpec with backtest-specific fields would break the generic protocol's simplicity |
+| matplotlib coupling | The generic `MatplotlibRenderer` only handles a single ax; backtest needs fill/heatmap/subplot semantics the generic renderer cannot express |
+
+### 13.2 Design Principles
+
+| Principle | Description |
+|-----------|-------------|
+| **Backtest core zero-dep** | `backtest/` package import never triggers matplotlib; `import stockstat.backtest` always succeeds |
+| **Dedicated spec layer** | New `BacktestChartSpec` (backtest-specific) parallel to generic `PlotSpec`, no mutual pollution |
+| **Lazy activation** | matplotlib activates via `backtest.matplotlib_charts` lazy import only when installed |
+| **Protocol-based** | `BacktestChartRenderer` protocol; Null/Matplotlib pluggable backends |
+| **Progressive** | basic (equity/drawdown) → advanced (heatmap/dist) → dashboard |
+
+### 13.3 Architecture
+
+```mermaid
+graph TB
+    subgraph "Backtest Core backtest/ (zero matplotlib dep)"
+        RES["BacktestResult"]
+        ADAPTER["plot_adapter.py<br/>basic PlotSpec builders"]
+        CHARTSPEC["chart_spec.py<br/>BacktestChartSpec"]
+        REG["chart_registry.py<br/>chart type registry"]
+    end
+    subgraph "Generic plot protocol (existing)"
+        PS["PlotSpec"]
+        PR["PlotRenderer<br/>Null/Matplotlib"]
+    end
+    subgraph "Backtest viz backends (lazy · optional)"
+        BCMPL["matplotlib_charts.py<br/>MatplotlibBacktestRenderer"]
+        BCNULL["null_charts.py<br/>NullBacktestRenderer"]
+        FACTORY["chart_factory.py<br/>detect + get_chart_renderer"]
+    end
+    RES --> ADAPTER --> PS
+    RES --> CHARTSPEC
+    CHARTSPEC --> REG
+    REG --> FACTORY
+    FACTORY --> BCMPL
+    FACTORY --> BCNULL
+    BCMPL -.->|lazy import| PR
+```
+
+### 13.4 Module Layout (new under `frontend/stockstat/backtest/`)
+
+```
+frontend/stockstat/backtest/
+├── chart_spec.py            # BacktestChartSpec + sub-specs
+├── chart_registry.py        # chart type registry
+├── chart_factory.py         # detect + get_chart_renderer
+├── null_charts.py           # NullBacktestRenderer (zero-dep fallback)
+├── matplotlib_charts.py     # MatplotlibBacktestRenderer (lazy import)
+└── plot_adapter.py          # (existing) extended: returns both PlotSpec & BacktestChartSpec
+```
+
+### 13.5 BacktestChartSpec Design
+
+```python
+@dataclass
+class ChartSeries:
+    name: str
+    data: pd.Series | pd.DataFrame
+    kind: str = "line"          # line/bar/scatter/fill/histogram/heatmap
+    color: str | None = None
+    secondary_y: bool = False
+    alpha: float = 1.0
+
+@dataclass
+class SubplotSpec:
+    title: str = ""
+    y_label: str = ""
+    series: list[ChartSeries] = field(default_factory=list)
+    share_x: bool = True
+
+@dataclass
+class BacktestChartSpec:
+    title: str = ""
+    x_label: str = ""
+    subplots: list[SubplotSpec] = field(default_factory=list)
+    layout: tuple[int, int] = (1, 1)
+    figsize: tuple[float, float] = (12, 6)
+    annotate_trades: bool = False
+    source_result: object = None
+
+    def add_subplot(self, title="", y_label="") -> SubplotSpec: ...
+    def to_dict(self) -> dict: ...
+
+class BacktestChartRenderer(Protocol):
+    def render(self, spec: BacktestChartSpec) -> Any: ...
+    def savefig(self, path: str) -> None: ...
+    def show(self) -> None: ...
+    def available(self) -> bool: ...
+```
+
+### 13.6 Chart Type Catalog
+
+| Chart | Type | Use | Phase |
+|-------|------|-----|-------|
+| `equity_curve` | multi-line + benchmark | equity vs benchmark | BT-V0 |
+| `drawdown` | line + fill | drawdown shaded area | BT-V0 |
+| `trades_overlay` | line + scatter | trade markers on equity | BT-V0 |
+| `returns_distribution` | histogram | return distribution | BT-V2 |
+| `monthly_heatmap` | heatmap | monthly returns | BT-V2 |
+| `yearly_returns` | bar | yearly comparison | BT-V2 |
+| `parameter_heatmap` | heatmap | grid search heatmap | BT-V2 |
+| `underwater_curve` | fill | underwater (drawdown duration) | BT-V2 |
+| `dashboard` | multi-subplot | combined dashboard | BT-V3 |
+
+### 13.7 Integration with Existing Modules
+
+| Integration point | Mechanism |
+|-------------------|-----------|
+| `BacktestResult` | new `result.chart(name)` returns `BacktestChartSpec` |
+| `plot_adapter.py` | keeps original `plot_equity/plot_drawdown/plot_trades` (generic PlotSpec, back-compat) |
+| `plot/base.py` | **unchanged** — generic protocol stays simple |
+| `matplotlib_backend.py` | **unchanged** — generic renderer stays single-ax |
+| `client.backtest()` | returned `BacktestResult` auto-has `.chart()` and `.render()` |
+
+### 13.8 Usage
+
+```python
+from stockstat.backtest import BacktestEngine, strategy, Order
+from stockstat.backtest.chart_factory import get_chart_renderer
+
+res = BacktestEngine(...).run()
+
+# Option A: get dedicated spec, render yourself
+spec = res.chart("equity_curve")        # BacktestChartSpec
+renderer = get_chart_renderer()         # auto-detect matplotlib
+renderer.render(spec)
+renderer.savefig("equity.png")
+
+# Option B: one-liner render
+res.render("drawdown", path="dd.png")
+
+# Option C: combined dashboard
+spec = res.chart("dashboard")
+renderer.render(spec)
+
+# Option D: back-compat — generic PlotSpec (works without matplotlib)
+spec = res.plot_equity()                # PlotSpec (existing)
+```
+
+### 13.9 Dependency Declaration
+
+```toml
+[project.optional-dependencies]
+backtest = ["stockstat"]
+backtest_viz = ["stockstat[backtest]", "matplotlib>=3.8"]
+backtest_full = ["stockstat[backtest]", "stockstat[optimize]",
+                 "stockstat[matplotlib]", "matplotlib>=3.8"]
+```
+
+### 13.10 Implementation Phases (BT-V series)
+
+| Phase | Scope | Tests |
+|-------|-------|-------|
+| **BT-V0** | Interface freeze: `BacktestChartSpec` + `BacktestChartRenderer` protocol + Null impl + basic spec builders | `test_backtest_viz_iface.py` |
+| **BT-V1** | matplotlib backend: render line/fill/scatter/subplots; full equity/drawdown/trades | `test_backtest_viz_mpl.py` |
+| **BT-V2** | Advanced: histogram/heatmap/bar; returns_distribution/monthly_heatmap/yearly/parameter_heatmap | `test_backtest_viz_advanced.py` |
+| **BT-V3** | Dashboard combo + trade annotations + batch savefig + graceful degradation | `test_backtest_viz_dashboard.py` |
+
+---
+
+## 14. Backtest Phase Documentation Index
+
+The backtest core (BT-0–BT-7) and backtest visualization (BT-V0–BT-V3 + online validation) phase docs are indexed below under `docs/backtest/`:
+
+### 14.1 Backtest Core (BT series)
+
+| Phase | Document | Code | Tests |
+|-------|----------|------|-------|
+| BT-0 | [docs/backtest/BT0.md](docs/backtest/BT0.md) | `backtest/` skeleton + dataclasses | `test_backtest_iface.py` |
+| BT-1 | [docs/backtest/BT1.md](docs/backtest/BT1.md) | MVP five modules | `test_backtest_mvp.py` |
+| BT-2 | [docs/backtest/BT2.md](docs/backtest/BT2.md) | multi-asset/short/orders | `test_backtest_portfolio.py` |
+| BT-3 | [docs/backtest/BT3.md](docs/backtest/BT3.md) | multi-tf alignment/audit | `test_backtest_multitf.py` |
+| BT-4 | [docs/backtest/BT4.md](docs/backtest/BT4.md) | cost/fill models | `test_backtest_cost.py` |
+| BT-5 | [docs/backtest/BT5.md](docs/backtest/BT5.md) | metrics/report/viz | `test_backtest_metrics.py` |
+| BT-6 | [docs/backtest/BT6.md](docs/backtest/BT6.md) | optimization/walk-forward/MC | `test_backtest_optimize.py` |
+| BT-7 | [docs/backtest/BT7.md](docs/backtest/BT7.md) | DSL integration/12 strategies | `test_backtest_strategies.py` |
+
+### 14.2 Backtest Visualization (BT-V series + online validation)
+
+| Phase | Document | Code | Tests |
+|-------|----------|------|-------|
+| BT-V0 | [docs/backtest/BTV0.md](docs/backtest/BTV0.md) | `chart_spec.py` + `chart_registry.py` + `null_charts.py` + `chart_factory.py` | `test_backtest_viz_iface.py` |
+| BT-V1 | [docs/backtest/BTV1.md](docs/backtest/BTV1.md) | `matplotlib_charts.py` basic rendering | `test_backtest_viz_mpl.py` |
+| BT-V2 | [docs/backtest/BTV2.md](docs/backtest/BTV2.md) | histogram/heatmap/bar advanced charts | `test_backtest_viz_advanced.py` |
+| BT-V3 | [docs/backtest/BTV3.md](docs/backtest/BTV3.md) | dashboard combo + annotations | `test_backtest_viz_dashboard.py` |
+| BT-V Online | [docs/backtest/BT_VIZ_ONLINE_REPORT.md](docs/backtest/BT_VIZ_ONLINE_REPORT.md) | real-data online validation + 13 images | `test_backtest_viz_online.py` |
 
 ---
 

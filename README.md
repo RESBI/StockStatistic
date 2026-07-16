@@ -108,6 +108,93 @@ result = client.run_dsl('''
 ''')
 ```
 
+## Backtesting
+
+The backtest subsystem (`stockstat.backtest`) supports custom strategies, multi-instrument trading groups, multi-timeframe bars, and reuses all compute-library indicators inside strategies.
+
+### Quick example: MA crossover
+
+```python
+from stockstat import StockStatClient
+from stockstat.backtest import BacktestEngine, strategy, Order
+
+client = StockStatClient(host="localhost", port=8000)
+data = {"BTC/USDT": {"1d": client.ohlcv("BTC/USDT", start="2024-01-01")}}
+
+@strategy
+def ma_cross(ctx):
+    d = ctx.get("BTC/USDT", "1d", lookback=30)
+    if len(d) < 21:
+        return
+    ma5  = d.close.rolling(5).mean().iloc[-1]
+    ma20 = d.close.rolling(20).mean().iloc[-1]
+    pos  = ctx.portfolio.get_position("BTC/USDT")
+    if ma5 > ma20 and pos.qty == 0:
+        ctx.broker.submit(Order("BTC/USDT", "buy", 0.1))
+    elif ma5 < ma20 and pos.qty > 0:
+        ctx.broker.submit(Order("BTC/USDT", "sell", pos.qty))
+
+# Option A: via the client convenience entry (auto-injects ComputeEngine)
+res = client.backtest(data, ma_cross, initial_cash=10000)
+
+# Option B: build the engine directly
+res = BacktestEngine(data=data, strategy=ma_cross,
+                     initial_cash=10000,
+                     benchmark="BTC/USDT").run()
+
+print(res.summary())
+spec = res.plot_equity()  # returns a PlotSpec, renderable by matplotlib
+```
+
+### Custom indicator + multi-asset pair trading
+
+```python
+from stockstat.backtest import strategy, Order, BacktestEngine
+import numpy as np
+
+@strategy
+def pair_trade(ctx):
+    if not ctx.history.get("init"):
+        def donchian(high, low, window=20):
+            return high.rolling(window).max(), low.rolling(window).min()
+        ctx.compute.register("donchian", donchian)
+        ctx.history["init"] = True
+
+    btc = ctx.get("BTC/USDT", "1d", lookback=60)
+    eth = ctx.get("ETH/USDT", "1d", lookback=60)
+    if len(btc) < 40:
+        return
+    spread = np.log(btc.close) - np.log(eth.close)
+    z = (spread - spread.rolling(20).mean()) / spread.rolling(20).std()
+    last = z.iloc[-1]
+    if last > 1.5:
+        ctx.broker.submit(Order("BTC/USDT", "sell", 0.1))
+        ctx.broker.submit(Order("ETH/USDT", "buy", 0.1))
+    # ... closing logic
+
+res = BacktestEngine(data=data, strategy=pair_trade,
+                     initial_cash=10000, allow_short=True).run()
+```
+
+### Backtest capabilities
+
+| Capability | Description |
+|------------|-------------|
+| Custom strategy | `Strategy` base class / `@strategy` function decorator |
+| Multi-instrument group | `{symbol: {tf: df}}` Universe |
+| Multi-timeframe | finest tf drives master index; higher tfs ffill-aligned |
+| Compute-library indicators | `ctx.compute` proxies `ComputeEngine`, includes `register()` |
+| Order types | market / limit / stop / trailing stop |
+| Cost models | percent / fixed / tiered / stamp duty / zero |
+| Short selling | `allow_short=True` |
+| Performance | Sharpe / Sortino / Calmar / drawdown / win rate / profit factor |
+| Visualization | `plot_equity/plot_drawdown/plot_trades` return PlotSpec |
+| **Advanced viz** | `result.chart(name)` returns BacktestChartSpec; dashboard/heatmap/histogram; zero matplotlib hard-dependency |
+| Optimization | grid search / optuna (extras) / walk-forward / Monte Carlo |
+| Lookahead protection | default NextOpenFill + lookahead_audit |
+
+See [DESIGN.md §12-13](DESIGN.md#12-backtest-subsystem-design) for the backtest design and [docs/backtest/](docs/backtest/) for phase-by-phase docs. Backtest visualization examples are in the [Visualization with Matplotlib](#visualization-with-matplotlib) section below.
+
 ## Visualization with Matplotlib
 
 The core library has **zero hard-dependency** on matplotlib. Install it optionally:
@@ -170,6 +257,59 @@ The signature analysis: PAXG (gold-pegged token) weekend return (x-axis: Friday 
 #### Weekend return distribution
 ![PAXG Weekend Histogram](docs/images/paxg_weekend_hist.png)
 
+### Backtest visualization
+
+The backtest visualization subsystem provides 9 chart types with **zero matplotlib hard-dependency** in the core — it auto-activates when matplotlib is installed. The charts below were generated with real market data (Binance BTC/USDT 2023-2024).
+
+#### Dashboard (2×2: equity + drawdown + returns distribution + monthly heatmap)
+![BTC Backtest Dashboard](docs/images/backtest_btc_dashboard.png)
+
+#### Equity curve + benchmark
+![BTC Equity](docs/images/backtest_btc_equity.png)
+
+#### Drawdown (filled area)
+![BTC Drawdown](docs/images/backtest_btc_drawdown.png)
+
+#### Trade annotations (B/S arrows)
+![BTC Trades](docs/images/backtest_btc_trades.png)
+
+#### Monthly returns heatmap
+![BTC Monthly Heatmap](docs/images/backtest_btc_monthly_heatmap.png)
+
+#### Parameter grid heatmap (AAPL MA short × long → Sharpe)
+![Parameter Heatmap](docs/images/backtest_param_heatmap.png)
+
+#### Pair trading dashboard (BTC/ETH)
+![Pair Trading Dashboard](docs/images/backtest_pair_dashboard.png)
+
+```python
+res = BacktestEngine(data=data, strategy=ma_cross,
+                     initial_cash=10000, benchmark="BTC/USDT").run()
+
+# One-liner render (auto-detects matplotlib)
+res.render("equity_curve", path="equity.png")
+res.render("drawdown", path="drawdown.png")
+
+# Combined dashboard (2×2 four panels)
+res.render("dashboard", path="dashboard.png")
+
+# Batch-save all charts
+res.render_all("./charts")
+
+# Advanced charts
+res.render("returns_distribution", path="dist.png")   # return distribution histogram
+res.render("monthly_heatmap", path="monthly.png")      # monthly returns heatmap
+res.render("yearly_returns", path="yearly.png")        # yearly returns bar
+
+# Parameter grid heatmap (with grid_search)
+from stockstat.backtest.optimizer import grid_search
+results = grid_search(make_engine, {"short": [3,5,8], "long": [10,20,30]}, metric="sharpe")
+res.chart("parameter_heatmap", grid_results=results)  # returns BacktestChartSpec
+res.render("parameter_heatmap", grid_results=results, path="param.png")
+```
+
+Without matplotlib, it gracefully degrades to `NullBacktestChartRenderer` (warns, never crashes).
+
 ## Data Sources
 
 | Source | Type | Network | Total Symbols | Description |
@@ -210,6 +350,15 @@ cd backend && python -m pytest tests/test_backend.py -v
 # Frontend unit tests (indicators, DSL, visualization)
 cd frontend && python -m pytest tests/test_frontend.py -v
 
+# Backtest tests (interface, MVP, portfolio, multi-tf, cost, metrics, optimizer, 12 strategies, visualization, online real-data)
+cd frontend && python -m pytest tests/test_backtest_iface.py tests/test_backtest_mvp.py \
+    tests/test_backtest_portfolio.py tests/test_backtest_multitf.py \
+    tests/test_backtest_cost.py tests/test_backtest_metrics.py \
+    tests/test_backtest_optimize.py tests/test_backtest_strategies.py \
+    tests/test_backtest_viz_iface.py tests/test_backtest_viz_mpl.py \
+    tests/test_backtest_viz_advanced.py tests/test_backtest_viz_dashboard.py \
+    tests/test_backtest_viz_online.py -v
+
 # Integration tests (real data: classic stats + PAXG weekend correlation)
 cd frontend && python -m pytest tests/test_integration.py -v -s
 
@@ -240,7 +389,8 @@ cd frontend && python -m pytest tests/test_matplotlib_charts.py -v
 ## Documentation
 
 - [Usage Guide](docs/USAGE.md) — detailed examples with expected results
-- [Design Report](docs/DESIGN.md) — full architecture design
+- [Design Report](DESIGN.md) — full architecture design (incl. [§12 Backtest Subsystem](DESIGN.md#12-backtest-subsystem-design) · [§14 Backtest Visualization](DESIGN.md#13-backtest-visualization-subsystem-design))
+- [Backtest Phase Docs](docs/backtest/) — BT-0 through BT-7 + BT-V0 through V3 + online validation report
 - [Test Report](reports/TEST_REPORT.md) — test results
 
 ## Configuration

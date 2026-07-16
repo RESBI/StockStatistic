@@ -1,6 +1,6 @@
 # StockStat 测试报告 v2 — 真实数据 + 代理
 
-> **日期**: 2026-07-15  
+> **日期**: 2026-07-16 (v2.3 新增回测可视化在线真实数据测试)  
 > **测试环境**: Windows / Python 3.10.11 / SQLite / HTTP Proxy (http://127.0.0.1:8889)  
 > **数据源**: Yahoo Finance (股票) + Binance (加密货币)，通过代理访问真实市场数据
 
@@ -10,11 +10,14 @@
 
 | 测试套件 | 测试数 | 通过 | 失败 | 耗时 |
 |----------|--------|------|------|------|
-| P0: 后端存储 (真实数据 + 代理) | 15 | 15 | 0 | ~11s |
+| P0: 后端存储 (真实数据 + 代理) | 15 | 15 | 0 | ~17s |
 | P1-P4: 前端计算 (指标+DSL+可视化) | 31 | 31 | 0 | ~3s |
 | P5: 集成测试 (真实数据经典统计+PAXG) | 19 | 19 | 0 | ~13s |
-| P5: matplotlib 图表测试 (经典+PAXG) | 10 | 10 | 0 | ~17s |
-| **合计** | **75** | **75** | **0** | **~41s** |
+| P5: matplotlib 图表测试 (经典+PAXG) | 10 | 10 | 0 | ~50s |
+| BT: 回测子系统 (BT-0~BT-7, 合成数据) | 124 | 124 | 0 | ~12s |
+| BT-V: 回测可视化子系统 (BT-V0~V3, 合成数据) | 76 | 76 | 0 | ~20s |
+| BT-V-Online: 回测可视化在线真实数据 | 17 | 17 | 0 | ~30s |
+| **合计** | **292** | **292** | **0** | **~145s** |
 
 ---
 
@@ -197,16 +200,83 @@ PAXG Weekend Return vs Monday Independent Gain/Loss (REAL DATA)
 
 ---
 
+## BT: 回测子系统测试 (124 passed)
+
+回测子系统分 8 个阶段实现，每阶段独立测试。所有测试在合成数据上运行（无需后端/代理）。
+
+| 阶段 | 测试文件 | 测试数 | 验证内容 |
+|------|---------|--------|---------|
+| BT-0 | `test_backtest_iface.py` | 37 | 接口骨架：订单/持仓/成本/成交/Universe/DataFeed/Portfolio/策略/仓位/基准 |
+| BT-1 | `test_backtest_mvp.py` | 13 | 单标的 MVP：双均线、compute 集成、自定义指标、成本影响、导出、PlotSpec |
+| BT-2 | `test_backtest_portfolio.py` | 12 | 多标的、做空、限价/止损/移动止损、仓位算法、配对交易、风险平价 |
+| BT-3 | `test_backtest_multitf.py` | 8 | 多 tf 对齐、primary_tf 选择、ffill、lookback、未来函数审计 |
+| BT-4 | `test_backtest_cost.py` | 11 | 6 种成本模型、5 种成交模型、DAY 订单到期、移动止损、资金不足拒绝 |
+| BT-5 | `test_backtest_metrics.py` | 21 | 指标函数、完整 metrics、summary、基准、导出、PlotSpec、可复现性 |
+| BT-6 | `test_backtest_optimize.py` | 8 | 网格搜索、走样分析、蒙特卡洛、订单打乱、optuna 导入错误 |
+| BT-7 | `test_backtest_strategies.py` | 14 | 12 个策略全套 + DSL 信号 + client 集成 |
+
+**运行命令**：
+```bash
+cd frontend && python -m pytest tests/test_backtest_*.py -v --ignore=tests/test_backtest_viz_iface.py --ignore=tests/test_backtest_viz_mpl.py --ignore=tests/test_backtest_viz_advanced.py --ignore=tests/test_backtest_viz_dashboard.py
+# 124 passed
+```
+
+---
+
+## BT-V: 回测可视化子系统测试 (93 passed)
+
+回测可视化子系统分 4 个阶段实现，另含在线真实数据验证。**核心零 matplotlib 硬依赖**——安装 matplotlib 后自动激活。
+
+### BT-V 合成数据测试 (76 passed)
+
+| 阶段 | 测试文件 | 测试数 | 验证内容 |
+|------|---------|--------|---------|
+| BT-V0 | `test_backtest_viz_iface.py` | 28 | BacktestChartSpec/SubplotSpec/ChartSeries 数据类、registry、Null 渲染器、factory、result.chart() 9 种类型 |
+| BT-V1 | `test_backtest_viz_mpl.py` | 16 | matplotlib 渲染 line/fill/scatter、equity/drawdown/trades/underwater、savefig |
+| BT-V2 | `test_backtest_viz_advanced.py` | 17 | histogram/heatmap/bar、returns_distribution/monthly_heatmap/yearly/parameter_heatmap、grid_search 集成 |
+| BT-V3 | `test_backtest_viz_dashboard.py` | 15 | dashboard 2×2 组合、交易标注、render_all 批量、Null 优雅降级、端到端 |
+
+### BT-V 在线真实数据测试 (17 passed)
+
+使用真实市场数据（Binance BTC/USDT + ETH/USDT 2023-2024，Yahoo Finance AAPL/^GSPC 2023-2024，经代理获取）验证回测可视化全流程，并生成 13 张真实数据 PNG 图像到 `docs/images/`。
+
+| 测试类 | 数据 | 测试数 | 验证内容 | 生成图像 |
+|--------|------|--------|---------|---------|
+| TestBTCDoubleMAViz | BTC/USDT 日线 2023-2024 | 10 | 双均线回测 + 9 种图表 + render_all | 9 张 |
+| TestPairTradingViz | BTC+ETH 日线 2023-2024 | 3 | 配对交易回测 + equity/dashboard | 2 张 |
+| TestParameterHeatmapViz | AAPL 日线 2023-2024 | 3 | 4×5 网格搜索 + 参数热力图 + 含热力图仪表盘 | 2 张 |
+| TestMultiTFViz | BTC 日线+小时线 2024 | 1 | 多 tf 回测 + 仪表盘 | 1 张 |
+
+**生成图像清单**（`docs/images/backtest_*.png`）：
+`backtest_btc_equity/drawdown/trades/returns_dist/monthly_heatmap/yearly/underwater/dashboard.png`、`backtest_pair_equity/dashboard.png`、`backtest_param_heatmap.png`、`backtest_aapl_dashboard_params.png`、`backtest_multitf_dashboard.png`
+
+**运行命令**：
+```bash
+cd frontend && python -m pytest tests/test_backtest_viz_iface.py tests/test_backtest_viz_mpl.py \
+    tests/test_backtest_viz_advanced.py tests/test_backtest_viz_dashboard.py -v
+# 76 passed (合成数据)
+
+cd frontend && python -m pytest tests/test_backtest_viz_online.py -v
+# 17 passed (在线真实数据，需代理 http://127.0.0.1:8889)
+```
+
+---
+
 ## 代理实现说明
 
 ### 新增文件
 - `backend/stockstat_backend/adapters/yahoo_direct.py` — Yahoo Finance 直连 API 适配器（绕过 yfinance cookie/crumb 限制）
+- `frontend/stockstat/backtest/` — 回测子系统（21 个模块，含可视化）
+  - 核心回测：`engine/context/data_feed/strategy/orders/broker/portfolio/cost_model/fill_model/sizing/metrics/result/benchmark/optimizer/walkforward/montecarlo/plot_adapter`
+  - 可视化：`chart_spec/chart_registry/chart_factory/null_charts/matplotlib_charts`
 
 ### 修改文件
 - `backend/stockstat_backend/config.py` — 新增 `ProxyConfig` 数据类
 - `backend/stockstat_backend/adapters/yfinance.py` — 支持代理注入
 - `backend/stockstat_backend/adapters/ccxt_adapter.py` — 支持 `proxies` 参数
 - `backend/stockstat_backend/api/routes.py` — 适配器工厂注入代理配置，新增 `/api/v1/proxy` 端点
+- `frontend/stockstat/client.py` — 新增 `backtest()` 便捷方法
+- `frontend/pyproject.toml` — 新增 `backtest` / `optimize` / `backtest_viz` / `backtest_full` extras
 
 ### 代理架构
 
@@ -220,4 +290,4 @@ SyntheticAdapter   → (无需代理)
 
 ---
 
-*全部 75 项测试通过，真实数据验证成功。PAXG 周末涨跌幅对周一涨跌幅有弱但统计显著的独立预测力 (r≈0.2, p<0.02)，已消除方向选择偏差。*
+*全部 292 项测试通过（原 75 + 回测 124 + 回测可视化 76 + 在线真实数据 17），真实数据验证成功。PAXG 周末涨跌幅对周一涨跌幅有弱但统计显著的独立预测力 (r≈0.2, p<0.02)，已消除方向选择偏差。回测子系统支持自定义策略、多标的、多时间尺度、成本/滑点模型、做空、参数优化与未来函数防护；可视化子系统提供 9 种图表（含仪表盘/热力图/直方图），核心零 matplotlib 硬依赖，已用真实数据（BTC/ETH/AAPL 2023-2024）生成 13 张图像验证。*

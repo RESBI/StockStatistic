@@ -1,6 +1,6 @@
 # StockStat Usage Guide
 
-> All examples in this guide have been tested locally with real market data (Yahoo Finance + Binance via proxy). Expected results are from the actual test run on 2025-07-15.
+> All examples in this guide have been tested locally with real market data (Yahoo Finance + Binance via proxy). Expected results are from the actual test run on 2026-07-16.
 
 ## Table of Contents
 
@@ -16,6 +16,8 @@
 10. [Visualization with Matplotlib](#10-visualization-with-matplotlib)
 11. [PAXG Weekend Correlation Analysis](#11-paxg-weekend-correlation-analysis)
 12. [Export Results](#12-export-results)
+13. [Backtesting](#13-backtesting)
+14. [Backtest Visualization](#14-backtest-visualization)
 
 ---
 
@@ -587,6 +589,363 @@ records = to_dict(data)  # list of dicts
 ```python
 spec = client.plot.spec(title="My Chart", series=[...])
 payload = spec.to_dict()  # JSON-serializable dict
+```
+
+---
+
+## 13. Backtesting
+
+The backtest subsystem lives in `stockstat.backtest`. It supports custom strategies, multi-instrument trading groups, multi-timeframe bars, and reuses all compute-library indicators (including custom ones) inside strategies.
+
+### Example 13.1: Minimal backtest (function-style strategy)
+
+```python
+from stockstat import StockStatClient
+from stockstat.backtest import BacktestEngine, strategy, Order, ZeroCost
+
+client = StockStatClient(host="localhost", port=8000)
+data = {"BTC/USDT": {"1d": client.ohlcv("BTC/USDT", start="2024-01-01")}}
+
+@strategy
+def ma_cross(ctx):
+    d = ctx.get("BTC/USDT", "1d", lookback=30)
+    if len(d) < 21:
+        return
+    ma5  = d.close.rolling(5).mean().iloc[-1]
+    ma20 = d.close.rolling(20).mean().iloc[-1]
+    pos  = ctx.portfolio.get_position("BTC/USDT")
+    if ma5 > ma20 and pos.qty == 0:
+        ctx.broker.submit(Order("BTC/USDT", "buy", 0.1, tag="entry"))
+    elif ma5 < ma20 and pos.qty > 0:
+        ctx.broker.submit(Order("BTC/USDT", "sell", pos.qty, tag="exit"))
+
+eng = BacktestEngine(data=data, strategy=ma_cross,
+                     initial_cash=10000, cost_model=ZeroCost(),
+                     benchmark="BTC/USDT")
+res = eng.run()
+print(res.summary())
+```
+
+**Expected output (structure)**:
+```
+=== Backtest Summary ===
+Total Return:      x.xx%
+Annualized Return: x.xx%
+Sharpe:            x.xxx
+Sortino:           x.xxx
+Max Drawdown:      -x.xx%
+Calmar:            x.xxx
+Volatility:        x.xx%
+Win Rate:          xx.xx%
+Profit Factor:     x.xxx
+# Trades:          xx
+Information Ratio: x.xxx
+```
+
+### Example 13.2: Via the client convenience entry
+
+```python
+res = client.backtest(data, ma_cross, initial_cash=10000, benchmark="BTC/USDT")
+# client.backtest auto-injects the client's ComputeEngine; ctx.compute is fully usable
+```
+
+### Example 13.3: Class-style strategy with hooks
+
+```python
+from stockstat.backtest import Strategy, Order
+
+class RSIStrategy(Strategy):
+    def on_start(self, ctx):
+        ctx.history["trade_count"] = 0
+
+    def on_bar(self, ctx):
+        d = ctx.get("BTC/USDT", "1d", lookback=30)
+        if len(d) < 15:
+            return
+        r = ctx.compute.rsi(d.close, window=14).iloc[-1]
+        pos = ctx.portfolio.get_position("BTC/USDT")
+        if r < 30 and pos.qty == 0:
+            ctx.broker.submit(Order("BTC/USDT", "buy", 0.1))
+            ctx.history["trade_count"] += 1
+        elif r > 70 and pos.qty > 0:
+            ctx.broker.submit(Order("BTC/USDT", "sell", pos.qty))
+
+    def on_fill(self, fill, ctx):
+        print(f"Fill {fill.side.value} {fill.qty} @ {fill.price:.2f}")
+```
+
+### Example 13.4: Custom indicator (registered inside strategy)
+
+```python
+@strategy
+def custom(ctx):
+    if not ctx.history.get("init"):
+        def donchian(high, low, window=20):
+            return high.rolling(window).max(), low.rolling(window).min()
+        ctx.compute.register("donchian", donchian, category="custom")
+        ctx.history["init"] = True
+    d = ctx.get("BTC/USDT", "1d", lookback=30)
+    if len(d) < 21:
+        return
+    hh, ll = ctx.compute.call("donchian", high=d.high, low=d.low, window=20)
+    pos = ctx.portfolio.get_position("BTC/USDT")
+    if d.close.iloc[-1] > hh.iloc[-1] and pos.qty == 0:
+        ctx.broker.submit(Order("BTC/USDT", "buy", 0.1))
+```
+
+### Example 13.5: Multi-asset pair trading + short selling
+
+```python
+import numpy as np
+from stockstat.backtest import BacktestEngine, strategy, Order
+
+data = {
+    "BTC/USDT": {"1d": client.ohlcv("BTC/USDT", start="2024-01-01")},
+    "ETH/USDT": {"1d": client.ohlcv("ETH/USDT", start="2024-01-01")},
+}
+
+@strategy
+def pair(ctx):
+    btc = ctx.get("BTC/USDT", "1d", lookback=60)
+    eth = ctx.get("ETH/USDT", "1d", lookback=60)
+    if len(btc) < 40:
+        return
+    spread = np.log(btc.close) - np.log(eth.close)
+    z = (spread - spread.rolling(20).mean()) / spread.rolling(20).std()
+    last = z.iloc[-1]
+    if np.isnan(last):
+        return
+    pb = ctx.portfolio.get_position("BTC/USDT")
+    pe = ctx.portfolio.get_position("ETH/USDT")
+    if last > 1.5 and pb.qty == 0:
+        ctx.broker.submit(Order("BTC/USDT", "sell", 0.1))
+        ctx.broker.submit(Order("ETH/USDT", "buy", 0.1))
+    elif last < -1.5 and pb.qty == 0:
+        ctx.broker.submit(Order("BTC/USDT", "buy", 0.1))
+        ctx.broker.submit(Order("ETH/USDT", "sell", 0.1))
+    elif abs(last) < 0.3 and pb.qty != 0:
+        # close both
+        if pb.qty > 0: ctx.broker.submit(Order("BTC/USDT", "sell", abs(pb.qty)))
+        else:          ctx.broker.submit(Order("BTC/USDT", "buy", abs(pb.qty)))
+        if pe.qty > 0: ctx.broker.submit(Order("ETH/USDT", "sell", abs(pe.qty)))
+        else:          ctx.broker.submit(Order("ETH/USDT", "buy", abs(pe.qty)))
+
+res = BacktestEngine(data=data, strategy=pair,
+                     initial_cash=10000, allow_short=True).run()
+```
+
+### Example 13.6: Multi-timeframe resonance
+
+```python
+hourly = client.ohlcv("BTC/USDT", start="2024-01-01", timeframe="1h")
+daily  = client.ohlcv("BTC/USDT", start="2024-01-01", timeframe="1d")
+data = {"BTC/USDT": {"1h": hourly, "1d": daily}}
+
+@strategy
+def multi_tf(ctx):
+    h = ctx.get("BTC/USDT", "1h", lookback=50)
+    d = ctx.get("BTC/USDT", "1d", lookback=30)
+    if len(d) < 21 or len(h) < 2:
+        return
+    trend_up = d.close.iloc[-1] > d.close.rolling(20).mean().iloc[-1]
+    breakout = h.close.iloc[-1] > h.close.iloc[-2]
+    pos = ctx.portfolio.get_position("BTC/USDT")
+    if trend_up and breakout and pos.qty == 0:
+        ctx.broker.submit(Order("BTC/USDT", "buy", 0.1))
+    elif not trend_up and pos.qty > 0:
+        ctx.broker.submit(Order("BTC/USDT", "sell", pos.qty))
+
+# DataFeed auto-uses 1h as master index, daily ffill-aligned
+res = BacktestEngine(data=data, strategy=multi_tf).run()
+```
+
+### Example 13.7: Cost & fill models
+
+```python
+from stockstat.backtest import PercentCost, FixedCost, StampDutyCost, NextOpenFill, VWAPFill
+
+# Equity: commission + stamp duty
+eng = BacktestEngine(data={"AAPL": {"1d": df}}, strategy=s,
+                     cost_model=StampDutyCost(commission=0.0003, stamp_duty=0.001),
+                     fill_model=NextOpenFill())
+
+# Crypto: percent cost + VWAP fill
+eng = BacktestEngine(data={"BTC/USDT": {"1d": df}}, strategy=s,
+                     cost_model=PercentCost(commission=0.0002, slippage=0.0003),
+                     fill_model=VWAPFill())
+```
+
+### Example 13.8: Order types
+
+```python
+from stockstat.backtest import Order, OrderType
+
+# Limit buy (fills only when price drops to limit)
+ctx.broker.submit(Order("X", "buy", 10, order_type=OrderType.LIMIT, limit_price=95000))
+
+# Stop sell (triggered when price falls to stop)
+ctx.broker.submit(Order("X", "sell", 10, order_type=OrderType.STOP, stop_price=90000))
+
+# Trailing stop (tracks extremum, triggers on stop_price pullback)
+ctx.broker.submit(Order("X", "sell", 10, order_type=OrderType.TRAILING_STOP, stop_price=2000))
+```
+
+### Example 13.9: Metrics & visualization
+
+```python
+res = eng.run()
+
+# Text summary
+print(res.summary())
+
+# Metrics dict
+m = res.metrics()
+# {'total_return', 'sharpe', 'sortino', 'max_drawdown', 'calmar',
+#  'volatility', 'win_rate', 'profit_factor', 'num_trades', ...}
+
+# Visualization (returns PlotSpec, renderable by matplotlib)
+spec = res.plot_equity()       # equity + benchmark
+spec_dd = res.plot_drawdown()  # drawdown
+spec_t = res.plot_trades()     # trade markers
+
+from stockstat.plot.base import get_renderer
+r = get_renderer("matplotlib")
+r.render(spec)
+r.savefig("equity.png")
+
+# Export
+res.to_csv("trades.csv")
+d = res.to_dict()
+```
+
+### Example 13.10: Parameter grid search
+
+```python
+from stockstat.backtest.optimizer import grid_search
+
+def make_engine(params):
+    @strategy
+    def s(ctx):
+        d = ctx.get("BTC/USDT", "1d", lookback=params["long"]+5)
+        if len(d) < params["long"]+1:
+            return
+        ma_s = d.close.rolling(params["short"]).mean().iloc[-1]
+        ma_l = d.close.rolling(params["long"]).mean().iloc[-1]
+        pos = ctx.portfolio.get_position("BTC/USDT")
+        if ma_s > ma_l and pos.qty == 0:
+            ctx.broker.submit(Order("BTC/USDT", "buy", 0.1))
+        elif ma_s < ma_l and pos.qty > 0:
+            ctx.broker.submit(Order("BTC/USDT", "sell", pos.qty))
+    return BacktestEngine(data=data, strategy=s, initial_cash=10000)
+
+results = grid_search(make_engine,
+                      {"short": [3, 5, 8], "long": [10, 20, 30]},
+                      metric="sharpe")
+best_params, best_val, best_res = results[0]
+print(f"Best params: {best_params}, Sharpe: {best_val:.3f}")
+```
+
+### Example 13.11: Lookahead protection
+
+```python
+# Default NextOpenFill: order submitted at t → fills at t+1 open
+# Enable runtime audit
+eng = BacktestEngine(data=data, strategy=s, lookahead_audit=True)
+# If the strategy accidentally accesses data > t, raises LookaheadError
+```
+
+Backtest visualization (dashboard, heatmaps, return distributions — 9 chart types) is covered in [§14 Backtest Visualization](#14-backtest-visualization).
+
+### Backtest API cheat sheet
+
+| Class/Function | Description |
+|----------------|-------------|
+| `BacktestEngine(data, strategy, ...)` | main engine |
+| `@strategy` / `Strategy` | strategy definition |
+| `ctx.get(sym, tf, lookback)` | get ≤ t slice |
+| `ctx.compute` | ComputeEngine proxy (with register/call) |
+| `ctx.broker.submit(Order)` | place order |
+| `ctx.portfolio.get_position(sym)` | inspect position |
+| `ctx.history` | strategy state scratchpad |
+| `Order(sym, side, qty, order_type=...)` | order |
+| `PercentCost / FixedCost / StampDutyCost / ZeroCost` | cost models |
+| `NextOpenFill / VWAPFill / WorstPriceFill` | fill models |
+| `res.summary() / metrics() / plot_equity() / to_csv()` | result |
+| `res.chart(name) / render(name, path) / render_all(dir)` | backtest visualization (§14) |
+| `grid_search / optuna_search / walk_forward / monte_carlo_equity` | optimization |
+
+---
+
+## 14. Backtest Visualization
+
+The backtest visualization subsystem provides 9 chart types with **zero matplotlib hard-dependency** in the core — auto-activates when installed. It reuses the protocol-based design from [§10 Visualization with Matplotlib](#10-visualization-with-matplotlib) but provides a backtest-dedicated `BacktestChartSpec` (supporting subplots, fill areas, heatmaps, histograms, and more). The examples below use real market data (Binance BTC/USDT 2023-2024); generated images are in `docs/images/backtest_*.png`.
+
+![BTC Backtest Dashboard](../docs/images/backtest_btc_dashboard.png)
+
+### Example 14.1: One-liner render and batch save
+
+```python
+res = BacktestEngine(data=data, strategy=ma_cross,
+                     initial_cash=10000, benchmark="BTC/USDT").run()
+
+# One-liner render (auto-detects matplotlib, graceful degradation if absent)
+res.render("equity_curve", path="equity.png")
+res.render("drawdown", path="drawdown.png")
+
+# Combined dashboard (2×2: equity + drawdown + returns dist + monthly heatmap)
+res.render("dashboard", path="dashboard.png")
+
+# Batch-save all charts to a directory
+out = res.render_all("./charts")
+# {'equity_curve': './charts/equity_curve.png', 'drawdown': ..., ...}
+
+# Advanced charts
+res.render("returns_distribution", path="dist.png")   # return distribution histogram
+res.render("monthly_heatmap", path="monthly.png")      # monthly returns heatmap
+res.render("yearly_returns", path="yearly.png")        # yearly returns bar
+res.render("underwater_curve", path="underwater.png")  # underwater curve
+```
+
+### Example 14.2: Parameter grid heatmap
+
+```python
+from stockstat.backtest.optimizer import grid_search
+
+results = grid_search(make_engine,
+                      {"short": [3, 5, 8], "long": [10, 20, 30]},
+                      metric="sharpe")
+
+# Render parameter heatmap (x=short, y=long, color=sharpe)
+res.render("parameter_heatmap", grid_results=results, metric="sharpe",
+           path="param_heatmap.png")
+
+# Or swap the 4th panel in the dashboard
+res.render("dashboard", grid_results=results, path="dashboard_with_params.png")
+```
+
+### Example 14.3: Getting a BacktestChartSpec (without rendering)
+
+```python
+from stockstat.backtest.chart_factory import get_chart_renderer
+
+# Get a dedicated spec (with subplots, fill, heatmap, etc.)
+spec = res.chart("equity_curve")           # BacktestChartSpec
+spec = res.chart("dashboard")              # 4-subplot combo
+spec = res.chart("drawdown")               # with fill area
+
+# Serialize to dict (for web frontends)
+payload = spec.to_dict()
+
+# Render yourself
+renderer = get_chart_renderer()            # auto-detect matplotlib
+if renderer.available():
+    fig = renderer.render(spec)
+    renderer.savefig("custom.png")
+
+# List available chart types
+print(res.available_chart_types)
+# ['dashboard', 'drawdown', 'equity_curve', 'monthly_heatmap', 'parameter_heatmap',
+#  'returns_distribution', 'trades_overlay', 'underwater_curve', 'yearly_returns']
 ```
 
 ---
