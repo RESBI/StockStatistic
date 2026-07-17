@@ -1352,7 +1352,157 @@ labels = {rack = "A-12", zone = "datacenter-east", priority = "high"}
 
 ---
 
-## 13. 安全性
+## 13. 协议优化设计
+
+本节针对 §12 通信协议在实际场景中暴露的通用性不足，提出五项优化。每项优化的核心原则是**减少协议对业务语义的感知**——协议只管"搬运字节和路由消息"，不关心"这个任务能不能增量计算""这个结果有多大""Worker 够不够用"。
+
+### 13.1 统一流式数据传输 + Worker 鸭子类型检测
+
+#### 问题
+
+§12.6 的数据分发策略需要 Dispatcher 预先知道"这个任务类型是否支持增量计算"（`streaming_capable` 字段），才能决定是否走流式推送。这意味着每新增一种任务类型，都要在 Worker 注册时声明是否支持流式——协议侵入了业务语义。
+
+#### 优化思路
+
+**协议层一律用 `data.stream` 分块推送**，不管任务类型、不管数据大小。小数据 = 1 个 chunk，大数据 = N 个 chunk。Dispatcher 不需要知道 Worker 会怎么处理这些 chunk。
+
+**Worker 层通过鸭子类型自动检测**用户计算函数的意图：
+
+- 如果函数接受 `Stream` 对象（可迭代的 chunk 流）→ Worker 边收边算，逐 chunk 喂给函数
+- 如果函数接受 `DataFrame`（传统签名）→ Worker 自动缓存全部 chunk 后拼接为完整 DataFrame 再调用
+
+检测方式：检查函数签名中参数的类型注解，或检查函数是否声明了 `__stream_aware__` 标记。Worker 自动路由，用户不需要做任何额外声明。
+
+**Stream 对象**同时支持两种消费模式：
+- **迭代模式**：`for chunk in stream` → 逐块产出 DataFrame，适用于滑动窗口指标等增量计算
+- **收集模式**：`stream.collect()` → 等待全部 chunk 到齐返回完整 DataFrame，适用于回测等全量计算
+
+用户只选择消费方式，Worker 自动适配。协议层零改动——`data.stream` 消息格式不变，只是不再需要 `streaming_capable` 字段。
+
+#### 通用性收益
+
+| 维度 | 优化前 | 优化后 |
+|------|--------|--------|
+| 新增任务类型 | 需在 Worker 注册时声明 `streaming_capable` | 零声明，Worker 自动检测 |
+| 协议对业务感知 | 需知道"这个任务能不能增量" | 完全不感知 |
+| 数据大小适配 | `auto` 策略判断 inline/stream/ref | 统一 stream（1 chunk 或 N chunk） |
+| 首个结果延迟（大数据） | 等全量传完才开始计算 | 增量函数可毫秒级产出首结果 |
+
+### 13.2 结果流式回传
+
+#### 问题
+
+当前 `dispatch.complete` 是一次性回传全部结果。参数网格搜索 1000 组的结果可能是一个几 MB 的 DataFrame，一次性回传在大结果场景下有延迟。
+
+#### 优化思路
+
+引入 `dispatch.partial` 消息类型，Worker 每完成一部分就推送部分结果：
+
+```
+Worker 完成 slice 1/10 → dispatch.partial {slice_id: 1, result: ...}
+Worker 完成 slice 2/10 → dispatch.partial {slice_id: 2, result: ...}
+...
+Worker 完成 slice 10/10 → dispatch.complete {final: true}
+```
+
+Dispatcher 收到 `partial` 后：
+- 立即转发给 Client（如果 Client 订阅了流式结果）
+- 或缓存到合并缓冲区，等 `complete` 后一次性返回
+
+Client 侧选择消费方式：
+- **阻塞等待**：`task.wait()` → 等全部完成，拿完整结果（默认）
+- **流式消费**：`for partial in task.stream_results()` → 逐片获取，边收边展示
+
+**通用性体现**：协议不关心结果内容是什么——`partial` 的 payload 格式与 `complete` 完全相同，只是多了一个 `slice_id` 标识。Worker 自己决定是否分片回传（如果结果很小，一个 `complete` 就够了，不发 `partial`）。
+
+### 13.3 任务优先级与抢占
+
+#### 问题
+
+当前协议有 `priority` 字段（0=普通，-1=高），但 Worker 没有"暂停低优先级任务、让高优先级任务插队"的机制。一个耗时 30 分钟的低优先级任务占着 Worker 时，紧急的高优先级任务只能排队等待。
+
+#### 优化思路
+
+引入 `dispatch.preempt` 消息类型，Dispatcher 通知 Worker 暂停当前任务：
+
+```
+高优先级任务到达 → Dispatcher 检查是否有正在执行的低优先级任务
+  → 有：发送 dispatch.preempt {task_id: low-priority-task}
+       Worker 保存当前状态（checkpoint）→ 暂停 → 接收高优先级任务
+  → 高优先级任务完成后：发送 dispatch.resume {task_id: low-priority-task}
+       Worker 从 checkpoint 恢复 → 继续执行
+```
+
+**checkpoint 机制**：Worker 定期将计算状态序列化（每 N 秒或每 M 次迭代），保存到本地磁盘或 Dispatcher 缓存。恢复时反序列化继续。
+
+**通用性体现**：
+- 协议只定义 `preempt` / `resume` 两个消息，不关心 checkpoint 的内容格式
+- 不支持 checkpoint 的任务类型（如无状态指标计算）收到 `preempt` 后可以直接拒绝（返回 `dispatch.preempt_rejected`），Dispatcher 改为等其他 Worker
+- Worker 在注册时声明 `preemptable: true/false`，表示是否支持抢占
+
+### 13.4 Worker 弹性伸缩与自动发现
+
+#### 问题
+
+当前 Worker 需要启动时通过 `--dispatcher-host` 显式指定 Dispatcher 地址。新增 Worker 需要手动启动进程。无法根据队列深度自动扩容。
+
+#### 优化思路
+
+**自动发现**：Worker 启动时不指定 Dispatcher，而是通过以下方式发现：
+- **配置文件**：`stockstat-compute.toml` 中写入 Dispatcher 列表
+- **DNS / 服务发现**：`stockstat-dispatcher.local` 解析到 Dispatcher 地址
+- **Storage 转发**：Worker 先连接 Storage Server，Storage 返回已注册的 Dispatcher 列表
+
+**弹性伸缩**：Dispatcher 监控队列深度，触发扩缩容：
+
+```
+队列深度 > 阈值（如 20 任务） → 触发扩容
+  → 通知 Autoscaler（K8s / Docker Swarm / 自定义脚本）启动新 Worker
+  → 新 Worker 自动发现 Dispatcher → 注册 → 开始消费任务
+
+队列深度 = 0 持续 N 分钟 → 触发缩容
+  → Dispatcher 向空闲 Worker 发送 dispatch.drain
+  → Worker 等待现有任务完成 → 发送 dispatch.unregister → 退出
+```
+
+**新增消息类型**：
+
+| 消息 | 方向 | 说明 |
+|------|------|------|
+| `dispatch.drain` | Dispatcher → Worker | 通知 Worker 停止接收新任务（优雅下线） |
+| `cluster.discover` | Worker → Storage | 查询可用 Dispatcher 地址列表 |
+| `cluster.discover.reply` | Storage → Worker | 返回 Dispatcher 地址列表 |
+
+**通用性体现**：协议只定义"发现"和"排水"两个语义，不关心 Autoscaler 的具体实现（K8s / Docker / 脚本均可）。
+
+### 13.5 协议瘦身：控制面 JSON → MessagePack
+
+#### 问题
+
+当前控制面消息全用 JSON。JSON 的文本格式在大量小消息场景下（如心跳每 10s 一次 × 100 个 Worker = 10 msg/s）有冗余——一个心跳消息的 JSON 约 800 字节，但实际有效信息只有约 200 字节。
+
+#### 优化思路
+
+将控制面消息的默认编码从 JSON 改为 MessagePack：
+
+| 维度 | JSON | MessagePack |
+|------|------|-------------|
+| 心跳消息大小 | ~800 字节 | ~300 字节 |
+| 解析速度 | 慢（文本解析） | 快（二进制直读） |
+| 跨语言 | ✅ 任何语言 | ✅ 任何语言 |
+| 人可读 | ✅ | ❌（需工具解析） |
+
+**兼容策略**：
+- 信封 `headers` 中增加 `encoding: "msgpack"` 字段
+- 默认仍用 JSON（兼容性优先）；Dispatcher 和 Worker 协商后可切换 MessagePack
+- 数据面（Arrow）不受影响
+- 开发/调试时用 JSON（可读）；生产部署时配置切 MessagePack（效率）
+
+**通用性体现**：编码选择是传输层优化，不影响消息格式和语义。未来如需 Protobuf 或 CBOR，同样通过 `encoding` 字段切换。
+
+---
+
+## 14. 安全性
 
 | 风险 | 缓解 |
 |------|------|
@@ -1363,15 +1513,23 @@ labels = {rack = "A-12", zone = "datacenter-east", priority = "high"}
 
 ---
 
-## 14. 总结
+## 15. 总结
 
 | 决策 | 选择 | 理由 |
 |------|------|------|
 | 架构 | 4 角色（Client/Dispatcher/Storage/Worker） | 数据路径与控制路径分离 |
 | Dispatcher 部署 | Phase 1 作 Storage 插件；Phase 3 独立部署 | 渐进式，先简后扩展 |
-| 数据分发 | 共享内存（同机）/ TCP（跨机）/ 引用（大数据） | 自动策略选择 |
+| 数据分发 | 统一流式推送（§13.1 优化）；小数据 1 chunk，大数据 N chunk | 协议不感知业务语义 |
+| 增量计算 | Worker 鸭子类型检测（Stream vs DataFrame） | 零协议改动，零用户声明 |
+| 结果回传 | 支持 partial 流式 + complete 一次性 | 大结果场景降低首结果延迟 |
+| 任务调度 | priority + preempt/resume + checkpoint | 高优先级任务可抢占 |
+| 弹性伸缩 | 自动发现 + drain + Autoscaler | 按队列深度自动扩缩容 |
+| 控制面编码 | JSON（默认）→ MessagePack（协商后） | 调试用 JSON，生产用 MessagePack |
 | 队列 | Redis（跨机）/ 内存队列（同机） | 轻量，已有 Redis 依赖 |
-| 序列化 | cloudpickle + Arrow | 支持闭包策略；零拷贝数据 |
+| 数据面编码 | Arrow IPC | 零拷贝列式传输 |
+| 策略序列化 | cloudpickle | 支持 Python 闭包 |
 | Worker | 独立包 `stockstat-compute` | 资源隔离、独立扩展 |
 
 **核心改进**：引入 Dispatcher 将 Storage 的带宽压力从 ×N 降为 ×1，使 Storage 在计算期间完全空闲，同时支持数据缓存复用和多级扩展。
+
+**协议优化核心原则**：协议只管"搬运字节和路由消息"，不侵入业务语义（不感知任务能否增量、结果多大、Worker 怎么伸缩）。所有业务判断由 Worker 或 Dispatcher 的本地逻辑完成，协议只提供通用的传输和路由原语。
