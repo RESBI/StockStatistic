@@ -19,11 +19,12 @@
 9. [Scripting Language Design](#9-scripting-language-design)
 10. [API Specification](#10-api-specification)
 11. [Backtest Subsystem Design](#11-backtest-subsystem-design)
-12. [Test System](#12-test-system)
-13. [Technology Stack](#13-technology-stack)
-14. [Deployment](#14-deployment)
-15. [Project Structure](#15-project-structure)
-16. [Development Roadmap](#16-development-roadmap)
+12. [Management Interfaces](#12-management-interfaces)
+13. [Test System](#13-test-system)
+14. [Technology Stack](#14-technology-stack)
+15. [Deployment](#15-deployment)
+16. [Project Structure](#16-project-structure)
+17. [Development Roadmap](#17-development-roadmap)
 - [Appendix A: Data Source Compatibility Matrix](#appendix-a-data-source-compatibility-matrix)
 - [Appendix B: OHLCV Data Volume Estimation](#appendix-b-ohlcv-data-volume-estimation)
 - [Appendix C: v1.7 vs v2.0 Item-by-Item Comparison](#appendix-c-v17-vs-v20-item-by-item-comparison)
@@ -615,7 +616,80 @@ class BacktestEngine:
 
 ---
 
-## 12. Test System
+## 12. Management Interfaces
+
+### 12.1 TUI Terminal Management Interface
+
+`stockstat tui` provides an interactive terminal interface for browsing and managing data on the Storage Server. No Python scripting needed for routine management.
+
+**Menu functions**:
+
+| Menu item | Function |
+|-----------|----------|
+| Browse symbols | List all registered symbols (table: symbol/type/sources) |
+| Query OHLCV | Query last N rows for a symbol |
+| Ingest new data | Interactive data ingestion (symbol/source/date range) |
+| Data statistics | Data overview statistics |
+| List data sources | List available data sources |
+| View proxy config | View proxy configuration |
+
+**Design**:
+- Based on `rich` library (optional: `pip install rich`), provides colored tables and panels
+- Falls back to plain-text menu when `rich` is not installed
+- Connects to Storage Server via HTTP, shares the same backend as CLI `stockstat ingest/query`
+
+```mermaid
+graph LR
+    TUI["stockstat tui<br/>--host 192.168.1.100"] -->|"HTTP REST"| SRV["Storage Server<br/>:8000"]
+    TUI -->|"rich table rendering"| USER["Terminal"]
+```
+
+### 12.2 Web Admin Interface
+
+The Storage Server has a built-in web admin interface. Access via browser at `http://storage-server:8000/admin/`.
+
+**Management scope**:
+
+| Function | Endpoint | Description |
+|----------|----------|-------------|
+| **Overview dashboard** | `/admin/` | Symbol count, row count, per-source distribution, health status |
+| **Symbol browse** | `/admin/api/symbols` | List all symbols + row count + date range |
+| **Data delete** | `DELETE /admin/api/symbols/{symbol}` | Delete all data for a symbol |
+| **Data ingest** | `POST /admin/api/ingest` | Trigger ingestion from the web UI |
+| **Config view** | `/admin/api/config` | View DB URL / proxy / cache config (password masked) |
+| **Health monitor** | `/admin/api/health` | DB connection / cache status / proxy status |
+| **Data stats** | `/admin/api/stats` | Total symbols / total rows / per-source distribution |
+| **Source list** | `/admin/api/sources` | Available data sources |
+
+**Design points**:
+- Management logic runs in-process on the backend (directly accesses Storage/Cache), no HTTP forwarding
+- Web frontend is pure static HTML+JS (no Node build chain), served by FastAPI
+- Database URL passwords are automatically masked
+
+```mermaid
+graph TB
+    subgraph "User Browser"
+        WEB["Web UI<br/>http://host:8000/admin/"]
+    end
+
+    subgraph "Storage Server Process"
+        API["FastAPI REST<br/>(data query/ingest)"]
+        ADMIN["Admin Route Plugin<br/>/admin/api/*"]
+        STATIC["Static HTML+JS<br/>/admin/"]
+        DB["Storage/Cache"]
+    end
+
+    WEB -->|"HTTP"| STATIC
+    WEB -->|"fetch API"| ADMIN
+    ADMIN -->|"in-process call"| DB
+    API -->|"in-process call"| DB
+```
+
+**Why an API plugin, not a Client**: Management operations (config viewing / cache status / data deletion) must execute within the Storage Server process. A Client cannot access process-level state over the network. Admin routes call `settings` / `ohlcv_repo` / `cache` directly, with zero network overhead.
+
+---
+
+## 13. Test System
 
 | Test file | Coverage | Count |
 |-----------|----------|-------|
@@ -633,7 +707,7 @@ class BacktestEngine:
 
 ---
 
-## 13. Technology Stack
+## 14. Technology Stack
 
 | Layer | Technology | Rationale |
 |-------|------------|-----------|
@@ -651,7 +725,7 @@ class BacktestEngine:
 
 ---
 
-## 14. Deployment
+## 15. Deployment
 
 ### 14.1 Local Development (default SQLite, zero external deps)
 
@@ -762,7 +836,7 @@ client = V2Client(mode="offline", storage=MemoryStorage())
 
 ---
 
-## 15. Project Structure
+## 16. Project Structure
 
 ```
 StockStatistic/
@@ -849,7 +923,7 @@ StockStatistic/
 
 ---
 
-## 16. Development Roadmap
+## 17. Development Roadmap
 
 | Phase | Content | Status |
 |-------|---------|--------|

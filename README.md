@@ -320,6 +320,57 @@ register_default_indicators(reg)
 print(list_indicators(reg, category="nonlinear"))
 ```
 
+## Management Interfaces
+
+StockStat provides two management interfaces for administering data on the Storage Server without writing Python.
+
+### TUI Terminal Interface
+
+```bash
+# Connect to local server
+stockstat tui
+
+# Connect to remote server
+stockstat tui --host 192.168.1.100 --port 8000
+```
+
+Launches an interactive menu:
+
+```
+┌─────────────────────────────────────────┐
+│     StockStat Storage Manager           │
+│  Server: localhost:8000  Status: ONLINE │
+└─────────────────────────────────────────┘
+
+Menu:
+  1. Browse symbols      — List all registered symbols
+  2. Query OHLCV data    — Query last N rows
+  3. Ingest new data     — Interactive ingestion
+  4. Data statistics     — Data overview
+  5. List data sources   — List available sources
+  6. View proxy config   — View proxy settings
+  q. Quit
+```
+
+> Install `pip install rich` for colored tables. Falls back to plain text when not installed.
+
+### Web Admin Interface
+
+The Storage Server has a built-in web admin interface. Access via browser at `http://storage-server:8000/admin/`:
+
+| Function | Description |
+|----------|-------------|
+| Overview dashboard | Symbol count, row count, per-source distribution, health status |
+| Symbol browse | List all symbols + row count + date range + delete |
+| Data ingest | Trigger ingestion from the web (symbol/source/date) |
+| Config viewer | View DB URL / proxy / cache config (password masked) |
+| Health monitor | DB connection / cache status / proxy status |
+
+```
+# After starting the Storage Server, visit in browser:
+http://192.168.1.100:8000/admin/
+```
+
 ## Backtesting
 
 The backtest subsystem (`stockstat.backtest`) supports custom strategies, multi-instrument trading groups, multi-timeframe bars, and reuses all compute-library indicators inside strategies.

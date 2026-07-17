@@ -23,6 +23,7 @@
 17. [v2.0 CLI](#17-v20-cli)
 18. [v2.0 Offline Mode](#18-v20-offline-mode)
 19. [v2.0 Plugin System](#19-v20-plugin-system)
+20. [Management Interfaces](#20-management-interfaces)
 
 ---
 
@@ -1160,6 +1161,125 @@ custom = Theme("ocean", background="#0a1929", primary="#64ffda",
                secondary="#ff6b6b", grid="#1c3a5e")
 register_theme(custom)
 print(get_theme("ocean").primary)  # '#64ffda'
+```
+
+---
+
+## 20. Management Interfaces
+
+StockStat provides two management interfaces for administering data on the Storage Server: a TUI terminal interface and a web admin interface.
+
+### 20.1 TUI Terminal Interface
+
+`stockstat tui` provides an interactive terminal interface for browsing and managing data on the Storage Server.
+
+#### Example 20.1: Launch the TUI
+
+```bash
+# Connect to local server
+stockstat tui
+
+# Connect to remote server
+stockstat tui --host 192.168.1.100 --port 8000
+```
+
+Launches an interactive menu:
+
+```
+┌─────────────────────────────────────────┐
+│     StockStat Storage Manager           │
+│  Server: localhost:8000  Status: ONLINE │
+└─────────────────────────────────────────┘
+
+Menu:
+  1. Browse symbols
+  2. Query OHLCV data
+  3. Ingest new data
+  4. Data statistics
+  5. List data sources
+  6. View proxy config
+  q. Quit
+```
+
+#### Example 20.2: Browse symbols
+
+Select menu `1` to display the registered symbols table:
+
+```
+Registered Symbols
+├──────────┬────────┬──────┬──────┬──────────┐
+│ Symbol   │ Type   │ Base │ Quote│ Sources  │
+├──────────┼────────┼──────┼──────┼──────────┤
+│ BTC/USDT │ crypto │ BTC  │ USDT │ binance  │
+│ ETH/USDT │ crypto │ ETH  │ USDT │ binance  │
+│ AAPL     │ stock  │ AAPL │      │ yfinance │
+└──────────┴────────┴──────┴──────┴──────────┘
+```
+
+#### Example 20.3: Ingest data
+
+Select menu `3` and enter parameters interactively:
+
+```
+Symbol to ingest: PAXG/USDT
+Source (blank=auto):
+Start date (blank=skip): 2022-01-01
+End date (blank=skip): 2024-12-31
+Timeframe: 1d
+
+Ingesting PAXG/USDT...
+Done! {'symbol': 'PAXG/USDT', 'source': 'binance', 'ingested': 1095}
+```
+
+> Install `pip install rich` for colored tables. Falls back to plain text when not installed.
+
+### 20.2 Web Admin Interface
+
+The Storage Server has a built-in web admin interface, accessible via browser.
+
+#### Example 20.4: Access the web admin
+
+```bash
+# Start the Storage Server
+python -m uvicorn stockstat_backend.app:app --host 0.0.0.0 --port 8000
+
+# Visit in browser:
+# http://localhost:8000/admin/        (local)
+# http://192.168.1.100:8000/admin/    (remote)
+```
+
+#### Feature overview
+
+| Page | Function |
+|------|----------|
+| **Overview** | Dashboard: symbol count, row count, per-source distribution, health |
+| **Symbols** | Symbol list: row count, date range, delete button |
+| **Ingest** | Ingest data: enter symbol/source/date/timeframe |
+| **Config** | Config viewer: DB URL (masked), proxy, cache |
+| **Sources** | Data source list: name, type, description |
+
+#### Example 20.5: Ingest via Admin API
+
+```bash
+# Ingest via curl
+curl -X POST "http://localhost:8000/admin/api/ingest?symbol=BTC/USDT&source=binance&start=2024-01-01&timeframe=1d"
+
+# Response
+# {"symbol":"BTC/USDT","source":"binance","ingested":366}
+```
+
+#### Example 20.6: View data statistics
+
+```bash
+curl http://localhost:8000/admin/api/stats
+# {"total_symbols":5,"total_rows":1234,"symbols_by_source":{"binance":3,"yfinance":2}}
+```
+
+#### Example 20.7: Delete symbol data
+
+```bash
+curl -X DELETE http://localhost:8000/admin/api/symbols/BTC/USDT
+# {"deleted":true,"symbol":"BTC/USDT","rows_removed":366}
 ```
 
 ---
