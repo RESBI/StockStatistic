@@ -12,6 +12,11 @@ def create_app() -> FastAPI:
         description="Unified OHLCV storage and query service",
     )
     app.include_router(router)
+
+    # Mount web admin interface at /admin/
+    from .admin import mount_admin
+    mount_admin(app)
+
     return app
 
 

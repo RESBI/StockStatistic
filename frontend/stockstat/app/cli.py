@@ -53,6 +53,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     p_ind = sub.add_parser("indicators", help="List registered indicators")
     p_ind.add_argument("--category", default=None)
 
+    # tui
+    p_tui = sub.add_parser("tui", help="Launch interactive TUI for storage management")
+    p_tui.add_argument("--host", default="localhost")
+    p_tui.add_argument("--port", type=int, default=8000)
+
     args = parser.parse_args(argv)
 
     if args.command == "serve":
@@ -65,6 +70,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return _cmd_plugins(args)
     elif args.command == "indicators":
         return _cmd_indicators(args)
+    elif args.command == "tui":
+        return _cmd_tui(args)
     else:
         parser.print_help()
         return 0
@@ -158,6 +165,11 @@ def _cmd_indicators(args) -> int:
         print(f"{ind['name']:<25} {ind['category']:<15} {ind['description'][:40]}")
     print(f"\nTotal: {len(inds)} indicator(s)")
     return 0
+
+
+def _cmd_tui(args) -> int:
+    from .tui import run_tui
+    return run_tui(host=args.host, port=args.port)
 
 
 if __name__ == "__main__":

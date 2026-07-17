@@ -19,11 +19,12 @@
 9. [脚本语言设计](#9-脚本语言设计)
 10. [API 规范](#10-api-规范)
 11. [回测子系统设计](#11-回测子系统设计)
-12. [测试体系](#12-测试体系)
-13. [技术栈选型](#13-技术栈选型)
-14. [部署方案](#14-部署方案)
-15. [项目结构](#15-项目结构)
-16. [开发路线图](#16-开发路线图)
+12. [管理界面](#12-管理界面)
+13. [测试体系](#13-测试体系)
+14. [技术栈选型](#14-技术栈选型)
+15. [部署方案](#15-部署方案)
+16. [项目结构](#16-项目结构)
+17. [开发路线图](#17-开发路线图)
 - [附录 A: 数据源兼容性矩阵](#附录-a-数据源兼容性矩阵)
 - [附录 B: OHLCV 数据量估算](#附录-b-ohlcv-数据量估算)
 - [附录 C: v1.7 vs v2.0 逐项对比](#附录-c-v17-vs-v20-逐项对比)
@@ -659,7 +660,80 @@ class BacktestEngine:
 
 ---
 
-## 12. 测试体系
+## 12. 管理界面
+
+### 12.1 TUI 终端管理界面
+
+`stockstat tui` 提供交互式终端界面，用于浏览和管理 Storage Server 上的数据。无需写 Python 脚本即可完成日常管理操作。
+
+**功能菜单**：
+
+| 菜单项 | 功能 |
+|--------|------|
+| Browse symbols | 列出所有已注册标的（表格显示 symbol/type/sources） |
+| Query OHLCV | 查询指定标的的最近 N 行数据 |
+| Ingest new data | 交互式采集数据（输入 symbol/source/date range） |
+| Data statistics | 数据统计概览 |
+| List data sources | 列出可用数据源及类型 |
+| View proxy config | 查看代理配置 |
+
+**设计**：
+- 基于 `rich` 库（可选安装 `pip install rich`），提供彩色表格和面板
+- 未安装 `rich` 时自动降级为纯文本菜单
+- 通过 HTTP 连接 Storage Server，与 CLI `stockstat ingest/query` 共用同一后端
+
+```mermaid
+graph LR
+    TUI["stockstat tui<br/>--host 192.168.1.100"] -->|"HTTP REST"| SRV["Storage Server<br/>:8000"]
+    TUI -->|"rich 表格渲染"| USER["终端"]
+```
+
+### 12.2 网页管理界面
+
+Storage Server 内置网页管理界面，通过浏览器访问 `http://storage-server:8000/admin/` 即可管理。
+
+**管理范围**：
+
+| 功能 | 端点 | 说明 |
+|------|------|------|
+| **概览仪表盘** | `/admin/` | 标的数、行数、按来源分布、健康状态 |
+| **标的浏览** | `/admin/api/symbols` | 列出所有标的 + 行数 + 时间范围 |
+| **数据删除** | `DELETE /admin/api/symbols/{symbol}` | 删除指定标的的全部数据 |
+| **数据采集** | `POST /admin/api/ingest` | 从网页触发采集 |
+| **配置查看** | `/admin/api/config` | 查看 DB URL/代理/缓存等配置（密码脱敏） |
+| **健康监控** | `/admin/api/health` | 数据库连接/缓存状态/代理状态 |
+| **数据统计** | `/admin/api/stats` | 总标的数/总行数/按来源分布 |
+| **数据源列表** | `/admin/api/sources` | 可用数据源及类型 |
+
+**设计要点**：
+- 管理逻辑在后端进程内运行（直接操作 Storage/Cache），不走 HTTP 转发
+- 网页前端为纯静态 HTML+JS（无 Node 构建链），由 FastAPI `StaticFiles` 挂载
+- 数据库 URL 中的密码自动脱敏显示
+
+```mermaid
+graph TB
+    subgraph "用户浏览器"
+        WEB["网页 UI<br/>http://host:8000/admin/"]
+    end
+
+    subgraph "Storage Server 进程内"
+        API["FastAPI REST<br/>(数据查询/采集)"]
+        ADMIN["Admin 路由插件<br/>/admin/api/*"]
+        STATIC["静态 HTML+JS<br/>/admin/"]
+        DB["Storage/Cache"]
+    end
+
+    WEB -->|"HTTP"| STATIC
+    WEB -->|"fetch API"| ADMIN
+    ADMIN -->|"进程内调用"| DB
+    API -->|"进程内调用"| DB
+```
+
+**为什么是 API 插件而非 Client**：管理操作（配置查看/缓存状态/数据删除）必须在 Storage Server 进程内执行，Client 无法通过网络获取进程级状态。Admin 路由直接调用 `settings`/`ohlcv_repo`/`cache`，零网络开销。
+
+---
+
+## 13. 测试体系
 
 | 测试文件 | 覆盖范围 | 数量 |
 |---------|---------|------|
@@ -677,7 +751,7 @@ class BacktestEngine:
 
 ---
 
-## 13. 技术栈选型
+## 14. 技术栈选型
 
 | 层 | 技术 | 选型理由 |
 |----|------|----------|
@@ -695,7 +769,7 @@ class BacktestEngine:
 
 ---
 
-## 14. 部署方案
+## 15. 部署方案
 
 ### 14.1 本地开发部署（默认 SQLite，零外部依赖）
 
@@ -806,7 +880,7 @@ client = V2Client(mode="offline", storage=MemoryStorage())
 
 ---
 
-## 15. 项目结构
+## 16. 项目结构
 
 ```
 StockStatistic/
@@ -893,7 +967,7 @@ StockStatistic/
 
 ---
 
-## 16. 开发路线图
+## 17. 开发路线图
 
 | 阶段 | 内容 | 状态 |
 |------|------|------|

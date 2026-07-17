@@ -320,6 +320,57 @@ register_default_indicators(reg)
 print(list_indicators(reg, category="nonlinear"))
 ```
 
+## 管理界面
+
+StockStat 提供两种管理界面用于管理 Storage Server 上的数据，无需写 Python 脚本。
+
+### TUI 终端管理界面
+
+```bash
+# 连接本地服务器
+stockstat tui
+
+# 连接远程服务器
+stockstat tui --host 192.168.1.100 --port 8000
+```
+
+启动后显示交互式菜单：
+
+```
+┌─────────────────────────────────────────┐
+│     StockStat Storage Manager           │
+│  Server: localhost:8000  Status: ONLINE │
+└─────────────────────────────────────────┘
+
+Menu:
+  1. Browse symbols      — 列出所有已注册标的
+  2. Query OHLCV data    — 查询最近 N 行数据
+  3. Ingest new data     — 交互式采集
+  4. Data statistics     — 数据统计概览
+  5. List data sources   — 列出可用数据源
+  6. View proxy config   — 查看代理配置
+  q. Quit
+```
+
+> 推荐安装 `pip install rich` 以获得彩色表格体验。未安装时自动降级为纯文本菜单。
+
+### 网页管理界面
+
+Storage Server 内置网页管理界面，浏览器访问 `http://storage-server:8000/admin/` 即可：
+
+| 功能 | 说明 |
+|------|------|
+| 概览仪表盘 | 标的数、行数、按来源分布、健康状态一览 |
+| 标的浏览 | 列出所有标的 + 行数 + 时间范围 + 删除 |
+| 数据采集 | 从网页触发采集（输入 symbol/source/date） |
+| 配置查看 | 查看 DB URL / 代理 / 缓存配置（密码脱敏） |
+| 健康监控 | 数据库连接 / 缓存状态 / 代理状态 |
+
+```
+# 启动 Storage Server 后，浏览器访问：
+http://192.168.1.100:8000/admin/
+```
+
 ## 回测
 
 回测子系统（`stockstat.backtest`）支持自定义策略、多标的交易组、多时间尺度 K 线，并在策略内直接复用计算库的全部指标。

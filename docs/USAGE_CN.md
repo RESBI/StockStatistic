@@ -23,6 +23,7 @@
 17. [v2.0 CLI 命令行](#17-v20-cli-命令行)
 18. [v2.0 离线模式](#18-v20-离线模式)
 19. [v2.0 插件系统](#19-v20-插件系统)
+20. [管理界面](#20-管理界面)
 
 ---
 
@@ -1159,6 +1160,125 @@ custom = Theme("ocean", background="#0a1929", primary="#64ffda",
                secondary="#ff6b6b", grid="#1c3a5e")
 register_theme(custom)
 print(get_theme("ocean").primary)  # '#64ffda'
+```
+
+---
+
+## 20. 管理界面
+
+StockStat 提供两种管理界面用于管理 Storage Server 上的数据：TUI 终端界面和网页管理界面。
+
+### 20.1 TUI 终端管理界面
+
+`stockstat tui` 提供交互式终端界面，用于浏览和管理 Storage Server 上的数据。
+
+#### 示例 20.1：启动 TUI
+
+```bash
+# 连接本地服务器
+stockstat tui
+
+# 连接远程服务器
+stockstat tui --host 192.168.1.100 --port 8000
+```
+
+启动后显示交互式菜单：
+
+```
+┌─────────────────────────────────────────┐
+│     StockStat Storage Manager           │
+│  Server: localhost:8000  Status: ONLINE │
+└─────────────────────────────────────────┘
+
+Menu:
+  1. Browse symbols
+  2. Query OHLCV data
+  3. Ingest new data
+  4. Data statistics
+  5. List data sources
+  6. View proxy config
+  q. Quit
+```
+
+#### 示例 20.2：浏览标的
+
+选择菜单 `1` 后，显示已注册标的表格：
+
+```
+Registered Symbols
+├──────────┬────────┬──────┬──────┬──────────┐
+│ Symbol   │ Type   │ Base │ Quote│ Sources  │
+├──────────┼────────┼──────┼──────┼──────────┤
+│ BTC/USDT │ crypto │ BTC  │ USDT │ binance  │
+│ ETH/USDT │ crypto │ ETH  │ USDT │ binance  │
+│ AAPL     │ stock  │ AAPL │      │ yfinance │
+└──────────┴────────┴──────┴──────┴──────────┘
+```
+
+#### 示例 20.3：采集数据
+
+选择菜单 `3`，交互式输入参数：
+
+```
+Symbol to ingest: PAXG/USDT
+Source (blank=auto):
+Start date (blank=skip): 2022-01-01
+End date (blank=skip): 2024-12-31
+Timeframe: 1d
+
+Ingesting PAXG/USDT...
+Done! {'symbol': 'PAXG/USDT', 'source': 'binance', 'ingested': 1095}
+```
+
+> 推荐安装 `pip install rich` 以获得彩色表格体验。未安装时自动降级为纯文本菜单。
+
+### 20.2 网页管理界面
+
+Storage Server 内置网页管理界面，浏览器访问即可管理。
+
+#### 示例 20.4：访问网页管理界面
+
+```bash
+# 启动 Storage Server
+python -m uvicorn stockstat_backend.app:app --host 0.0.0.0 --port 8000
+
+# 浏览器访问
+# http://localhost:8000/admin/        (本地)
+# http://192.168.1.100:8000/admin/    (远程)
+```
+
+#### 功能一览
+
+| 页面 | 功能 |
+|------|------|
+| **Overview** | 概览仪表盘：标的数、行数、按来源分布、健康状态 |
+| **Symbols** | 标的列表：行数、时间范围、删除按钮 |
+| **Ingest** | 采集数据：输入 symbol/source/date/timeframe |
+| **Config** | 配置查看：DB URL（密码脱敏）、代理、缓存 |
+| **Sources** | 数据源列表：名称、类型、描述 |
+
+#### 示例 20.5：通过 Admin API 采集数据
+
+```bash
+# 通过 curl 采集
+curl -X POST "http://localhost:8000/admin/api/ingest?symbol=BTC/USDT&source=binance&start=2024-01-01&timeframe=1d"
+
+# 响应
+# {"symbol":"BTC/USDT","source":"binance","ingested":366}
+```
+
+#### 示例 20.6：查看数据统计
+
+```bash
+curl http://localhost:8000/admin/api/stats
+# {"total_symbols":5,"total_rows":1234,"symbols_by_source":{"binance":3,"yfinance":2}}
+```
+
+#### 示例 20.7：删除标的数据
+
+```bash
+curl -X DELETE http://localhost:8000/admin/api/symbols/BTC/USDT
+# {"deleted":true,"symbol":"BTC/USDT","rows_removed":366}
 ```
 
 ---
