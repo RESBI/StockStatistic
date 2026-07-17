@@ -1,6 +1,6 @@
 # StockStat 使用文档
 
-> 本文档所有示例均在本地使用真实市场数据（Yahoo Finance + Binance，通过代理）测试通过。预期结果来自 2026-07-16 的实际测试运行。
+> 本文档所有示例均在本地使用真实市场数据（Yahoo Finance + Binance，通过代理）测试通过。预期结果来自 2026-07-17 的实际测试运行。
 
 ## 目录
 
@@ -19,6 +19,7 @@
 13. [回测](#13-回测)
 14. [回测高级功能](#14-回测高级功能)
 15. [回测可视化](#15-回测可视化)
+16. [信号处理与非线性动力学](#16-信号处理与非线性动力学)
 
 ---
 
@@ -27,8 +28,17 @@
 ### 安装
 
 ```bash
+# 后端
 cd backend && pip install -e .
+
+# 前端核心库
 cd frontend && pip install -e .
+
+# 可选 extras（按需安装）
+pip install -e "frontend/[matplotlib]"          # 可视化
+pip install -e "frontend/[dsl]"                 # DSL 解析（lark）
+pip install -e "frontend/[signal_processing]"   # 小波变换（PyWavelets）
+pip install -e "frontend/[backtest_full]"       # 回测全套（matplotlib + optuna）
 ```
 
 ### 开启代理（访问真实数据）
@@ -49,7 +59,15 @@ python -m uvicorn stockstat_backend.app:app --host 0.0.0.0 --port 8000
 
 ```python
 from stockstat import StockStatClient
+
+# 方式1：直接配置（最常用）
 client = StockStatClient(host="localhost", port=8000)
+
+# 方式2：环境变量（STOCKSTAT_HOST / STOCKSTAT_PORT / STOCKSTAT_API_KEY / ...）
+client = StockStatClient.from_env()
+
+# 方式3：字典配置
+client = StockStatClient.from_dict({"host": "localhost", "port": 8000, "timeout": 30})
 ```
 
 ---
@@ -115,7 +133,7 @@ print(data)
 
 **预期结果**：
 ```
-                                 open    high     low   close     volume
+                                  open    high     low   close     volume
 ts
 2024-01-02  187.15  188.44  183.89  185.64  82488700
 2024-01-03  184.22  185.88  183.43  184.25  58414500
@@ -180,12 +198,14 @@ print(f"信号线: {signal_line.iloc[-1]:.2f}")
 print(f"柱状图: {hist.iloc[-1]:.2f}")
 ```
 
-**预期结果**：
+**预期结果**（2024-12-31，数值随数据更新）：
 ```
 MACD 线: -673.62
 信号线: 320.30
 柱状图: -993.92
 ```
+
+> 柱状图 = MACD 线 − 信号线。以上为示例量级，实际值取决于查询日的市场状态。
 
 ---
 
@@ -200,7 +220,7 @@ print(f"超买天数 (>70): {(rsi > 70).sum()}")
 print(f"超卖天数 (<30): {(rsi < 30).sum()}")
 ```
 
-**预期结果**：
+**预期结果**（2024-12-31）：
 ```
 RSI 最后5天:
 2024-12-27    44.00
@@ -232,7 +252,7 @@ print(f"中轨: {mid.iloc[-1]:.2f}")
 print(f"下轨: {lower.iloc[-1]:.2f}")
 ```
 
-**预期结果**：
+**预期结果**（示例量级）：
 ```
 上轨: 106441.05
 中轨: 98296.30
@@ -320,6 +340,8 @@ print(f"95% VaR（日度）: {var_95:.4f} ({var_95*100:.2f}%)")
 
 ## 8. DSL 查询
 
+> DSL 基于 lark，需 `pip install stockstat[dsl]`。当前仅支持 `SELECT ... FROM ... WHERE ... LIMIT`，不支持 `GROUP BY` / `ORDER BY` / `CASE WHEN` / 子查询。
+
 ### 示例 8.1：基础 DSL 查询
 
 ```python
@@ -331,16 +353,18 @@ result = client.run_dsl('''
 print(result)
 ```
 
-**预期结果**：
+**预期结果**（`LIMIT 5` 返回最后 5 行，此时已有充足数据计算 MA20）：
 ```
-                           close  ma20
+                close     ma20
 ts
-2024-12-23  255.27  NaN
-2024-12-24  258.20  NaN
-2024-12-26  259.02  NaN
-2024-12-27  255.59  NaN
-2024-12-30  252.20  NaN
+2024-12-23  255.27  229.45
+2024-12-24  258.20  230.12
+2024-12-26  259.02  230.88
+2024-12-27  255.59  231.35
+2024-12-30  252.20  231.78
 ```
+
+> 上表为结构示例；`ma20` 在数据量 ≥ 20 行时即为有效数值，不会是 NaN。具体数值随查询日变化。
 
 ### 示例 8.2：DSL 查询 RSI
 
@@ -371,6 +395,16 @@ result = client.run_dsl('''
 ''')
 ```
 
+### 示例 8.5：DSL 关键字参数
+
+```python
+result = client.run_dsl('''
+    SELECT close, ma(close, window=20) AS ma20
+    FROM ohlcv("BTC/USDT", "1d", "2024-01-01", "2024-12-31")
+    LIMIT 5
+''')
+```
+
 ---
 
 ## 9. 自定义指标
@@ -392,7 +426,7 @@ print(f"高波动天数: {high_vol_days}")
 print(f"低波动天数: {low_vol_days}")
 ```
 
-**预期结果**：
+**预期结果**（示例量级）：
 ```
 高波动天数: 30
 低波动天数: 336
@@ -764,7 +798,23 @@ res = BacktestEngine(data=data, strategy=multi_tf).run()
 ### 示例 13.7：成本与成交模型
 
 ```python
-from stockstat.backtest import PercentCost, FixedCost, StampDutyCost, NextOpenFill, VWAPFill
+from stockstat.backtest import BacktestEngine, PercentCost, StampDutyCost, NextOpenFill, VWAPFill
+
+# 先准备一个策略 s 与数据 df
+df = client.ohlcv("AAPL", start="2024-01-01", timeframe="1d")
+
+@strategy
+def s(ctx):
+    d = ctx.get("AAPL", "1d", lookback=30)
+    if len(d) < 21:
+        return
+    ma5 = d.close.rolling(5).mean().iloc[-1]
+    ma20 = d.close.rolling(20).mean().iloc[-1]
+    pos = ctx.portfolio.get_position("AAPL")
+    if ma5 > ma20 and pos.qty == 0:
+        ctx.broker.submit(Order("AAPL", "buy", 10))
+    elif ma5 < ma20 and pos.qty > 0:
+        ctx.broker.submit(Order("AAPL", "sell", pos.qty))
 
 # 股票：佣金 + 印花税
 eng = BacktestEngine(data={"AAPL": {"1d": df}}, strategy=s,
@@ -772,7 +822,8 @@ eng = BacktestEngine(data={"AAPL": {"1d": df}}, strategy=s,
                      fill_model=NextOpenFill())
 
 # 加密货币：比例成本 + VWAP 成交
-eng = BacktestEngine(data={"BTC/USDT": {"1d": df}}, strategy=s,
+btc_df = client.ohlcv("BTC/USDT", start="2024-01-01", timeframe="1d")
+eng = BacktestEngine(data={"BTC/USDT": {"1d": btc_df}}, strategy=s,
                      cost_model=PercentCost(commission=0.0002, slippage=0.0003),
                      fill_model=VWAPFill())
 ```
@@ -823,7 +874,10 @@ d = res.to_dict()
 ### 示例 13.10：参数网格搜索
 
 ```python
+from stockstat.backtest import BacktestEngine, strategy, Order
 from stockstat.backtest.optimizer import grid_search
+
+data = {"BTC/USDT": {"1d": client.ohlcv("BTC/USDT", start="2024-01-01")}}
 
 def make_engine(params):
     @strategy
@@ -1054,6 +1108,7 @@ df_all = results_all_fees.to_dataframe()
 
 ```python
 from stockstat.backtest import BacktestAnalyzer
+import pandas as pd
 
 res = BacktestEngine(data=data, strategy=s, initial_cash=10000).run()
 
@@ -1116,6 +1171,7 @@ mt_results = maker_taker_sweep(
 | `BacktestEngine(data, strategy, ...)` | 主引擎（含 `execution_model` 参数） |
 | `@strategy` / `Strategy` / `IntrabarMixin` | 策略定义（函数式/类式/intrabar） |
 | `ctx.get(sym, tf, lookback)` | 获取 ≤ t 切片 |
+| `ctx.current_price(sym, field)` | 取当前 bar 的指定字段（open/high/low/close） |
 | `ctx.compute` | ComputeEngine 代理（含 register/call） |
 | `ctx.broker.submit(Order)` | 下单（默认模式） |
 | `ctx.intrabar_submit(Order)` | intrabar 下单（intrabar 模式） |
@@ -1131,7 +1187,7 @@ mt_results = maker_taker_sweep(
 | `IntrabarFillModel / IntrabarFillResult` | intrabar 成交扫描+时间追踪 |
 | `res.summary() / metrics() / plot_equity() / to_csv()` | 结果 |
 | `res.exit_reason_stats()` | 退出原因统计 |
-| `res.chart(name) / render(name, path) / render_all(dir)` | 回测可视化（§14） |
+| `res.chart(name) / render(name, path) / render_all(dir)` | 回测可视化（§15） |
 | `StrategyBatchRunner` | 多策略/多费率批量回测 |
 | `BacktestAnalyzer` | 子期间/状态/滚动分析 |
 | `dca_equity() / fee_sweep() / maker_taker_sweep()` | 基准与费率扫描 |
@@ -1169,7 +1225,7 @@ res.render("yearly_returns", path="yearly.png")        # 年度收益柱状图
 res.render("underwater_curve", path="underwater.png")  # 水下曲线
 ```
 
-### 示例 14.2：参数网格热力图
+### 示例 15.2：参数网格热力图
 
 ```python
 from stockstat.backtest.optimizer import grid_search
@@ -1186,7 +1242,7 @@ res.render("parameter_heatmap", grid_results=results, metric="sharpe",
 res.render("dashboard", grid_results=results, path="dashboard_with_params.png")
 ```
 
-### 示例 14.3：获取 BacktestChartSpec（不渲染）
+### 示例 15.3：获取 BacktestChartSpec（不渲染）
 
 ```python
 from stockstat.backtest.chart_factory import get_chart_renderer
@@ -1213,13 +1269,179 @@ print(res.available_chart_types)
 
 ---
 
+## 16. 信号处理与非线性动力学
+
+> 需要 `pip install stockstat[signal_processing]` 以获得完整的小波变换能力。未安装 PyWavelets 时 CWT 自动降级为基于 FFT 的自实现 Morlet 小波。
+
+### 示例 16.1：小波多尺度分解
+
+```python
+import numpy as np
+from stockstat import StockStatClient
+
+client = StockStatClient(host="localhost", port=8000)
+data = client.ohlcv("BTC/USDT", start="2024-01-01", timeframe="1d")
+
+# 取最近 48 个收盘价
+signal = data.close.values[-48:]
+scales = np.arange(1, 25)  # 尺度 1-24（周期 2h-48h）
+
+# 连续小波变换（CWT）
+coef, scales = client.compute.wavelet_decompose(signal, scales=scales, wavelet="morl")
+print(f"CWT 系数形状: {coef.shape}")  # (24, 48)
+
+# 小波功率谱
+power = np.abs(coef) ** 2
+print(f"峰值尺度: {scales[np.argmax(power.mean(axis=1))]}")
+```
+
+**预期结果**：CWT 系数为复数数组，形状 (24, 48)，峰值尺度通常在 12-24 范围（低频趋势主导）。
+
+### 示例 16.2：谱熵（频域复杂度）
+
+```python
+# 计算对数收益率序列的谱熵
+log_rets = np.diff(np.log(data.close.values[-100:]))
+h_spec = client.compute.spectral_entropy(log_rets)
+print(f"谱熵: {h_spec:.4f}")
+
+# 白噪声的谱熵应较高（接近 ln(N/2)），纯音信号应较低（< 1.0）
+```
+
+**预期结果**：BTC 日线收益率的谱熵约 2.0-3.0（中高频域能量较均匀）。
+
+### 示例 16.3：灰色关联度
+
+```python
+# 比较两个价格路径的形态相似性
+path_a = data.close.values[-48:]
+path_b = data.close.values[-96:-48]  # 前一段
+
+gr = client.compute.grey_relation(path_a, path_b, rho=0.5)
+print(f"灰色关联度: {gr:.4f}")  # [0, 1]，1 = 完全相似
+
+# 自关联应为 1.0
+gr_self = client.compute.grey_relation(path_a, path_a)
+assert abs(gr_self - 1.0) < 1e-6
+```
+
+### 示例 16.4：GM(1,1) 灰色预测
+
+```python
+# 用最后 6 个收盘价预测下一个
+seq = data.close.values[-6:]
+predicted = client.compute.gm11_predict(seq)
+actual_next = data.close.values[-5]  # 假设已知
+error = abs(predicted - actual_next) / actual_next
+print(f"预测: {predicted:.2f}, 实际: {actual_next:.2f}, 误差: {error*100:.2f}%")
+```
+
+### 示例 16.5：传递熵（信息流向）
+
+```python
+# 检验 BTC 收益率是否影响 ETH 收益率（需同时采集两个标的）
+btc = client.ohlcv("BTC/USDT", start="2024-01-01", timeframe="1d")
+eth = client.ohlcv("ETH/USDT", start="2024-01-01", timeframe="1d")
+
+btc_rets = np.diff(np.log(btc.close.values))[:200]
+eth_rets = np.diff(np.log(eth.close.values))[:200]
+
+te_btc_to_eth = client.compute.transfer_entropy(btc_rets, eth_rets, k=1)
+te_eth_to_btc = client.compute.transfer_entropy(eth_rets, btc_rets, k=1)
+print(f"TE(BTC→ETH): {te_btc_to_eth:.4f} bits")
+print(f"TE(ETH→BTC): {te_eth_to_btc:.4f} bits")
+print(f"净信息流: {te_btc_to_eth - te_eth_to_btc:.4f} bits")
+```
+
+### 示例 16.6：Hurst 指数
+
+```python
+# Hurst 指数量化长期记忆性
+hurst = client.compute.hurst_dfa(np.diff(np.log(data.close.values[-500:])))
+print(f"Hurst 指数: {hurst:.4f}")
+# ≈ 0.5: 随机游走 | > 0.5: 持久性（趋势延续）| < 0.5: 反持久性（均值回归）
+```
+
+**预期结果**：BTC 日线 Hurst 指数约 0.45-0.55（接近随机游走）。
+
+### 示例 16.7：样本熵与排列熵
+
+```python
+rets = np.diff(np.log(data.close.values[-200:]))
+
+# 样本熵（序列复杂度）
+sampen = client.compute.sample_entropy(rets, m=2)
+print(f"样本熵: {sampen:.4f}")
+
+# 排列熵（序数模式复杂度）
+permen = client.compute.permutation_entropy(rets, m=3, tau=1)
+print(f"排列熵: {permen:.4f}")
+# 白噪声排列熵接近 log2(3!) ≈ 2.585
+```
+
+### 示例 16.8：可视化——CWT 时频热力图
+
+```python
+# 小波分解后直接生成 PlotSpec 并渲染
+signal = data.close.values[-48:]
+coef, scales = client.compute.wavelet_decompose(signal, scales=np.arange(1, 25))
+
+spec = client.compute.wavelet_scalogram(coef, scales, title="CWT Scalogram")
+renderer = client.plot.get_renderer()  # 自动检测 matplotlib
+renderer.render(spec)
+renderer.savefig("cwt_scalogram.png")
+```
+
+**预期结果**：生成一张时频热力图，横轴为时间（0-48h），纵轴为尺度（1-24），颜色表示小波功率。低尺度（高频）能量通常较低，高尺度（低频）能量较高。
+
+### 示例 16.9：可视化——DFA 双对数拟合图
+
+```python
+# DFA 拟合图（含 Hurst 指数标注）
+spec = client.compute.dfa_fit(np.diff(np.log(signal)))
+renderer = client.plot.get_renderer()
+renderer.render(spec)
+renderer.savefig("dfa_fit.png")
+# 图标题自动包含 "H = 0.xxxx"
+```
+
+**预期结果**：生成一张双对数散点+拟合线图，标题标注 Hurst 指数值。白噪声的散点应接近斜率 0.5 的直线。
+
+### 示例 16.10：可视化——功率谱密度图
+
+```python
+# PSD 对数图
+spec = client.compute.psd_plot(np.diff(np.log(signal)), fs=1.0)
+renderer = client.plot.get_renderer()
+renderer.render(spec)
+renderer.savefig("psd.png")
+```
+
+**预期结果**：生成一张 log-log PSD 曲线图，低频能量通常高于高频。
+
+---
+
 ## 附录：环境变量
+
+### 后端
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
-| `DATABASE_URL` | `sqlite:///stockstat.db` | 数据库 URL |
+| `DATABASE_URL` | `sqlite:///stockstat.db` | 数据库 URL（可切 `postgresql://...`） |
+| `REDIS_URL` | （空） | Redis 连接（可选，当前代码未自动接入） |
+| `HOST` | `0.0.0.0` | 后端监听地址 |
+| `PORT` | `8000` | 后端监听端口 |
+| `STOCKSTAT_DEFAULT_SOURCE` | `yfinance` | 默认数据源 |
 | `STOCKSTAT_PROXY_ENABLED` | `false` | 启用代理 |
 | `STOCKSTAT_PROXY_TYPE` | `http` | `http` 或 `socks5` |
 | `STOCKSTAT_PROXY_URL` | 自动 | 代理地址 |
+
+### 前端
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
 | `STOCKSTAT_HOST` | `localhost` | 前端主机 |
 | `STOCKSTAT_PORT` | `8000` | 前端端口 |
+| `STOCKSTAT_API_KEY` | （空） | 可选 API key（Bearer 认证） |
+| `STOCKSTAT_TIMEOUT` | `30` | HTTP 超时秒数 |
+| `STOCKSTAT_USE_HTTPS` | `false` | 是否使用 HTTPS |

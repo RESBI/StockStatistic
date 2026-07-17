@@ -7,21 +7,27 @@ A user-programmable stock/cryptocurrency statistical computing platform with sep
 ### Option A: Local development (SQLite, no Docker)
 
 ```bash
-# 1. Install backend
+# 1. Install the backend
 cd backend
 pip install -e .
 
-# 2. (Optional) Enable proxy for real data sources
+# 2. (Optional) Enable a proxy to access real data sources
 export STOCKSTAT_PROXY_ENABLED=true
 export STOCKSTAT_PROXY_TYPE=http
 export STOCKSTAT_PROXY_URL=http://127.0.0.1:8889
 
-# 3. Start the API server
+# 3. Start the API service (default sqlite:///stockstat.db)
 python -m uvicorn stockstat_backend.app:app --host 0.0.0.0 --port 8000
 
-# 4. Install frontend library (in another terminal)
+# 4. Install the frontend library (another terminal)
 cd frontend
 pip install -e .
+
+# 5. (Optional) Install extras on demand
+pip install -e "frontend/[matplotlib]"          # visualization
+pip install -e "frontend/[dsl]"                 # DSL parser (lark)
+pip install -e "frontend/[signal_processing]"   # wavelets (PyWavelets)
+pip install -e "frontend/[backtest_full]"       # full backtest suite (matplotlib + optuna)
 ```
 
 ### Option B: Docker (production)
@@ -31,13 +37,24 @@ docker compose up -d
 # API available at http://localhost:8000
 ```
 
+> **Note**: Docker deployment starts TimescaleDB + Redis containers, but the current `api` service code still uses `InMemoryCache` and does not automatically connect to Redis; the `scheduler` service is a placeholder stub. See [DESIGN.md §9](DESIGN.md#9-deployment).
+
+## Optional Extras
+
+| Extra | Install command | Purpose |
+|-------|-----------------|---------|
+| `matplotlib` | `pip install stockstat[matplotlib]` | Protocol-based visualization (lazy import, zero core dependency) |
+| `dsl` | `pip install stockstat[dsl]` | DSL parser (lark) |
+| `signal_processing` | `pip install stockstat[signal_processing]` | PyWavelets (full CWT) |
+| `backtest_full` | `pip install stockstat[backtest_full]` | Full backtest suite (matplotlib + optuna) |
+
 ## Proxy Configuration
 
 The backend supports HTTP/SOCKS5 proxies for accessing real data sources. **Disabled by default**.
 
-| Env Var | Default | Description |
+| Env var | Default | Description |
 |---------|---------|-------------|
-| `STOCKSTAT_PROXY_ENABLED` | `false` | Enable proxy |
+| `STOCKSTAT_PROXY_ENABLED` | `false` | Enable the proxy |
 | `STOCKSTAT_PROXY_TYPE` | `http` | Proxy type: `http` or `socks5` |
 | `STOCKSTAT_PROXY_URL` | auto by type | HTTP: `http://127.0.0.1:8889`, SOCKS5: `socks5://127.0.0.1:1089` |
 
@@ -64,16 +81,16 @@ from stockstat import StockStatClient
 
 client = StockStatClient(host="localhost", port=8000)
 
-# Stock data via Yahoo Finance
+# Stock data (Yahoo Finance direct)
 client.ingest("AAPL", source="yfinance", start="2024-01-01", end="2024-12-31")
 client.ingest("^GSPC", source="yfinance", start="2023-01-01", end="2024-12-31")
 
-# Crypto data via Binance
+# Crypto data (Binance)
 client.ingest("BTC/USDT", source="binance", start="2024-01-01", end="2024-12-31")
 client.ingest("ETH/USDT", source="binance", start="2024-01-01", end="2024-12-31")
 client.ingest("PAXG/USDT", source="binance", start="2022-01-01", end="2024-12-31")
 
-# Auto-detect source (yfinance for stocks, binance for crypto)
+# Auto-detect source (stocks → yfinance, crypto → binance)
 client.ingest("MSFT", start="2024-01-01", end="2024-06-30")
 ```
 
@@ -98,7 +115,9 @@ sharpe = client.compute.sharpe(returns, risk_free=0.02, annualize=True)
 dd = client.compute.max_drawdown(data.close)
 ```
 
-### 4. DSL mode
+### 4. DSL queries
+
+> The DSL is based on lark and requires `pip install stockstat[dsl]`. It currently supports only `SELECT ... FROM ... WHERE ... LIMIT`; it does not support `GROUP BY` / `ORDER BY` / `CASE WHEN`.
 
 ```python
 result = client.run_dsl('''
@@ -108,25 +127,71 @@ result = client.run_dsl('''
 ''')
 ```
 
+### 5. Signal Processing & Nonlinear Dynamics
+
+```python
+import numpy as np
+
+# Weekend 48h close-price path
+path = data.close.values[-48:]
+
+# Wavelet multiscale decomposition
+coef, scales = client.compute.wavelet_decompose(path, scales=np.arange(1, 25))
+
+# Spectral entropy (frequency-domain complexity)
+h_spec = client.compute.spectral_entropy(np.diff(np.log(path)))
+
+# Grey relational degree (path shape similarity)
+gr = client.compute.grey_relation(path, reference_path)
+
+# Hurst exponent (path persistence)
+hurst = client.compute.hurst_dfa(np.diff(np.log(path)))
+
+# Transfer entropy (weekend → Monday information flow)
+te = client.compute.transfer_entropy(weekend_returns, monday_returns)
+```
+
 ## Available Indicators
+
+### Built-in Technical Indicators (Python library + DSL)
+
+| Category | Function | Description | DSL |
+|----------|----------|-------------|-----|
+| Trend | `ma(x, window)` | Simple moving average | ✅ |
+| | `ema(x, window)` | Exponential moving average | ✅ |
+| | `macd(x, fast, slow, signal)` | MACD (returns 3 series) | ✅ |
+| Oscillator | `rsi(x, window)` | Relative Strength Index | ✅ |
+| | `kdj(high, low, close, window)` | KDJ (returns 3 series) | ❌ Python only |
+| Volatility | `std(x, window)` | Rolling standard deviation | ✅ |
+| | `atr(high, low, close, window)` | Average True Range | ✅ |
+| | `bollinger(x, window, k)` | Bollinger Bands (returns 3 series) | ✅ |
+| Statistics | `corr(x, y)` | Pearson correlation | ✅ |
+| | `beta(asset, benchmark, window)` | Rolling Beta | ❌ Python only |
+| | `sharpe(returns, risk_free, annualize)` | Sharpe ratio | ❌ Python only |
+| | `max_drawdown(close)` | Maximum drawdown | ❌ Python only |
+| | `var(returns, confidence)` | Historical VaR | ❌ Python only |
+| Transform | `returns(x)` | Percentage returns | ✅ |
+| | `log_returns(x)` | Log returns | ✅ |
+
+### Signal Processing & Nonlinear Dynamics (Python library only)
+
+8 analytical functions + 3 PlotSpec factory functions, in `stockstat.indicators.nonlinear`:
 
 | Category | Function | Description |
 |----------|----------|-------------|
-| Trend | `ma(x, window)` | Simple moving average |
-| | `ema(x, window)` | Exponential moving average |
-| | `macd(x, fast, slow, signal)` | MACD (returns 3 series) |
-| Oscillator | `rsi(x, window)` | Relative Strength Index |
-| | `kdj(high, low, close, window)` | KDJ indicator (returns 3 series) |
-| Volatility | `std(x, window)` | Rolling standard deviation |
-| | `atr(high, low, close, window)` | Average True Range |
-| | `bollinger(x, window, k)` | Bollinger Bands (returns 3 series) |
-| Statistics | `corr(x, y)` | Pearson correlation |
-| | `beta(asset, benchmark, window)` | Rolling Beta |
-| | `sharpe(returns, risk_free, annualize)` | Sharpe ratio |
-| | `max_drawdown(close)` | Maximum drawdown |
-| | `var(returns, confidence)` | Historical VaR |
-| Transform | `returns(x)` | Percentage returns |
-| | `log_returns(x)` | Log returns |
+| Signal Processing | `wavelet_decompose(signal, scales, wavelet)` | Continuous Wavelet Transform (CWT) |
+| | `spectral_entropy(signal, fs, nperseg)` | Spectral entropy (frequency-domain complexity) |
+| | `grey_relation(x0, xi, rho)` | Grey relational degree (path shape similarity) |
+| | `gm11_predict(sequence)` | GM(1,1) grey prediction |
+| Nonlinear Dynamics | `transfer_entropy(x, y, k, n_bins)` | Transfer entropy (directed information flow) |
+| | `hurst_dfa(signal)` | Hurst exponent (DFA method) |
+| | `sample_entropy(signal, m, r)` | Sample entropy |
+| | `permutation_entropy(signal, m, tau)` | Permutation entropy |
+| PlotSpec factories | `wavelet_scalogram(coef, scales, title, cmap)` | CWT time-frequency heatmap (returns PlotSpec) |
+| | `dfa_fit(signal, title)` | DFA log-log fit plot (returns PlotSpec) |
+| | `psd_plot(signal, fs, nperseg, title)` | Power spectral density plot (returns PlotSpec) |
+
+> The **Signal Processing & Nonlinear Dynamics** module requires the optional dependency `pip install stockstat[signal_processing]` (installs PyWavelets). When PyWavelets is not installed, CWT gracefully degrades to a built-in FFT-based Morlet implementation. PlotSpec factory functions return `PlotSpec` objects renderable via `client.plot.render(spec)` — PlotSpec has been extended to support heatmaps, log scales, and subplots.
 
 ## Backtesting
 
@@ -163,7 +228,7 @@ res = BacktestEngine(data=data, strategy=ma_cross,
                      benchmark="BTC/USDT").run()
 
 print(res.summary())
-spec = res.plot_equity()  # returns a PlotSpec, renderable by matplotlib
+spec = res.plot_equity()  # returns a PlotSpec renderable by matplotlib
 ```
 
 ### Custom indicator + multi-asset pair trading
@@ -196,15 +261,55 @@ res = BacktestEngine(data=data, strategy=pair_trade,
                      initial_cash=10000, allow_short=True).run()
 ```
 
+### Intrabar execution: same-bar entry + TP/SL exit
+
+The `IntrabarExecution` model simulates the full order-matching lifecycle inside a parent bar (e.g. daily) using sub-bars (e.g. 1h) — same-bar entry + exit scan + OCO mutual exclusion + order priority.
+
+```python
+from stockstat.backtest import (
+    BacktestEngine, Strategy, IntrabarMixin, Order,
+    IntrabarExecution, BinanceCost,
+)
+
+class TPStrategy(Strategy, IntrabarMixin):
+    """Market entry → intrabar scan TP limit → close fallback."""
+    def on_bar(self, ctx):
+        o = ctx.current_price("PAXG/USDT", "open")
+        if o is None: return
+        ctx.intrabar_submit(Order("PAXG/USDT", "buy", 10.0, tag="entry"))
+        ctx.history["tp"] = o * 1.01  # 1% take-profit
+
+    def define_exits(self, entry_fill, ctx):
+        tp = ctx.history.get("tp")
+        return [
+            Order("PAXG/USDT", "sell", entry_fill.qty,
+                  order_type="limit", limit_price=tp,
+                  tag="tp", exit_reason="tp", priority=1),
+            Order("PAXG/USDT", "sell", entry_fill.qty,
+                  order_type="market", tag="close",
+                  exit_reason="close", priority=99),
+        ]
+
+res = BacktestEngine(
+    data={"PAXG/USDT": {"1d": paxg_1d, "1h": paxg_1h}},
+    strategy=TPStrategy(),
+    initial_cash=10000,
+    cost_model=BinanceCost(venue="spot"),
+    execution_model=IntrabarExecution(intrabar_tf="1h", parent_tf="1d"),  # ← explicitly enabled
+).run()
+```
+
+> The default `execution_model=None` is equivalent to `NextBarExecution` (existing behavior, fully backward compatible).
+
 ### Backtest capabilities
 
 | Capability | Description |
 |------------|-------------|
 | Custom strategy | `Strategy` base class / `@strategy` function decorator / **`IntrabarMixin`** |
 | Multi-instrument group | `{symbol: {tf: df}}` Universe |
-| Multi-timeframe | finest tf drives master index; higher tfs ffill-aligned |
+| Multi-timeframe | finest tf drives the master index; higher tfs ffill-aligned |
 | Compute-library indicators | `ctx.compute` proxies `ComputeEngine`, includes `register()` |
-| Order types | market / limit / stop / trailing stop / **OCO** / **mutual OCO** |
+| Order types | market / limit / stop / trailing stop / **OCO pair** / **mutual OCO** |
 | Cost models | percent / fixed / tiered / stamp duty / zero / **Maker/Taker** / **Binance spot+futures+BNB** |
 | Short selling | `allow_short=True` |
 | Performance | Sharpe / Sortino / Calmar / drawdown / win rate / profit factor |
@@ -217,7 +322,7 @@ res = BacktestEngine(data=data, strategy=pair_trade,
 | **Pluggable execution** | `ExecutionModel`: `NextBarExecution` (default) / `IntrabarExecution` (sub-bar matching) |
 | **Same-bar entry+exit** | `IntrabarExecution`: full lifecycle within a parent bar |
 | **Post-entry exit scan** | `IntrabarMixin.define_exits()`: TP/SL/conditional exit after entry fill |
-| **Order priority** | `Order(priority=...)`: SL before TP within same sub-bar |
+| **Order priority** | `Order(priority=...)`: SL before TP within the same sub-bar |
 | **Batch backtest** | `StrategyBatchRunner`: multi-strategy/multi-fee parallel runs |
 | **Exit reason tags** | `Order(exit_reason=...)` + `result.exit_reason_stats()` |
 | **DCA benchmark** | `dca_equity()` |
@@ -225,13 +330,15 @@ res = BacktestEngine(data=data, strategy=pair_trade,
 | **Regime analysis** | `BacktestAnalyzer.regime_conditional_metrics()` |
 | **Fee sweep** | `fee_sweep()` / `maker_taker_sweep()` |
 
-See [DESIGN.md §12-16](DESIGN.md#12-backtest-subsystem-design) for the backtest design and [docs/backtest/](docs/backtest/) for phase-by-phase docs. Backtest visualization examples are in the [Visualization with Matplotlib](#visualization-with-matplotlib) section below.
+See [DESIGN.md §12](DESIGN.md#12-backtest-subsystem-design) for the backtest design and [docs/backtest/](docs/backtest/) for phase-by-phase docs. Backtest visualization examples are in the [Visualization with Matplotlib](#visualization-with-matplotlib) section below.
 
 ## Visualization with Matplotlib
 
 The core library has **zero hard-dependency** on matplotlib. Install it optionally:
 
 ```bash
+pip install stockstat[matplotlib]          # user install
+# or dev install
 pip install -e "frontend/[matplotlib]"
 ```
 
@@ -349,7 +456,7 @@ Without matplotlib, it gracefully degrades to `NullBacktestChartRenderer` (warns
 | `yfinance` | stock | Yes | On-demand | Yahoo Finance direct API; user provides any ticker (AAPL, MSFT, ^GSPC, ...) |
 | `binance` | crypto | Yes | 4,498 (1,479 USDT pairs) | Binance via ccxt |
 | `coinbase` | crypto | Yes | 1,183 (528 USD pairs) | Coinbase via ccxt |
-| `synthetic` | mixed | No | — | Synthetic data for offline testing |
+| `synthetic` | mixed | No | — | Synthetic data (fixed seed) for offline testing |
 
 ### Data Size Estimates
 
@@ -362,16 +469,19 @@ Without matplotlib, it gracefully degrades to `NullBacktestChartRenderer` (warns
 | Coinbase USD pairs (528) | daily | ~132,000 | ~1 MB |
 | Coinbase USD pairs (528) | 1-minute | ~277M | ~8 GB |
 
+> SQLite is suitable for small single-machine workloads (tens of thousands to millions of rows). When 1-minute full-market data reaches the GB scale, switch to TimescaleDB (Docker deployment) and enable Hypertable compression.
+
 ## REST API
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/api/v1/health` | GET | Health check (includes proxy status) |
 | `/api/v1/proxy` | GET | Get proxy configuration |
-| `/api/v1/sources` | GET | List data sources |
+| `/api/v1/sources` | GET | List data sources (includes proxy status) |
 | `/api/v1/ingest` | POST | Ingest data for a symbol |
 | `/api/v1/ohlcv` | GET | Query OHLCV data (json/csv) |
 | `/api/v1/symbols` | GET | List registered symbols |
+| `/api/v1/symbols/{symbol}` | GET | Symbol detail |
 
 ## Running Tests
 
@@ -382,14 +492,19 @@ cd backend && python -m pytest tests/test_backend.py -v
 # Frontend unit tests (indicators, DSL, visualization)
 cd frontend && python -m pytest tests/test_frontend.py -v
 
-# Backtest tests (interface, MVP, portfolio, multi-tf, cost, metrics, optimizer, 12 strategies, visualization, online real-data)
+# Signal processing & nonlinear dynamics tests
+cd frontend && python -m pytest tests/test_nonlinear.py -v
+
+# Backtest tests (interface, MVP, portfolio, multi-tf, cost, metrics, optimizer, 12 strategies, visualization, online real-data, engine enhancement)
 cd frontend && python -m pytest tests/test_backtest_iface.py tests/test_backtest_mvp.py \
     tests/test_backtest_portfolio.py tests/test_backtest_multitf.py \
     tests/test_backtest_cost.py tests/test_backtest_metrics.py \
     tests/test_backtest_optimize.py tests/test_backtest_strategies.py \
     tests/test_backtest_viz_iface.py tests/test_backtest_viz_mpl.py \
     tests/test_backtest_viz_advanced.py tests/test_backtest_viz_dashboard.py \
-    tests/test_backtest_viz_online.py -v
+    tests/test_backtest_viz_online.py \
+    tests/test_backtest_p0.py tests/test_backtest_p1.py tests/test_backtest_p2.py \
+    tests/test_backtest_intrabar.py -v
 
 # Integration tests (real data: classic stats + PAXG weekend correlation)
 cd frontend && python -m pytest tests/test_integration.py -v -s
@@ -401,21 +516,35 @@ cd frontend && python -m pytest tests/test_matplotlib_charts.py -v
 ## Documentation
 
 - [Usage Guide](docs/USAGE.md) — detailed examples with expected results
-- [Design Report](DESIGN.md) — full architecture design (incl. [§12 Backtest Subsystem](DESIGN.md#12-backtest-subsystem-design) · [§13 Backtest Visualization](DESIGN.md#13-backtest-visualization-subsystem-design) · [§15 Engine Enhancement & Pluggable Execution](DESIGN.md#15-backtest-engine-enhancement--pluggable-execution-model))
+- [Design Report](DESIGN.md) — full architecture design (incl. [§12 Backtest Subsystem](DESIGN.md#12-backtest-subsystem-design) · [§12.12 Pluggable Execution Model](DESIGN.md#1212-pluggable-execution-model) · [§12.13 Backtest Visualization](DESIGN.md#1213-backtest-visualization) · [§4.6 Signal Processing & Nonlinear Dynamics](DESIGN.md#46-signal-processing--nonlinear-dynamics-module))
 - [Backtest Phase Docs](docs/backtest/) — BT-0 through BT-14 + BT-V0 through V3 + online validation report
-- [Test Report](reports/TEST_REPORT.md) — test results (361 tests)
+- [Test Report](reports/TEST_REPORT.md) — test results
 - PAXG Weekend-Monday research (`working/` directory, not version-controlled) — v1~v5 complete study + engine improvement reports; stage report extracted to [docs/backtest/BT11_BT14_CN.md](docs/backtest/BT11_BT14_CN.md)
 
 ## Configuration
 
-| Env Var | Default | Description |
+### Backend environment variables
+
+| Env var | Default | Description |
 |---------|---------|-------------|
-| `DATABASE_URL` | `sqlite:///stockstat.db` | Database connection string |
+| `DATABASE_URL` | `sqlite:///stockstat.db` | Database connection string (switchable to `postgresql://...`) |
+| `REDIS_URL` | (empty) | Redis connection (optional; not auto-wired by current code) |
+| `HOST` | `0.0.0.0` | Backend listen address |
+| `PORT` | `8000` | Backend listen port |
+| `STOCKSTAT_DEFAULT_SOURCE` | `yfinance` | Default data source |
 | `STOCKSTAT_PROXY_ENABLED` | `false` | Enable proxy |
 | `STOCKSTAT_PROXY_TYPE` | `http` | `http` or `socks5` |
 | `STOCKSTAT_PROXY_URL` | auto | Proxy URL |
+
+### Frontend environment variables
+
+| Env var | Default | Description |
+|---------|---------|-------------|
 | `STOCKSTAT_HOST` | `localhost` | Frontend default host |
 | `STOCKSTAT_PORT` | `8000` | Frontend default port |
+| `STOCKSTAT_API_KEY` | (empty) | Optional API key (Bearer auth) |
+| `STOCKSTAT_TIMEOUT` | `30` | HTTP timeout in seconds |
+| `STOCKSTAT_USE_HTTPS` | `false` | Whether to use HTTPS |
 
 ---
 

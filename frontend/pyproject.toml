@@ -26,6 +26,8 @@ optimize = ["optuna>=3.5"]
 backtest_viz = ["stockstat[backtest]", "matplotlib>=3.8"]
 backtest_full = ["stockstat[backtest]", "stockstat[optimize]",
                  "stockstat[matplotlib]", "matplotlib>=3.8"]
+signal_processing = ["PyWavelets>=1.1"]
+nonlinear = ["stockstat[signal_processing]"]
 
 [tool.setuptools.packages.find]
 include = ["stockstat*"]
