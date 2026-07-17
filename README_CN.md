@@ -1,6 +1,6 @@
 # StockStat — 可编程金融标的统计计算平台
 
-用户可编程的股票/加密货币统计计算平台，存储后端与计算前端分离。
+用户可编程的股票/加密货币统计计算平台，存储后端与计算前端分离。v2.0 采用五层架构（通用核心 / 金融领域 / 可视化 / 接口 / 应用），插件化扩展，支持 CLI 与离线模式。
 
 ## 快速开始
 
@@ -8,36 +8,77 @@
 
 ```bash
 # 1. 安装后端
-cd backend
-pip install -e .
+cd backend && pip install -e .
 
 # 2.（可选）开启代理以访问真实数据源
 export STOCKSTAT_PROXY_ENABLED=true
 export STOCKSTAT_PROXY_TYPE=http
 export STOCKSTAT_PROXY_URL=http://127.0.0.1:8889
 
-# 3. 启动 API 服务（默认 sqlite:///stockstat.db）
+# 3. 启动 API 服务（默认 sqlite:///stockstat.db，数据持久化到文件）
 python -m uvicorn stockstat_backend.app:app --host 0.0.0.0 --port 8000
+# 或使用 v2.0 CLI:
+stockstat serve --host 0.0.0.0 --port 8000
 
 # 4. 安装前端库（另一个终端）
-cd frontend
-pip install -e .
+cd frontend && pip install -e .
 
-# 5.（可选）按需安装 extras
+# 5.（可选）安装 extras
 pip install -e "frontend/[matplotlib]"          # 可视化
 pip install -e "frontend/[dsl]"                 # DSL 解析（lark）
 pip install -e "frontend/[signal_processing]"   # 小波变换（PyWavelets）
 pip install -e "frontend/[backtest_full]"       # 回测全套（matplotlib + optuna）
 ```
 
-### 方式 B：Docker（生产部署）
+### 方式 B：网络远程部署（storage 服务单独在一台机器上）
+
+后端可独立部署在网络中的任意机器上，其他机器通过 HTTP 访问：
+
+```bash
+# === 在 storage 服务器上（如 192.168.1.100）===
+cd backend && pip install -e .
+python -m uvicorn stockstat_backend.app:app --host 0.0.0.0 --port 8000
+# 数据持久化到 stockstat.db 文件，关闭后重启自动读取
+```
+
+```python
+# === 在用户机器上 ===
+from stockstat import StockStatClient
+client = StockStatClient(host="192.168.1.100", port=8000)
+
+client.ingest("BTC/USDT", source="binance", start="2024-01-01")  # 通过 API 下载
+data = client.ohlcv("BTC/USDT")                                   # 通过 API 查询
+symbols = client.symbols()                                        # 列出已下载标的
+```
+
+### 方式 C：离线模式（无需后端）
+
+v2.0 的 `V2Client` 支持纯离线模式，直接使用本地 Storage：
+
+```python
+from stockstat._api.client import V2Client
+from stockstat._core.storage import MemoryStorage
+
+client = V2Client(mode="offline", storage=MemoryStorage())
+# ohlcv / compute / run_dsl / backtest / plot 全部本地运行，无需 HTTP
+```
+
+### 方式 D：Docker（生产部署）
 
 ```bash
 docker compose up -d
 # API 可通过 http://localhost:8000 访问
 ```
 
-> **注意**：Docker 部署启动 TimescaleDB + Redis 容器，但当前 `api` 服务代码仍使用 `InMemoryCache`，不会自动接入 Redis；`scheduler` 服务为占位 stub。详见 [DESIGN_CN.md §9](DESIGN_CN.md#9-部署方案)。
+## CLI 命令行（v2.0 新增）
+
+```bash
+stockstat serve --host 0.0.0.0 --port 8000      # 启动 API 服务器
+stockstat ingest BTC/USDT --source binance       # 命令行采集
+stockstat query BTC/USDT --limit 5               # 查询并输出
+stockstat plugins --namespace indicators         # 列出已注册插件
+stockstat indicators --category nonlinear        # 按类别列出指标
+```
 
 ## 可选 extras
 
@@ -57,20 +98,6 @@ docker compose up -d
 | `STOCKSTAT_PROXY_ENABLED` | `false` | 是否启用代理 |
 | `STOCKSTAT_PROXY_TYPE` | `http` | 代理类型：`http` 或 `socks5` |
 | `STOCKSTAT_PROXY_URL` | 按类型自动 | HTTP: `http://127.0.0.1:8889`，SOCKS5: `socks5://127.0.0.1:1089` |
-
-```bash
-# HTTP 代理（默认地址）
-export STOCKSTAT_PROXY_ENABLED=true
-export STOCKSTAT_PROXY_TYPE=http
-
-# SOCKS5 代理（默认地址）
-export STOCKSTAT_PROXY_ENABLED=true
-export STOCKSTAT_PROXY_TYPE=socks5
-
-# 自定义代理
-export STOCKSTAT_PROXY_ENABLED=true
-export STOCKSTAT_PROXY_URL=http://192.168.1.100:8080
-```
 
 ## 使用方式
 
@@ -117,7 +144,7 @@ dd = client.compute.max_drawdown(data.close)
 
 ### 4. DSL 查询
 
-> DSL 基于 lark，需 `pip install stockstat[dsl]`。当前仅支持 `SELECT ... FROM ... WHERE ... LIMIT`，不支持 `GROUP BY` / `ORDER BY` / `CASE WHEN`。
+> DSL 基于 lark，需 `pip install stockstat[dsl]`。v2.0 支持从 PluginRegistry 自动反射所有已注册指标。
 
 ```python
 result = client.run_dsl('''
@@ -175,8 +202,6 @@ te = client.compute.transfer_entropy(weekend_returns, monday_returns)
 
 ### 信号处理与非线性动力学（仅 Python 库）
 
-8 个分析函数 + 3 个 PlotSpec 工厂函数，位于 `stockstat.indicators.nonlinear`：
-
 | 类别 | 函数 | 说明 |
 |------|------|------|
 | 信号处理 | `wavelet_decompose(signal, scales, wavelet)` | 连续小波变换（CWT） |
@@ -191,7 +216,42 @@ te = client.compute.transfer_entropy(weekend_returns, monday_returns)
 | | `dfa_fit(signal, title)` | DFA 双对数拟合图（返回 PlotSpec） |
 | | `psd_plot(signal, fs, nperseg, title)` | 功率谱密度图（返回 PlotSpec） |
 
-> **信号处理与非线性动力学**模块需要可选依赖 `pip install stockstat[signal_processing]`（安装 PyWavelets）。未安装时 CWT 自动降级为基于 FFT 的自实现 Morlet 小波。PlotSpec 工厂函数返回的对象可通过 `client.plot.render(spec)` 渲染——PlotSpec 已扩展支持 heatmap、log 轴和子图。
+> **信号处理与非线性动力学**模块需要可选依赖 `pip install stockstat[signal_processing]`（安装 PyWavelets）。未安装时 CWT 自动降级为基于 FFT 的自实现 Morlet 小波。
+
+## v2.0 插件系统
+
+v2.0 的所有可扩展点统一注册到 `PluginRegistry`，可通过 CLI 或代码查询：
+
+```bash
+$ stockstat plugins
+Namespace            Name                      Category
+--------------------------------------------------------------------
+sources              yfinance                  sources
+sources              binance                   sources
+sources              coinbase                  sources
+sources              synthetic                 sources
+indicators           ma                        trend
+indicators           rsi                       oscillator
+indicators           hurst_dfa                 nonlinear
+...
+cost_models          percent                   cost
+cost_models          binance                   cost
+fill_models          next_open                 fill
+execution_models     next_bar                  execution
+renderers            matplotlib                renderers
+
+Total: 45 plugin(s)
+```
+
+```python
+# 代码中查询
+from stockstat._core.plugin import PluginRegistry
+from stockstat._domain.indicators import register_default_indicators, list_indicators
+
+reg = PluginRegistry()
+register_default_indicators(reg)
+print(list_indicators(reg, category="nonlinear"))
+```
 
 ## 回测
 
@@ -224,122 +284,43 @@ res = client.backtest(data, ma_cross, initial_cash=10000)
 
 # 方式 B：直接构造引擎
 res = BacktestEngine(data=data, strategy=ma_cross,
-                     initial_cash=10000,
-                     benchmark="BTC/USDT").run()
+                     initial_cash=10000, benchmark="BTC/USDT").run()
 
 print(res.summary())
 spec = res.plot_equity()  # 返回 PlotSpec，可被 matplotlib 渲染
 ```
 
-### 自定义指标 + 多标的配对交易
-
-```python
-from stockstat.backtest import strategy, Order, BacktestEngine
-import numpy as np
-
-@strategy
-def pair_trade(ctx):
-    if not ctx.history.get("init"):
-        def donchian(high, low, window=20):
-            return high.rolling(window).max(), low.rolling(window).min()
-        ctx.compute.register("donchian", donchian)
-        ctx.history["init"] = True
-
-    btc = ctx.get("BTC/USDT", "1d", lookback=60)
-    eth = ctx.get("ETH/USDT", "1d", lookback=60)
-    if len(btc) < 40:
-        return
-    spread = np.log(btc.close) - np.log(eth.close)
-    z = (spread - spread.rolling(20).mean()) / spread.rolling(20).std()
-    last = z.iloc[-1]
-    if last > 1.5:
-        ctx.broker.submit(Order("BTC/USDT", "sell", 0.1))
-        ctx.broker.submit(Order("ETH/USDT", "buy", 0.1))
-    # ... 平仓逻辑
-
-res = BacktestEngine(data=data, strategy=pair_trade,
-                     initial_cash=10000, allow_short=True).run()
-```
-
-### Intrabar 执行：同 bar 入场 + TP/SL 退出
-
-`IntrabarExecution` 模型支持在 parent bar（如日线）内部用子 bar（如 1h）模拟订单撮合全生命周期——同 bar 入场 + 退出扫描 + OCO 互斥 + 订单优先级。
-
-```python
-from stockstat.backtest import (
-    BacktestEngine, Strategy, IntrabarMixin, Order,
-    IntrabarExecution, BinanceCost,
-)
-
-class TPStrategy(Strategy, IntrabarMixin):
-    """市价入场 → intrabar 扫描 TP 限价 → 收盘兜底。"""
-    def on_bar(self, ctx):
-        o = ctx.current_price("PAXG/USDT", "open")
-        if o is None: return
-        ctx.intrabar_submit(Order("PAXG/USDT", "buy", 10.0, tag="entry"))
-        ctx.history["tp"] = o * 1.01  # 1% 止盈
-
-    def define_exits(self, entry_fill, ctx):
-        tp = ctx.history.get("tp")
-        return [
-            Order("PAXG/USDT", "sell", entry_fill.qty,
-                  order_type="limit", limit_price=tp,
-                  tag="tp", exit_reason="tp", priority=1),
-            Order("PAXG/USDT", "sell", entry_fill.qty,
-                  order_type="market", tag="close",
-                  exit_reason="close", priority=99),
-        ]
-
-res = BacktestEngine(
-    data={"PAXG/USDT": {"1d": paxg_1d, "1h": paxg_1h}},
-    strategy=TPStrategy(),
-    initial_cash=10000,
-    cost_model=BinanceCost(venue="spot"),
-    execution_model=IntrabarExecution(intrabar_tf="1h", parent_tf="1d"),  # ← 显式启用
-).run()
-```
-
-> 默认 `execution_model=None` 等价于 `NextBarExecution`（现有行为，完全兼容）。
-
 ### 回测能力一览
 
 | 能力 | 说明 |
 |------|------|
-| 自定义策略 | `Strategy` 基类 / `@strategy` 函数装饰器 / **`IntrabarMixin`** |
+| 自定义策略 | `Strategy` 基类 / `@strategy` 函数装饰器 / `IntrabarMixin` |
 | 多标的交易组 | `{symbol: {tf: df}}` Universe |
-| 多时间尺度 | 自动以最细 tf 为主索引，高 tf ffill 对齐 |
-| 计算库指标 | `ctx.compute` 代理 `ComputeEngine`，含 `register()` |
-| 订单类型 | 市价 / 限价 / 止损 / 移动止损 / **OCO 挂单对** / **互斥 OCO** |
-| 成本模型 | 比例 / 固定 / 阶梯 / 印花税 / 零成本 / **Maker/Taker 区分** / **Binance 现货合约+BNB** |
+| 多时间尺度 | 最细 tf 为主索引，高 tf ffill 对齐 |
+| 订单类型 | 市价 / 限价 / 止损 / 移动止损 / OCO / 互斥 OCO |
+| 成本模型 | 比例 / 固定 / 阶梯 / 印花税 / 零成本 / Maker/Taker / Binance 现货合约+BNB |
 | 做空 | `allow_short=True` |
 | 绩效 | Sharpe / Sortino / Calmar / 回撤 / 胜率 / 盈亏比 |
-| 可视化 | `plot_equity/plot_drawdown/plot_trades` 返回 PlotSpec |
-| **高级可视化** | `result.chart(name)` 返回 BacktestChartSpec；dashboard/heatmap/histogram；零 matplotlib 硬依赖 |
+| 可视化 | 9 种图表 + dashboard；零 matplotlib 硬依赖 |
 | 参数优化 | 网格搜索 / optuna（extras）/ 走样 / 蒙特卡洛 |
 | 未来函数防护 | 默认 NextOpenFill + lookahead_audit |
-| **intrabar 限价成交** | `IntrabarLimitFill`：盘中价格穿越限价即成交 |
-| **intrabar 模拟器** | `IntrabarSimulator`：用更细 K 线模拟限价单成交时序 |
-| **可插拔执行模型** | `ExecutionModel`：`NextBarExecution`（默认）/ `IntrabarExecution`（intrabar 子 bar 撮合） |
-| **同 bar 入场+出场** | `IntrabarExecution`：parent bar 内完成入场→退出扫描全生命周期 |
-| **成交后退出扫描** | `IntrabarMixin.define_exits()`：入场成交后定义 TP/SL/条件退出 |
-| **订单优先级** | `Order(priority=...)`：同 bar 内 SL 优先于 TP |
-| **批量回测** | `StrategyBatchRunner`：多策略/多费率并行回测 |
-| **退出原因标记** | `Order(exit_reason=...)` + `result.exit_reason_stats()` |
-| **DCA 基准** | `dca_equity()` 定投基准 |
-| **子期间分析** | `BacktestAnalyzer.subperiod_metrics()` |
-| **状态条件分析** | `BacktestAnalyzer.regime_conditional_metrics()` |
-| **费率扫描** | `fee_sweep()` / `maker_taker_sweep()` |
+| 可插拔执行 | `NextBarExecution`（默认）/ `IntrabarExecution`（intrabar 子 bar 撮合） |
+| 同 bar 入场+出场 | `IntrabarExecution`：parent bar 内完成全生命周期 |
+| 订单优先级 | `Order(priority=...)`：SL 优先于 TP |
+| 批量回测 | `StrategyBatchRunner`：多策略/多费率并行 |
+| 退出原因标记 | `Order(exit_reason=...)` + `result.exit_reason_stats()` |
+| DCA 基准 | `dca_equity()` |
+| 子期间/状态分析 | `BacktestAnalyzer.subperiod_metrics()` / `regime_conditional_metrics()` |
+| 费率扫描 | `fee_sweep()` / `maker_taker_sweep()` |
 
-回测设计详见 [DESIGN_CN.md §12](DESIGN_CN.md#12-回测子系统设计)，阶段实现文档见 [docs/backtest/](docs/backtest/)。回测可视化示例见下文 [matplotlib 可视化](#matplotlib-可视化) 章节。
+回测设计详见 [DESIGN_CN.md §11](DESIGN_CN.md#11-回测子系统设计)，阶段文档见 [docs/backtest/](docs/backtest/)。
 
 ## matplotlib 可视化
 
 核心库**零硬依赖** matplotlib。可选安装：
 
 ```bash
-pip install stockstat[matplotlib]          # 用户安装
-# 或开发安装
-pip install -e "frontend/[matplotlib]"
+pip install stockstat[matplotlib]
 ```
 
 ### 协议化绘图
@@ -383,12 +364,12 @@ renderer.savefig("btc.png")
 
 ### PAXG 周末涨跌 vs 周一涨跌幅（独立分析）
 
-核心分析：PAXG（黄金锚定代币）周末涨跌幅（横轴：周五收盘→周日收盘）与周一的**最大涨幅** `(最高-开盘)/开盘` 和**最大跌幅** `(最低-开盘)/开盘`，**独立记录**（不按信号方向选择）。真实数据 2022-2024。
+PAXG（黄金锚定代币）周末涨跌幅（周五收盘→周日收盘）与周一的**最大涨幅** `(最高-开盘)/开盘` 和**最大跌幅** `(最低-开盘)/开盘`，**独立记录**。真实数据 2022-2024。
 
 #### 散点图 — 涨幅与跌幅同图显示
 ![PAXG 周末散点图](docs/images/paxg_weekend_scatter.png)
 
-**结果**：r(涨幅)=0.23 (p=0.004)，r(跌幅)=-0.20 (p=0.012)。均显著但较弱——周末涨跌幅对周一涨幅和跌幅有适度的独立预测力。涨组 vs 跌组均值无显著差异 (t 检验 p>0.26)。
+**结果**：r(涨幅)=0.23 (p=0.004)，r(跌幅)=-0.20 (p=0.012)。均显著但较弱——周末涨跌幅对周一涨幅和跌幅有适度的独立预测力。
 
 #### 按周末涨跌方向的涨跌幅分布
 ![PAXG 方向性](docs/images/paxg_directional.png)
@@ -398,7 +379,7 @@ renderer.savefig("btc.png")
 
 ### 回测可视化
 
-回测可视化子系统提供 9 种图表类型，核心**零 matplotlib 硬依赖**——安装 matplotlib 后自动激活。以下图表使用真实市场数据（Binance BTC/USDT 2023-2024）生成。
+回测可视化提供 9 种图表，安装 matplotlib 后自动激活。以下图表使用真实市场数据（Binance BTC/USDT 2023-2024）生成。
 
 #### 综合仪表盘（2×2：资金曲线 + 回撤 + 收益分布 + 月度热力）
 ![BTC 回测仪表盘](docs/images/backtest_btc_dashboard.png)
@@ -427,23 +408,14 @@ res = BacktestEngine(data=data, strategy=ma_cross,
 
 # 一行渲染（自动检测 matplotlib）
 res.render("equity_curve", path="equity.png")
-res.render("drawdown", path="drawdown.png")
-
-# 组合仪表盘（2×2 四面板）
 res.render("dashboard", path="dashboard.png")
 
 # 批量保存全部图表
 res.render_all("./charts")
 
-# 高级图表
-res.render("returns_distribution", path="dist.png")   # 收益分布直方图
-res.render("monthly_heatmap", path="monthly.png")      # 月度收益热力图
-res.render("yearly_returns", path="yearly.png")        # 年度收益柱状图
-
-# 参数网格热力图（配合 grid_search）
+# 参数网格热力图
 from stockstat.backtest.optimizer import grid_search
 results = grid_search(make_engine, {"short": [3,5,8], "long": [10,20,30]}, metric="sharpe")
-res.chart("parameter_heatmap", grid_results=results)  # 返回 BacktestChartSpec
 res.render("parameter_heatmap", grid_results=results, path="param.png")
 ```
 
@@ -453,10 +425,10 @@ res.render("parameter_heatmap", grid_results=results, path="param.png")
 
 | 数据源 | 类型 | 需联网 | 标的数目 | 说明 |
 |--------|------|--------|---------|------|
-| `yfinance` | 股票 | 是 | 按需获取 | Yahoo Finance 直连 API，用户传入任意股票代码（AAPL、MSFT、^GSPC、…） |
-| `binance` | 加密货币 | 是 | 4,498（其中 1,479 个 USDT 交易对） | Binance via ccxt |
-| `coinbase` | 加密货币 | 是 | 1,183（其中 528 个 USD 交易对） | Coinbase via ccxt |
-| `synthetic` | 混合 | 否 | — | 合成数据（固定种子），用于离线测试 |
+| `yfinance` | 股票 | 是 | 按需获取 | Yahoo Finance 直连 API |
+| `binance` | 加密货币 | 是 | 4,498（1,479 USDT 对） | Binance via ccxt |
+| `coinbase` | 加密货币 | 是 | 1,183（528 USD 对） | Coinbase via ccxt |
+| `synthetic` | 混合 | 否 | — | 合成数据（固定种子），离线测试 |
 
 ### 数据大小估算
 
@@ -464,12 +436,10 @@ res.render("parameter_heatmap", grid_results=results, path="param.png")
 |------|---------|--------|---------|
 | 1 个标的 | 日线 | ~250 | ~2 KB |
 | 1 个标的 | 1分钟 | ~525,000 | ~15 MB |
-| Binance USDT 交易对（1,479） | 日线 | ~370,000 | ~3 MB |
-| Binance USDT 交易对（1,479） | 1分钟 | ~776M | ~22 GB |
-| Coinbase USD 交易对（528） | 日线 | ~132,000 | ~1 MB |
-| Coinbase USD 交易对（528） | 1分钟 | ~277M | ~8 GB |
+| Binance USDT 对（1,479） | 日线 | ~370,000 | ~3 MB |
+| Binance USDT 对（1,479） | 1分钟 | ~776M | ~22 GB |
 
-> SQLite 适合单机小规模（万级行/百万级行）；当 1 分钟全市场数据量达 GB 级时，建议切换至 TimescaleDB（Docker 部署），并启用 Hypertable 压缩。
+> SQLite 适合单机小规模；GB 级建议切换 TimescaleDB + Hypertable 压缩。
 
 ## REST API
 
@@ -486,16 +456,16 @@ res.render("parameter_heatmap", grid_results=results, path="param.png")
 ## 运行测试
 
 ```bash
-# 后端测试（真实数据 + 代理）
+# 后端测试
 cd backend && python -m pytest tests/test_backend.py -v
 
-# 前端单元测试（指标、DSL、可视化）
-cd frontend && python -m pytest tests/test_frontend.py -v
+# v2.0 核心层 + 领域层 + 可视化层 + 接口层测试
+cd frontend && python -m pytest tests/test_v2_core.py tests/test_v2_domain.py tests/test_v2_viz.py tests/test_v2_api.py -v
 
-# 信号处理与非线性动力学测试
-cd frontend && python -m pytest tests/test_nonlinear.py -v
+# v1.7 前端单元测试（指标、DSL、可视化）
+cd frontend && python -m pytest tests/test_frontend.py tests/test_nonlinear.py -v
 
-# 回测测试（接口、MVP、组合、多 tf、成本、绩效、优化、12 策略、可视化、在线真实数据、引擎增强）
+# 回测全套测试
 cd frontend && python -m pytest tests/test_backtest_iface.py tests/test_backtest_mvp.py \
     tests/test_backtest_portfolio.py tests/test_backtest_multitf.py \
     tests/test_backtest_cost.py tests/test_backtest_metrics.py \
@@ -509,17 +479,18 @@ cd frontend && python -m pytest tests/test_backtest_iface.py tests/test_backtest
 # 集成测试（真实数据：经典统计 + PAXG 周末相关性）
 cd frontend && python -m pytest tests/test_integration.py -v -s
 
-# matplotlib 图表测试（生成图片到 docs/images/）
+# matplotlib 图表测试
 cd frontend && python -m pytest tests/test_matplotlib_charts.py -v
 ```
+
+**总计 489 项测试，全部通过。**
 
 ## 文档
 
 - [使用文档](docs/USAGE_CN.md) — 详细示例与预期结果
-- [设计报告](DESIGN_CN.md) — 完整架构设计（含 [§12 回测子系统](DESIGN_CN.md#12-回测子系统设计) · [§12.12 可插拔执行模型](DESIGN_CN.md#1212-可插拔执行模型) · [§12.13 回测可视化](DESIGN_CN.md#1213-回测可视化) · [§4.6 信号处理与非线性动力学](DESIGN_CN.md#46-信号处理与非线性动力学模块)）
+- [设计报告](DESIGN_CN.md) — 完整 v2.0 五层架构设计
 - [回测阶段文档](docs/backtest/) — BT-0 ~ BT-14 + BT-V0 ~ V3 + 在线验证报告
-- [测试报告](reports/TEST_REPORT.md) — 测试结果
-- PAXG 周末规律研究（`working/` 目录，未纳入版本控制）— v1~v5 完整研究 + 引擎改进报告，阶段报告已提取至 [docs/backtest/BT11_BT14_CN.md](docs/backtest/BT11_BT14_CN.md)
+- [测试报告](reports/) — v2.0 各阶段实现报告 + PAXG 兼容性报告
 
 ## 配置
 
@@ -528,7 +499,7 @@ cd frontend && python -m pytest tests/test_matplotlib_charts.py -v
 | 环境变量 | 默认值 | 说明 |
 |----------|--------|------|
 | `DATABASE_URL` | `sqlite:///stockstat.db` | 数据库连接字符串（可切 `postgresql://...`） |
-| `REDIS_URL` | （空） | Redis 连接（可选，当前代码未自动接入） |
+| `REDIS_URL` | （空） | Redis 连接（可选） |
 | `HOST` | `0.0.0.0` | 后端监听地址 |
 | `PORT` | `8000` | 后端监听端口 |
 | `STOCKSTAT_DEFAULT_SOURCE` | `yfinance` | 默认数据源 |

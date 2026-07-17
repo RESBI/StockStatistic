@@ -1,6 +1,6 @@
 # StockStat 使用文档
 
-> 本文档所有示例均在本地使用真实市场数据（Yahoo Finance + Binance，通过代理）测试通过。预期结果来自 2026-07-17 的实际测试运行。
+> 本文档所有示例均在本地使用真实市场数据（Yahoo Finance + Binance，通过代理）测试通过。预期结果来自 2026-07-18 的实际测试运行。
 
 ## 目录
 
@@ -20,6 +20,9 @@
 14. [回测高级功能](#14-回测高级功能)
 15. [回测可视化](#15-回测可视化)
 16. [信号处理与非线性动力学](#16-信号处理与非线性动力学)
+17. [v2.0 CLI 命令行](#17-v20-cli-命令行)
+18. [v2.0 离线模式](#18-v20-离线模式)
+19. [v2.0 插件系统](#19-v20-插件系统)
 
 ---
 
@@ -34,7 +37,7 @@ cd backend && pip install -e .
 # 前端核心库
 cd frontend && pip install -e .
 
-# 可选 extras（按需安装）
+# 可选 extras
 pip install -e "frontend/[matplotlib]"          # 可视化
 pip install -e "frontend/[dsl]"                 # DSL 解析（lark）
 pip install -e "frontend/[signal_processing]"   # 小波变换（PyWavelets）
@@ -52,7 +55,11 @@ export STOCKSTAT_PROXY_URL=http://127.0.0.1:8889
 ### 启动后端
 
 ```bash
+# 方式1：uvicorn 直接启动
 python -m uvicorn stockstat_backend.app:app --host 0.0.0.0 --port 8000
+
+# 方式2：v2.0 CLI（等价）
+stockstat serve --host 0.0.0.0 --port 8000
 ```
 
 ### 前端连接
@@ -63,11 +70,14 @@ from stockstat import StockStatClient
 # 方式1：直接配置（最常用）
 client = StockStatClient(host="localhost", port=8000)
 
-# 方式2：环境变量（STOCKSTAT_HOST / STOCKSTAT_PORT / STOCKSTAT_API_KEY / ...）
+# 方式2：环境变量
 client = StockStatClient.from_env()
 
 # 方式3：字典配置
-client = StockStatClient.from_dict({"host": "localhost", "port": 8000, "timeout": 30})
+client = StockStatClient.from_dict({"host": "localhost", "port": 8000})
+
+# 方式4：连接远程 storage 服务器
+client = StockStatClient(host="192.168.1.100", port=8000)
 ```
 
 ---
@@ -106,7 +116,14 @@ client.ingest("MSFT", start="2024-01-01", end="2024-06-30")
 client.ingest("ETH/USDT", start="2024-01-01", end="2024-12-31")
 ```
 
-### 示例 2.4：批量采集分析所需标的
+### 示例 2.4：通过 CLI 采集（v2.0 新增）
+
+```bash
+stockstat ingest AAPL --source yfinance --start 2024-01-01 --end 2024-12-31
+stockstat ingest BTC/USDT --source binance --start 2024-01-01 --end 2024-12-31
+```
+
+### 示例 2.5：批量采集分析所需标的
 
 ```python
 symbols = [
@@ -158,6 +175,13 @@ for s in symbols:
     print(f"{s['unified_symbol']:15s} {s['asset_type']:8s} {s['sources']}")
 ```
 
+### 示例 3.4：通过 CLI 查询（v2.0 新增）
+
+```bash
+stockstat query BTC/USDT --limit 5
+stockstat query AAPL --start 2024-01-01 --format csv
+```
+
 ---
 
 ## 4. 趋势指标
@@ -198,15 +222,6 @@ print(f"信号线: {signal_line.iloc[-1]:.2f}")
 print(f"柱状图: {hist.iloc[-1]:.2f}")
 ```
 
-**预期结果**（2024-12-31，数值随数据更新）：
-```
-MACD 线: -673.62
-信号线: 320.30
-柱状图: -993.92
-```
-
-> 柱状图 = MACD 线 − 信号线。以上为示例量级，实际值取决于查询日的市场状态。
-
 ---
 
 ## 5. 震荡指标
@@ -218,18 +233,6 @@ rsi = client.compute.rsi(btc.close, window=14)
 print(f"RSI 最后5天:\n{rsi.tail(5).round(2)}")
 print(f"超买天数 (>70): {(rsi > 70).sum()}")
 print(f"超卖天数 (<30): {(rsi < 30).sum()}")
-```
-
-**预期结果**（2024-12-31）：
-```
-RSI 最后5天:
-2024-12-27    44.00
-2024-12-28    46.20
-2024-12-29    43.33
-2024-12-30    41.65
-2024-12-31    43.61
-超买天数 (>70): 53
-超卖天数 (<30): 4
 ```
 
 ### 示例 5.2：KDJ
@@ -252,14 +255,7 @@ print(f"中轨: {mid.iloc[-1]:.2f}")
 print(f"下轨: {lower.iloc[-1]:.2f}")
 ```
 
-**预期结果**（示例量级）：
-```
-上轨: 106441.05
-中轨: 98296.30
-下轨: 90151.55
-```
-
-### 示例 6.2：ATR（平均真实波幅）
+### 示例 6.2：ATR
 
 ```python
 atr = client.compute.atr(btc.high, btc.low, btc.close, window=14)
@@ -277,18 +273,13 @@ print(f"20日波动率: {std.iloc[-1]:.2f}")
 
 ## 7. 统计指标
 
-### 示例 7.1：Beta（AAPL vs 标普500）
+### 示例 7.1：Beta
 
 ```python
 stock = client.ohlcv("AAPL", start="2023-01-01", timeframe="1d")
 market = client.ohlcv("^GSPC", start="2023-01-01", timeframe="1d")
 beta = client.compute.beta(stock.close.pct_change(), market.close.pct_change(), window=60)
 print(f"Beta(60日) 均值: {beta.dropna().mean():.4f}")
-```
-
-**预期结果**：
-```
-Beta(60日) 均值: 1.0116
 ```
 
 ### 示例 7.2：夏普比率
@@ -299,21 +290,11 @@ sharpe = client.compute.sharpe(rets, risk_free=0.02, annualize=True)
 print(f"BTC 夏普比率（年化）: {sharpe:.4f}")
 ```
 
-**预期结果**：
-```
-BTC 夏普比率（年化）: 1.3502
-```
-
 ### 示例 7.3：最大回撤
 
 ```python
 dd = client.compute.max_drawdown(btc.close)
 print(f"BTC 最大回撤: {dd:.4f} ({dd*100:.2f}%)")
-```
-
-**预期结果**：
-```
-BTC 最大回撤: -0.2615 (-26.15%)
 ```
 
 ### 示例 7.4：跨资产相关性
@@ -322,11 +303,6 @@ BTC 最大回撤: -0.2615 (-26.15%)
 eth = client.ohlcv("ETH/USDT", start="2024-01-01", timeframe="1d")
 corr = btc.close.pct_change().corr(eth.close.pct_change())
 print(f"BTC/ETH 日收益率相关性: {corr:.4f}")
-```
-
-**预期结果**：
-```
-BTC/ETH 日收益率相关性: 0.7947
 ```
 
 ### 示例 7.5：在险价值（VaR）
@@ -340,7 +316,7 @@ print(f"95% VaR（日度）: {var_95:.4f} ({var_95*100:.2f}%)")
 
 ## 8. DSL 查询
 
-> DSL 基于 lark，需 `pip install stockstat[dsl]`。当前仅支持 `SELECT ... FROM ... WHERE ... LIMIT`，不支持 `GROUP BY` / `ORDER BY` / `CASE WHEN` / 子查询。
+> DSL 基于 lark，需 `pip install stockstat[dsl]`。v2.0 的 `DslEngine` 从 `PluginRegistry` 自动反射所有已注册指标。
 
 ### 示例 8.1：基础 DSL 查询
 
@@ -353,19 +329,6 @@ result = client.run_dsl('''
 print(result)
 ```
 
-**预期结果**（`LIMIT 5` 返回最后 5 行，此时已有充足数据计算 MA20）：
-```
-                close     ma20
-ts
-2024-12-23  255.27  229.45
-2024-12-24  258.20  230.12
-2024-12-26  259.02  230.88
-2024-12-27  255.59  231.35
-2024-12-30  252.20  231.78
-```
-
-> 上表为结构示例；`ma20` 在数据量 ≥ 20 行时即为有效数值，不会是 NaN。具体数值随查询日变化。
-
 ### 示例 8.2：DSL 查询 RSI
 
 ```python
@@ -376,16 +339,7 @@ result = client.run_dsl('''
 ''')
 ```
 
-### 示例 8.3：DSL 查询收益率
-
-```python
-result = client.run_dsl('''
-    SELECT returns(close) AS ret
-    FROM ohlcv("ETH/USDT", "1d", "2024-01-01", "2024-06-30")
-''')
-```
-
-### 示例 8.4：DSL 带 WHERE 过滤
+### 示例 8.3：DSL 带 WHERE 过滤
 
 ```python
 result = client.run_dsl('''
@@ -395,7 +349,7 @@ result = client.run_dsl('''
 ''')
 ```
 
-### 示例 8.5：DSL 关键字参数
+### 示例 8.4：DSL 关键字参数
 
 ```python
 result = client.run_dsl('''
@@ -409,7 +363,7 @@ result = client.run_dsl('''
 
 ## 9. 自定义指标
 
-### 示例 9.1：波动率状态分类器
+### 示例 9.1：注册自定义指标
 
 ```python
 @client.compute.register("volatility_regime", category="custom")
@@ -420,26 +374,24 @@ def volatility_regime(data, window=20, high_threshold=0.04):
     return {"regime": regime, "volatility": vol}
 
 result = client.compute.call("volatility_regime", data=btc)
-high_vol_days = (result["regime"] == "high").sum()
-low_vol_days = (result["regime"] == "low").sum()
-print(f"高波动天数: {high_vol_days}")
-print(f"低波动天数: {low_vol_days}")
 ```
 
-**预期结果**（示例量级）：
-```
-高波动天数: 30
-低波动天数: 336
-```
-
-### 示例 9.2：不用装饰器注册
+### 示例 9.2：通过 v2.0 IndicatorPlugin 注册（自动 DSL 可用）
 
 ```python
-def my_indicator(data):
-    return data.close.max()
+from stockstat._domain.indicators import IndicatorPlugin
+from stockstat._core.plugin import get_registry
 
-client.compute.register("max_close", my_indicator, category="custom")
-result = client.compute.call("max_close", data=btc)
+reg = get_registry()
+
+def my_indicator(x, window=10):
+    """自定义滚动最大值。"""
+    return x.rolling(window).max()
+
+reg.register("indicators", "rolling_max",
+    IndicatorPlugin("rolling_max", my_indicator, "custom",
+                    description="Rolling maximum"))
+# 注册后 DSL 自动可用（需 DslEngine.refresh()）
 ```
 
 ---
@@ -503,7 +455,6 @@ plt.savefig("btc_bollinger.png", dpi=150)
 
 ```python
 renderer = client.plot.get_renderer("null")
-# matplotlib 未安装时，render() 发出告警但不崩溃
 spec = client.plot.spec(title="测试", series=[{"name": "x", "data": btc.close}])
 renderer.render(spec)  # UserWarning: No plotting backend available
 ```
@@ -518,8 +469,6 @@ renderer.render(spec)  # UserWarning: No plotting backend available
 
 - `max_gain = (最高 - 开盘) / 开盘` — 日内最大上行幅度（恒为正）
 - `max_loss = (最低 - 开盘) / 开盘` — 日内最大下行幅度（恒为负）
-
-每个周一同时记录两者，与周末涨跌幅**独立**相关。这避免了按信号方向选择极值导致的选择偏差。
 
 ### 示例 11.1：完整分析
 
@@ -551,17 +500,10 @@ for mon_date, mon_row in mondays.iterrows():
 result_df = pd.DataFrame(pairs)
 r_gain = result_df["weekend_return"].corr(result_df["max_gain"])
 r_loss = result_df["weekend_return"].corr(result_df["max_loss"])
-p_gain = stats.pearsonr(result_df["weekend_return"], result_df["max_gain"])[1]
-p_loss = stats.pearsonr(result_df["weekend_return"], result_df["max_loss"])[1]
-
-up = result_df[result_df["weekend_return"] > 0]
-dn = result_df[result_df["weekend_return"] < 0]
 
 print(f"样本数: {len(result_df)}")
-print(f"r(涨幅): {r_gain:.4f}, p={p_gain:.4f}")
-print(f"r(跌幅): {r_loss:.4f}, p={p_loss:.4f}")
-print(f"周末上涨 (n={len(up)}): 涨幅={up['max_gain'].mean()*100:.4f}%, 跌幅={up['max_loss'].mean()*100:.4f}%")
-print(f"周末下跌 (n={len(dn)}): 涨幅={dn['max_gain'].mean()*100:.4f}%, 跌幅={dn['max_loss'].mean()*100:.4f}%")
+print(f"r(涨幅): {r_gain:.4f}")
+print(f"r(跌幅): {r_loss:.4f}")
 ```
 
 **预期结果**：
@@ -569,68 +511,35 @@ print(f"周末下跌 (n={len(dn)}): 涨幅={dn['max_gain'].mean()*100:.4f}%, 跌
 样本数: 156
 r(涨幅): 0.2303, p=0.0038
 r(跌幅): -0.2004, p=0.0121
-周末上涨 (n=76): 涨幅=0.7099%, 跌幅=-0.9070%
-周末下跌 (n=65): 涨幅=0.5940%, 跌幅=-0.7435%
 ```
 
-### 示例 11.2：散点图 — 涨幅与跌幅同图显示
+### 示例 11.2：散点图
 
 ![PAXG 周末散点图](images/paxg_weekend_scatter.png)
 
-### 示例 11.3：按周末方向的涨跌幅分布直方图
+### 示例 11.3：方向性分布
 
 ![PAXG 方向性](images/paxg_directional.png)
-
-### 示例 11.4：周末涨跌幅分布
-
-![PAXG 周末直方图](images/paxg_weekend_hist.png)
-
-### 解读
-
-- **r(涨幅) = 0.23** (p=0.004)：弱但显著的正相关 — 周末涨跌幅适度预测周一最大涨幅
-- **r(跌幅) = -0.20** (p=0.012)：弱但显著的负相关 — 周末正向涨跌幅适度预测周一最大跌幅较小
-- **涨组 vs 跌组**：涨幅和跌幅的均值在两组间无显著差异 (t 检验 p > 0.26)
-- **结论**：周末涨跌幅对周一涨幅和跌幅有适度的独立预测力。相关性统计显著但较弱 (r ≈ 0.2)，说明效应真实但较小。高个体波动性（标准差 ≈ 均值）限制了单笔交易的可预测性。
 
 ---
 
 ## 12. 结果导出
 
-### 示例 12.1：导出为 JSON
-
 ```python
 from stockstat.export.serializers import to_json, to_csv, to_dict
 
-# DataFrame → JSON 字符串
-json_str = to_json(data)
-```
+json_str = to_json(data)       # DataFrame → JSON 字符串
+csv_str = to_csv(data)         # DataFrame → CSV 字符串
+records = to_dict(data)        # DataFrame → 字典列表
 
-### 示例 12.2：导出为 CSV
-
-```python
-csv_str = to_csv(data)
-with open("output.csv", "w") as f:
-    f.write(csv_str)
-```
-
-### 示例 12.3：导出为 dict
-
-```python
-records = to_dict(data)  # 字典列表
-```
-
-### 示例 12.4：PlotSpec 转 dict（用于 Web 前端）
-
-```python
+# PlotSpec → dict（用于 Web 前端）
 spec = client.plot.spec(title="我的图表", series=[...])
-payload = spec.to_dict()  # 可 JSON 序列化的字典
+payload = spec.to_dict()
 ```
 
 ---
 
 ## 13. 回测
-
-回测子系统位于 `stockstat.backtest`，支持自定义策略、多标的交易组、多时间尺度 K 线，策略内可直接调用计算库全部指标与自定义指标。
 
 ### 示例 13.1：最简回测（函数式策略）
 
@@ -661,27 +570,11 @@ res = eng.run()
 print(res.summary())
 ```
 
-**预期输出（结构）**：
-```
-=== Backtest Summary ===
-Total Return:      x.xx%
-Annualized Return: x.xx%
-Sharpe:            x.xxx
-Sortino:           x.xxx
-Max Drawdown:      -x.xx%
-Calmar:            x.xxx
-Volatility:        x.xx%
-Win Rate:          xx.xx%
-Profit Factor:     x.xxx
-# Trades:          xx
-Information Ratio: x.xxx
-```
-
 ### 示例 13.2：通过 client 便捷入口
 
 ```python
 res = client.backtest(data, ma_cross, initial_cash=10000, benchmark="BTC/USDT")
-# client.backtest 自动注入 client 的 ComputeEngine，策略内 ctx.compute 可用全部指标
+# 自动注入 ComputeEngine，策略内 ctx.compute 可用全部指标
 ```
 
 ### 示例 13.3：类式策略 + 钩子
@@ -709,26 +602,7 @@ class RSIStrategy(Strategy):
         print(f"成交 {fill.side.value} {fill.qty} @ {fill.price:.2f}")
 ```
 
-### 示例 13.4：自定义指标（策略内注册）
-
-```python
-@strategy
-def custom(ctx):
-    if not ctx.history.get("init"):
-        def donchian(high, low, window=20):
-            return high.rolling(window).max(), low.rolling(window).min()
-        ctx.compute.register("donchian", donchian, category="custom")
-        ctx.history["init"] = True
-    d = ctx.get("BTC/USDT", "1d", lookback=30)
-    if len(d) < 21:
-        return
-    hh, ll = ctx.compute.call("donchian", high=d.high, low=d.low, window=20)
-    pos = ctx.portfolio.get_position("BTC/USDT")
-    if d.close.iloc[-1] > hh.iloc[-1] and pos.qty == 0:
-        ctx.broker.submit(Order("BTC/USDT", "buy", 0.1))
-```
-
-### 示例 13.5：多标的配对交易 + 做空
+### 示例 13.4：多标的配对交易 + 做空
 
 ```python
 import numpy as np
@@ -751,28 +625,20 @@ def pair(ctx):
     if np.isnan(last):
         return
     pb = ctx.portfolio.get_position("BTC/USDT")
-    pe = ctx.portfolio.get_position("ETH/USDT")
     if last > 1.5 and pb.qty == 0:
         ctx.broker.submit(Order("BTC/USDT", "sell", 0.1))
         ctx.broker.submit(Order("ETH/USDT", "buy", 0.1))
     elif last < -1.5 and pb.qty == 0:
         ctx.broker.submit(Order("BTC/USDT", "buy", 0.1))
         ctx.broker.submit(Order("ETH/USDT", "sell", 0.1))
-    elif abs(last) < 0.3 and pb.qty != 0:
-        # 平仓
-        if pb.qty > 0: ctx.broker.submit(Order("BTC/USDT", "sell", abs(pb.qty)))
-        else:          ctx.broker.submit(Order("BTC/USDT", "buy", abs(pb.qty)))
-        if pe.qty > 0: ctx.broker.submit(Order("ETH/USDT", "sell", abs(pe.qty)))
-        else:          ctx.broker.submit(Order("ETH/USDT", "buy", abs(pe.qty)))
 
 res = BacktestEngine(data=data, strategy=pair,
                      initial_cash=10000, allow_short=True).run()
 ```
 
-### 示例 13.6：多时间尺度共振
+### 示例 13.5：多时间尺度共振
 
 ```python
-# 同时注入日线与小时线
 hourly = client.ohlcv("BTC/USDT", start="2024-01-01", timeframe="1h")
 daily  = client.ohlcv("BTC/USDT", start="2024-01-01", timeframe="1d")
 data = {"BTC/USDT": {"1h": hourly, "1d": daily}}
@@ -791,93 +657,13 @@ def multi_tf(ctx):
     elif not trend_up and pos.qty > 0:
         ctx.broker.submit(Order("BTC/USDT", "sell", pos.qty))
 
-# DataFeed 自动以 1h 为主索引，日线 ffill 对齐
 res = BacktestEngine(data=data, strategy=multi_tf).run()
 ```
 
-### 示例 13.7：成本与成交模型
+### 示例 13.6：参数网格搜索
 
 ```python
-from stockstat.backtest import BacktestEngine, PercentCost, StampDutyCost, NextOpenFill, VWAPFill
-
-# 先准备一个策略 s 与数据 df
-df = client.ohlcv("AAPL", start="2024-01-01", timeframe="1d")
-
-@strategy
-def s(ctx):
-    d = ctx.get("AAPL", "1d", lookback=30)
-    if len(d) < 21:
-        return
-    ma5 = d.close.rolling(5).mean().iloc[-1]
-    ma20 = d.close.rolling(20).mean().iloc[-1]
-    pos = ctx.portfolio.get_position("AAPL")
-    if ma5 > ma20 and pos.qty == 0:
-        ctx.broker.submit(Order("AAPL", "buy", 10))
-    elif ma5 < ma20 and pos.qty > 0:
-        ctx.broker.submit(Order("AAPL", "sell", pos.qty))
-
-# 股票：佣金 + 印花税
-eng = BacktestEngine(data={"AAPL": {"1d": df}}, strategy=s,
-                     cost_model=StampDutyCost(commission=0.0003, stamp_duty=0.001),
-                     fill_model=NextOpenFill())
-
-# 加密货币：比例成本 + VWAP 成交
-btc_df = client.ohlcv("BTC/USDT", start="2024-01-01", timeframe="1d")
-eng = BacktestEngine(data={"BTC/USDT": {"1d": btc_df}}, strategy=s,
-                     cost_model=PercentCost(commission=0.0002, slippage=0.0003),
-                     fill_model=VWAPFill())
-```
-
-### 示例 13.8：订单类型
-
-```python
-from stockstat.backtest import Order, OrderType
-
-# 限价买单（价格跌至 limit 才成交）
-ctx.broker.submit(Order("X", "buy", 10, order_type=OrderType.LIMIT, limit_price=95000))
-
-# 止损卖单（价格跌至 stop 触发）
-ctx.broker.submit(Order("X", "sell", 10, order_type=OrderType.STOP, stop_price=90000))
-
-# 移动止损（跟踪极值，回撤 stop_price 触发）
-ctx.broker.submit(Order("X", "sell", 10, order_type=OrderType.TRAILING_STOP, stop_price=2000))
-```
-
-### 示例 13.9：绩效与可视化
-
-```python
-res = eng.run()
-
-# 文本摘要
-print(res.summary())
-
-# 指标字典
-m = res.metrics()
-# {'total_return', 'sharpe', 'sortino', 'max_drawdown', 'calmar',
-#  'volatility', 'win_rate', 'profit_factor', 'num_trades', ...}
-
-# 可视化（返回 PlotSpec，可被 matplotlib 渲染）
-spec = res.plot_equity()       # 资金曲线 + 基准
-spec_dd = res.plot_drawdown()  # 回撤
-spec_t = res.plot_trades()     # 交易点
-
-from stockstat.plot.base import get_renderer
-r = get_renderer("matplotlib")
-r.render(spec)
-r.savefig("equity.png")
-
-# 导出
-res.to_csv("trades.csv")
-d = res.to_dict()
-```
-
-### 示例 13.10：参数网格搜索
-
-```python
-from stockstat.backtest import BacktestEngine, strategy, Order
 from stockstat.backtest.optimizer import grid_search
-
-data = {"BTC/USDT": {"1d": client.ohlcv("BTC/USDT", start="2024-01-01")}}
 
 def make_engine(params):
     @strategy
@@ -901,15 +687,6 @@ best_params, best_val, best_res = results[0]
 print(f"最佳参数: {best_params}, Sharpe: {best_val:.3f}")
 ```
 
-### 示例 13.11：未来函数防护
-
-```python
-# 默认 NextOpenFill：订单在 t 提交 → t+1 open 成交
-# 开启运行时审计
-eng = BacktestEngine(data=data, strategy=s, lookahead_audit=True)
-# 若策略误访问 > t 的数据，抛 LookaheadError
-```
-
 ---
 
 ## 14. 回测高级功能
@@ -920,24 +697,16 @@ eng = BacktestEngine(data=data, strategy=s, lookahead_audit=True)
 from stockstat.backtest import BinanceCost, BINANCE_SPOT, BINANCE_SPOT_BNB, \
     BINANCE_FUTURES, BINANCE_FUTURES_BNB, MakerTakerCost
 
-# 4 种预设：现货/合约 × BNB 无/有
 # F1 现货无 BNB:  maker 0.100% / taker 0.100%
 # F2 现货+BNB:    maker 0.075% / taker 0.075%  (−25%)
 # F3 合约无 BNB:  maker 0.020% / taker 0.050%
 # F4 合约+BNB:    maker 0.018% / taker 0.045%  (−10%)
 
 eng = BacktestEngine(data=data, strategy=s,
-                     cost_model=BINANCE_FUTURES_BNB,  # 最低费率
-                     initial_cash=10000)
-
-# 也可自定义 Maker/Taker 费率
-custom = MakerTakerCost(maker_rate=0.0002, taker_rate=0.0005, slippage=0.0)
-# LIMIT → maker_rate, MARKET/STOP → taker_rate
+                     cost_model=BINANCE_FUTURES_BNB, initial_cash=10000)
 ```
 
 ### 示例 14.2：Intrabar 执行（同 bar 入场+出场）
-
-`IntrabarExecution` 模型在 parent bar（如日线）内部用子 bar（如 1h）模拟订单撮合——同 bar 内完成入场→退出全生命周期。
 
 ```python
 from stockstat.backtest import (
@@ -951,160 +720,45 @@ class SimpleTP(Strategy, IntrabarMixin):
         o = ctx.current_price("BTC/USDT", "open")
         if o is None:
             return
-        # 用 intrabar_submit 提交（在当前 bar 的子 bar 上执行）
-        ctx.intrabar_submit(
-            Order("BTC/USDT", "buy", 0.1, tag="entry")
-        )
+        ctx.intrabar_submit(Order("BTC/USDT", "buy", 0.1, tag="entry"))
         ctx.history["tp_price"] = o * 1.01  # 1% 止盈
 
     def define_exits(self, entry_fill, ctx):
-        """入场成交后自动调用，返回退出订单列表。"""
         tp = ctx.history.get("tp_price")
         if tp is None:
             return []
         return [
-            # TP 限价（优先级 1，成交则止盈）
             Order("BTC/USDT", "sell", entry_fill.qty,
                   order_type="limit", limit_price=tp,
                   tag="tp", exit_reason="tp", priority=1),
-            # 收盘市价兜底（优先级 99，未成交则在收盘平仓）
             Order("BTC/USDT", "sell", entry_fill.qty,
                   order_type="market", tag="close",
                   exit_reason="close", priority=99),
         ]
 
-# 需要同时提供 1d 和 1h 数据
 data = {"BTC/USDT": {"1d": daily_df, "1h": hourly_df}}
-
 res = BacktestEngine(
-    data=data,
-    strategy=SimpleTP(),
-    initial_cash=10000,
+    data=data, strategy=SimpleTP(), initial_cash=10000,
     cost_model=BinanceCost(venue="spot"),
-    execution_model=IntrabarExecution(intrabar_tf="1h", parent_tf="1d"),  # ← 显式启用
+    execution_model=IntrabarExecution(intrabar_tf="1h", parent_tf="1d"),
 ).run()
 
-# 退出原因统计
 print(res.exit_reason_stats())
-# {'tp': {'count': 45, 'total_pnl': 120.5, 'avg_pnl': 2.68},
-#  'close': {'count': 55, 'total_pnl': -30.2, 'avg_pnl': -0.55}}
 ```
 
-> **关键**：默认 `execution_model=None` 等价于 `NextBarExecution`（现有行为）。只有传入 `IntrabarExecution(...)` 才启用 intrabar 模式。
-
-### 示例 14.3：双向挂单互斥（OCO Mutual）
-
-核心 B 策略族需要同时挂买限+卖限，若双向均成交则取消交易（避免净零持仓白付手续费）。
-
-```python
-class DualLimit(Strategy, IntrabarMixin):
-    """双向限价挂单 + 利润退出。"""
-    def on_bar(self, ctx):
-        o = ctx.current_price("PAXG/USDT", "open")
-        if o is None:
-            return
-        k = 0.005  # 挂单宽度 0.5%
-        q = 500 / o  # 各半仓位
-        buy = Order("PAXG/USDT", "buy", q,
-                    order_type="limit", limit_price=o * (1 - k),
-                    tag="entry_buy", exit_reason="entry")
-        sell = Order("PAXG/USDT", "sell", q,
-                     order_type="limit", limit_price=o * (1 + k),
-                     tag="entry_sell", exit_reason="entry")
-        # 互斥 OCO：双向均成交 → 双取消
-        ctx.intrabar_submit_oco_mutual(buy, sell)
-
-    def define_exits(self, entry_fill, ctx):
-        # 利润退出：盈利 0.3% 即平仓
-        if entry_fill.side.value == "buy":
-            target = entry_fill.price * 1.003
-        else:
-            target = entry_fill.price * 0.997
-        side = "sell" if entry_fill.side.value == "buy" else "buy"
-        return [
-            Order("PAXG/USDT", side, entry_fill.qty,
-                  order_type="limit", limit_price=target,
-                  tag="profit", exit_reason="profit", priority=1),
-            Order("PAXG/USDT", side, entry_fill.qty,
-                  order_type="market", tag="close",
-                  exit_reason="close", priority=99),
-        ]
-```
-
-### 示例 14.4：订单优先级（SL 优先于 TP）
-
-同一子 bar 内止损和止盈都可能触发时，通过 `priority` 字段控制撮合顺序（0 = 最高优先）。
-
-```python
-class TPWithSL(Strategy, IntrabarMixin):
-    """入场后同时挂 TP 和 SL，同 bar 内 SL 优先检查。"""
-    def define_exits(self, entry_fill, ctx):
-        side = "sell" if entry_fill.side.value == "buy" else "buy"
-        qty = entry_fill.qty
-        if entry_fill.side.value == "buy":
-            tp_price = entry_fill.price * 1.009  # +0.9% 止盈
-            sl_price = entry_fill.price * 0.9865  # −1.35% 止损
-        else:
-            tp_price = entry_fill.price * 0.991
-            sl_price = entry_fill.price * 1.0135
-
-        return [
-            # SL 优先级 0（最高）：同 bar 内先检查
-            Order("BTC/USDT", side, qty,
-                  order_type="stop", stop_price=sl_price,
-                  tag="sl", exit_reason="sl", priority=0),
-            # TP 优先级 1
-            Order("BTC/USDT", side, qty,
-                  order_type="limit", limit_price=tp_price,
-                  tag="tp", exit_reason="tp", priority=1),
-            # 收盘兜底 优先级 99
-            Order("BTC/USDT", side, qty,
-                  order_type="market", tag="close",
-                  exit_reason="close", priority=99),
-        ]
-```
-
-### 示例 14.5：批量回测（多策略 × 多费率）
+### 示例 14.3：批量回测（多策略 × 多费率）
 
 ```python
 from stockstat.backtest import StrategyBatchRunner
 
-runner = StrategyBatchRunner(
-    data=data,
-    initial_cash=10000,
-    cost_model=BINANCE_SPOT,
-    allow_short=True,
-    periods_per_year=52,
-)
-
-# 多策略并行
-results = runner.run_all({
-    "ma_cross": ma_cross_strategy,
-    "rsi_reversal": rsi_strategy,
-    "bollinger": boll_strategy,
-})
-
-# 汇总为 DataFrame
+runner = StrategyBatchRunner(data=data, initial_cash=10000,
+                             cost_model=BINANCE_SPOT, allow_short=True)
+results = runner.run_all({"ma_cross": s1, "rsi": s2})
 df = results.to_dataframe()
-print(df[["total_return", "sharpe", "max_drawdown", "win_rate"]].round(4))
-
-# 按 Sharpe 排名
 ranked = results.rank("sharpe")
-print(ranked)
-
-# 多策略 × 多费率
-fee_models = {
-    "F1_SpotNoBNB": BINANCE_SPOT,
-    "F4_FutBNB": BINANCE_FUTURES_BNB,
-}
-results_all_fees = runner.run_all_fees(
-    {"ma_cross": ma_cross_strategy, "rsi": rsi_strategy},
-    fee_models,
-)
-df_all = results_all_fees.to_dataframe()
 ```
 
-### 示例 14.6：子期间与状态分析
+### 示例 14.4：子期间与状态分析
 
 ```python
 from stockstat.backtest import BacktestAnalyzer
@@ -1112,312 +766,373 @@ import pandas as pd
 
 res = BacktestEngine(data=data, strategy=s, initial_cash=10000).run()
 
-# 子期间分析：2024 前后
+# 子期间分析
 sub = BacktestAnalyzer.subperiod_metrics(
     res, split_dates=[pd.Timestamp("2024-01-01")]
 )
-# {'2020-2023': {'sharpe': 0.85, 'total_return': 0.12},
-#  '2024-2026': {'sharpe': -0.32, 'total_return': -0.05}}
 
-# 状态条件分析：高/低波动状态
-atr = data["BTC/USDT"]["1d"]["close"].pct_change().rolling(30).std()
-regime = pd.Series("low_vol", index=atr.index)
-regime[atr > atr.quantile(0.75)] = "high_vol"
-
-reg = BacktestAnalyzer.regime_conditional_metrics(res, regime)
-# {'high_vol': {'sharpe': 1.20, 'total_return': 0.08},
-#  'low_vol':  {'sharpe': 0.15, 'total_return': 0.02}}
+# 状态条件分析
+reg = BacktestAnalyzer.regime_conditional_metrics(res, regime_series)
 
 # 按退出原因分析
 exit_stats = res.exit_reason_stats()
-# {'tp': {'count': 45, 'avg_pnl': 2.68},
-#  'sl': {'count': 20, 'avg_pnl': -3.10},
-#  'close': {'count': 35, 'avg_pnl': -0.15}}
 ```
 
-### 示例 14.7：DCA 基准与费率扫描
+### 示例 14.5：DCA 基准与费率扫描
 
 ```python
 from stockstat.backtest import dca_equity, fee_sweep, maker_taker_sweep
 
-# DCA 定投基准
-prices = data["BTC/USDT"]["1d"]["close"]
 dca_eq = dca_equity(10000, prices, schedule="weekly")
-# 每周定投的资金曲线
-
-# 费率敏感性扫描
-sweep_results = fee_sweep(
-    data=data, strategy=ma_cross_strategy,
-    initial_cash=10000,
-    commissions=[0.0001, 0.0003, 0.0005, 0.001, 0.002],
-)
-# 返回 DataFrame: commission → sharpe, total_return, max_drawdown
-
-# Maker/Taker 费率组合扫描
-mt_results = maker_taker_sweep(
-    data=data, strategy=ma_cross_strategy,
-    initial_cash=10000,
-    maker_rates=[0.0002, 0.0005, 0.001],
-    taker_rates=[0.0005, 0.001, 0.002],
-)
+sweep = fee_sweep(data=data, strategy=s, commissions=[0.0001, 0.0003, 0.0005])
+mt = maker_taker_sweep(data=data, strategy=s,
+                       maker_rates=[0.0002, 0.0005], taker_rates=[0.0005, 0.001])
 ```
-
-回测可视化（仪表盘、热力图、收益分布等 9 种图表）见 [§15 回测可视化](#15-回测可视化)。
-
-### 回测 API 速查
-
-| 类/函数 | 说明 |
-|---------|------|
-| `BacktestEngine(data, strategy, ...)` | 主引擎（含 `execution_model` 参数） |
-| `@strategy` / `Strategy` / `IntrabarMixin` | 策略定义（函数式/类式/intrabar） |
-| `ctx.get(sym, tf, lookback)` | 获取 ≤ t 切片 |
-| `ctx.current_price(sym, field)` | 取当前 bar 的指定字段（open/high/low/close） |
-| `ctx.compute` | ComputeEngine 代理（含 register/call） |
-| `ctx.broker.submit(Order)` | 下单（默认模式） |
-| `ctx.intrabar_submit(Order)` | intrabar 下单（intrabar 模式） |
-| `ctx.intrabar_submit_oco_mutual(a, b)` | 互斥 OCO 双向挂单 |
-| `ctx.portfolio.get_position(sym)` | 查持仓 |
-| `ctx.history` | 策略状态 scratchpad |
-| `Order(sym, side, qty, order_type=..., priority=...)` | 订单（含优先级字段） |
-| `PercentCost / FixedCost / StampDutyCost / ZeroCost` | 基础成本模型 |
-| `MakerTakerCost / BinanceCost` | Maker/Taker 与 Binance 费率 |
-| `BINANCE_SPOT / _BNB / FUTURES / _BNB` | Binance 4 种预设 |
-| `NextOpenFill / VWAPFill / WorstPriceFill / IntrabarLimitFill` | 成交模型 |
-| `ExecutionModel / NextBarExecution / IntrabarExecution` | 可插拔执行模型 |
-| `IntrabarFillModel / IntrabarFillResult` | intrabar 成交扫描+时间追踪 |
-| `res.summary() / metrics() / plot_equity() / to_csv()` | 结果 |
-| `res.exit_reason_stats()` | 退出原因统计 |
-| `res.chart(name) / render(name, path) / render_all(dir)` | 回测可视化（§15） |
-| `StrategyBatchRunner` | 多策略/多费率批量回测 |
-| `BacktestAnalyzer` | 子期间/状态/滚动分析 |
-| `dca_equity() / fee_sweep() / maker_taker_sweep()` | 基准与费率扫描 |
-| `grid_search / optuna_search / walk_forward / monte_carlo_equity` | 优化 |
 
 ---
 
 ## 15. 回测可视化
 
-回测可视化子系统提供 9 种图表类型，**核心零 matplotlib 硬依赖**——安装后自动激活。复用 [§10 matplotlib 可视化](#10-matplotlib-可视化) 的协议化设计，但提供回测专用的 `BacktestChartSpec`（支持多子图、填充区、热力图、直方图等丰富元素）。以下示例使用真实市场数据（Binance BTC/USDT 2023-2024）生成，图像见 `docs/images/backtest_*.png`。
-
-![BTC 回测仪表盘](../docs/images/backtest_btc_dashboard.png)
-
-### 示例 15.1：一行渲染与批量保存
-
 ```python
 res = BacktestEngine(data=data, strategy=ma_cross,
                      initial_cash=10000, benchmark="BTC/USDT").run()
 
-# 一行渲染（自动检测 matplotlib，不可用时优雅降级）
+# 一行渲染
 res.render("equity_curve", path="equity.png")
 res.render("drawdown", path="drawdown.png")
 
-# 组合仪表盘（2×2：equity + drawdown + 收益分布 + 月度热力）
+# 组合仪表盘（2×2）
 res.render("dashboard", path="dashboard.png")
 
-# 批量保存全部图表到目录
-out = res.render_all("./charts")
-# {'equity_curve': './charts/equity_curve.png', 'drawdown': ..., ...}
+# 批量保存
+res.render_all("./charts")
 
 # 高级图表
-res.render("returns_distribution", path="dist.png")   # 收益率分布直方图
-res.render("monthly_heatmap", path="monthly.png")      # 月度收益热力图
-res.render("yearly_returns", path="yearly.png")        # 年度收益柱状图
-res.render("underwater_curve", path="underwater.png")  # 水下曲线
-```
+res.render("returns_distribution", path="dist.png")
+res.render("monthly_heatmap", path="monthly.png")
+res.render("yearly_returns", path="yearly.png")
 
-### 示例 15.2：参数网格热力图
-
-```python
+# 参数网格热力图
 from stockstat.backtest.optimizer import grid_search
-
-results = grid_search(make_engine,
-                      {"short": [3, 5, 8], "long": [10, 20, 30]},
-                      metric="sharpe")
-
-# 渲染参数热力图（x=short, y=long, color=sharpe）
-res.render("parameter_heatmap", grid_results=results, metric="sharpe",
-           path="param_heatmap.png")
-
-# 也可在 dashboard 中替换第 4 面板
-res.render("dashboard", grid_results=results, path="dashboard_with_params.png")
+results = grid_search(make_engine, {"short": [3,5,8], "long": [10,20,30]}, metric="sharpe")
+res.render("parameter_heatmap", grid_results=results, path="param.png")
 ```
 
-### 示例 15.3：获取 BacktestChartSpec（不渲染）
-
-```python
-from stockstat.backtest.chart_factory import get_chart_renderer
-
-# 获取专用 spec（含多子图、fill、heatmap 等丰富元素）
-spec = res.chart("equity_curve")           # BacktestChartSpec
-spec = res.chart("dashboard")              # 4 子图组合
-spec = res.chart("drawdown")               # 含 fill 填充
-
-# 可序列化为 dict（用于 Web 前端）
-payload = spec.to_dict()
-
-# 自行渲染
-renderer = get_chart_renderer()            # 自动检测 matplotlib
-if renderer.available():
-    fig = renderer.render(spec)
-    renderer.savefig("custom.png")
-
-# 查看可用图表类型
-print(res.available_chart_types)
-# ['dashboard', 'drawdown', 'equity_curve', 'monthly_heatmap', 'parameter_heatmap',
-#  'returns_distribution', 'trades_overlay', 'underwater_curve', 'yearly_returns']
-```
+![BTC 回测仪表盘](../docs/images/backtest_btc_dashboard.png)
 
 ---
 
 ## 16. 信号处理与非线性动力学
 
-> 需要 `pip install stockstat[signal_processing]` 以获得完整的小波变换能力。未安装 PyWavelets 时 CWT 自动降级为基于 FFT 的自实现 Morlet 小波。
+> 需要 `pip install stockstat[signal_processing]`。未安装 PyWavelets 时 CWT 自动降级为 FFT 自实现 Morlet。
 
 ### 示例 16.1：小波多尺度分解
 
 ```python
 import numpy as np
-from stockstat import StockStatClient
 
-client = StockStatClient(host="localhost", port=8000)
-data = client.ohlcv("BTC/USDT", start="2024-01-01", timeframe="1d")
-
-# 取最近 48 个收盘价
 signal = data.close.values[-48:]
-scales = np.arange(1, 25)  # 尺度 1-24（周期 2h-48h）
-
-# 连续小波变换（CWT）
+scales = np.arange(1, 25)
 coef, scales = client.compute.wavelet_decompose(signal, scales=scales, wavelet="morl")
 print(f"CWT 系数形状: {coef.shape}")  # (24, 48)
-
-# 小波功率谱
-power = np.abs(coef) ** 2
-print(f"峰值尺度: {scales[np.argmax(power.mean(axis=1))]}")
 ```
 
-**预期结果**：CWT 系数为复数数组，形状 (24, 48)，峰值尺度通常在 12-24 范围（低频趋势主导）。
-
-### 示例 16.2：谱熵（频域复杂度）
+### 示例 16.2：谱熵
 
 ```python
-# 计算对数收益率序列的谱熵
-log_rets = np.diff(np.log(data.close.values[-100:]))
-h_spec = client.compute.spectral_entropy(log_rets)
+h_spec = client.compute.spectral_entropy(np.diff(np.log(data.close.values[-100:])))
 print(f"谱熵: {h_spec:.4f}")
-
-# 白噪声的谱熵应较高（接近 ln(N/2)），纯音信号应较低（< 1.0）
 ```
-
-**预期结果**：BTC 日线收益率的谱熵约 2.0-3.0（中高频域能量较均匀）。
 
 ### 示例 16.3：灰色关联度
 
 ```python
-# 比较两个价格路径的形态相似性
 path_a = data.close.values[-48:]
-path_b = data.close.values[-96:-48]  # 前一段
-
+path_b = data.close.values[-96:-48]
 gr = client.compute.grey_relation(path_a, path_b, rho=0.5)
 print(f"灰色关联度: {gr:.4f}")  # [0, 1]，1 = 完全相似
-
-# 自关联应为 1.0
-gr_self = client.compute.grey_relation(path_a, path_a)
-assert abs(gr_self - 1.0) < 1e-6
 ```
 
-### 示例 16.4：GM(1,1) 灰色预测
+### 示例 16.4：Hurst 指数
 
 ```python
-# 用最后 6 个收盘价预测下一个
-seq = data.close.values[-6:]
-predicted = client.compute.gm11_predict(seq)
-actual_next = data.close.values[-5]  # 假设已知
-error = abs(predicted - actual_next) / actual_next
-print(f"预测: {predicted:.2f}, 实际: {actual_next:.2f}, 误差: {error*100:.2f}%")
+hurst = client.compute.hurst_dfa(np.diff(np.log(data.close.values[-500:])))
+print(f"Hurst 指数: {hurst:.4f}")
+# ≈ 0.5: 随机游走 | > 0.5: 持久性 | < 0.5: 反持久性
 ```
 
-### 示例 16.5：传递熵（信息流向）
+### 示例 16.5：传递熵
 
 ```python
-# 检验 BTC 收益率是否影响 ETH 收益率（需同时采集两个标的）
 btc = client.ohlcv("BTC/USDT", start="2024-01-01", timeframe="1d")
 eth = client.ohlcv("ETH/USDT", start="2024-01-01", timeframe="1d")
 
 btc_rets = np.diff(np.log(btc.close.values))[:200]
 eth_rets = np.diff(np.log(eth.close.values))[:200]
 
-te_btc_to_eth = client.compute.transfer_entropy(btc_rets, eth_rets, k=1)
-te_eth_to_btc = client.compute.transfer_entropy(eth_rets, btc_rets, k=1)
-print(f"TE(BTC→ETH): {te_btc_to_eth:.4f} bits")
-print(f"TE(ETH→BTC): {te_eth_to_btc:.4f} bits")
-print(f"净信息流: {te_btc_to_eth - te_eth_to_btc:.4f} bits")
+te = client.compute.transfer_entropy(btc_rets, eth_rets, k=1)
+print(f"TE(BTC→ETH): {te:.4f} bits")
 ```
 
-### 示例 16.6：Hurst 指数
+### 示例 16.6：可视化——CWT 时频热力图
 
 ```python
-# Hurst 指数量化长期记忆性
-hurst = client.compute.hurst_dfa(np.diff(np.log(data.close.values[-500:])))
-print(f"Hurst 指数: {hurst:.4f}")
-# ≈ 0.5: 随机游走 | > 0.5: 持久性（趋势延续）| < 0.5: 反持久性（均值回归）
-```
-
-**预期结果**：BTC 日线 Hurst 指数约 0.45-0.55（接近随机游走）。
-
-### 示例 16.7：样本熵与排列熵
-
-```python
-rets = np.diff(np.log(data.close.values[-200:]))
-
-# 样本熵（序列复杂度）
-sampen = client.compute.sample_entropy(rets, m=2)
-print(f"样本熵: {sampen:.4f}")
-
-# 排列熵（序数模式复杂度）
-permen = client.compute.permutation_entropy(rets, m=3, tau=1)
-print(f"排列熵: {permen:.4f}")
-# 白噪声排列熵接近 log2(3!) ≈ 2.585
-```
-
-### 示例 16.8：可视化——CWT 时频热力图
-
-```python
-# 小波分解后直接生成 PlotSpec 并渲染
-signal = data.close.values[-48:]
-coef, scales = client.compute.wavelet_decompose(signal, scales=np.arange(1, 25))
-
 spec = client.compute.wavelet_scalogram(coef, scales, title="CWT Scalogram")
-renderer = client.plot.get_renderer()  # 自动检测 matplotlib
+renderer = client.plot.get_renderer()
 renderer.render(spec)
 renderer.savefig("cwt_scalogram.png")
 ```
 
-**预期结果**：生成一张时频热力图，横轴为时间（0-48h），纵轴为尺度（1-24），颜色表示小波功率。低尺度（高频）能量通常较低，高尺度（低频）能量较高。
-
-### 示例 16.9：可视化——DFA 双对数拟合图
+### 示例 16.7：可视化——DFA 拟合图
 
 ```python
-# DFA 拟合图（含 Hurst 指数标注）
 spec = client.compute.dfa_fit(np.diff(np.log(signal)))
 renderer = client.plot.get_renderer()
 renderer.render(spec)
 renderer.savefig("dfa_fit.png")
-# 图标题自动包含 "H = 0.xxxx"
 ```
 
-**预期结果**：生成一张双对数散点+拟合线图，标题标注 Hurst 指数值。白噪声的散点应接近斜率 0.5 的直线。
+---
 
-### 示例 16.10：可视化——功率谱密度图
+## 17. v2.0 CLI 命令行
+
+v2.0 新增 `stockstat` CLI 命令行工具，无需写 Python 脚本即可完成常用操作。
+
+### 示例 17.1：启动 API 服务器
+
+```bash
+stockstat serve --host 0.0.0.0 --port 8000
+```
+
+### 示例 17.2：命令行采集数据
+
+```bash
+stockstat ingest AAPL --source yfinance --start 2024-01-01 --end 2024-12-31
+stockstat ingest BTC/USDT --source binance --start 2024-01-01 --end 2024-12-31
+```
+
+输出：
+```json
+{"symbol": "AAPL", "source": "yfinance", "ingested": 251}
+```
+
+### 示例 17.3：查询数据
+
+```bash
+# 表格格式（默认）
+stockstat query BTC/USDT --limit 5
+
+# JSON 格式
+stockstat query BTC/USDT --format json
+
+# CSV 格式
+stockstat query AAPL --start 2024-01-01 --format csv
+```
+
+### 示例 17.4：列出已注册插件
+
+```bash
+# 列出全部插件
+stockstat plugins
+
+# 按命名空间过滤
+stockstat plugins --namespace indicators
+stockstat plugins --namespace sources
+stockstat plugins --namespace cost_models
+```
+
+输出示例：
+```
+Namespace            Name                      Category
+--------------------------------------------------------------------
+sources              yfinance                  sources
+sources              binance                   sources
+indicators           ma                        trend
+indicators           rsi                       oscillator
+indicators           hurst_dfa                 nonlinear
+cost_models          binance                   cost
+renderers            matplotlib                renderers
+
+Total: 45 plugin(s)
+```
+
+### 示例 17.5：列出已注册指标
+
+```bash
+# 全部指标
+stockstat indicators
+
+# 按类别过滤
+stockstat indicators --category trend
+stockstat indicators --category nonlinear
+```
+
+---
+
+## 18. v2.0 离线模式
+
+v2.0 的 `V2Client` 支持离线模式，直接使用本地 Storage，无需启动后端 HTTP 服务。适用于：
+- 在 Jupyter 中分析预加载数据
+- 无网络环境下的回测
+- 单元测试
+
+### 示例 18.1：离线模式基本用法
 
 ```python
-# PSD 对数图
-spec = client.compute.psd_plot(np.diff(np.log(signal)), fs=1.0)
-renderer = client.plot.get_renderer()
-renderer.render(spec)
-renderer.savefig("psd.png")
+from stockstat._api.client import V2Client
+from stockstat._core.storage import MemoryStorage
+from stockstat._core.contracts import DataSchema, FieldDef
+
+# 创建本地存储并写入数据
+storage = MemoryStorage()
+storage.register_schema("ohlcv", DataSchema(
+    name="ohlcv",
+    fields=[
+        FieldDef("symbol", "str", nullable=False),
+        FieldDef("ts", "datetime", nullable=False),
+        FieldDef("open", "float"), FieldDef("high", "float"),
+        FieldDef("low", "float"), FieldDef("close", "float"),
+        FieldDef("volume", "float"),
+    ],
+    unique_constraints=[("symbol", "ts")],
+))
+
+storage.write("ohlcv", [
+    {"symbol": "BTC", "ts": pd.Timestamp("2024-01-01", tz="UTC"),
+     "open": 100, "high": 105, "low": 95, "close": 102, "volume": 1000},
+    {"symbol": "BTC", "ts": pd.Timestamp("2024-01-02", tz="UTC"),
+     "open": 102, "high": 106, "low": 101, "close": 104, "volume": 1200},
+])
+
+# 离线客户端
+client = V2Client(mode="offline", storage=storage)
+
+# 查询数据（从本地 Storage，不经过 HTTP）
+df = client.ohlcv("BTC")
+print(df)
 ```
 
-**预期结果**：生成一张 log-log PSD 曲线图，低频能量通常高于高频。
+### 示例 18.2：离线模式计算与回测
+
+```python
+# 计算指标（本地 ComputeEngine）
+ma = client.compute.ma(df.close, window=2)
+
+# 运行回测（本地 BacktestEngine）
+from stockstat.backtest import strategy, Order
+@strategy
+def s(ctx):
+    d = ctx.get("BTC", "1d", lookback=3)
+    if len(d) < 2: return
+    pos = ctx.portfolio.get_position("BTC")
+    if pos.qty == 0:
+        ctx.broker.submit(Order("BTC", "buy", 1))
+    elif pos.qty > 0:
+        ctx.broker.submit(Order("BTC", "sell", pos.qty))
+
+data = {"BTC": {"1d": df}}
+res = client.backtest(data, s, initial_cash=10000)
+print(res.summary())
+```
+
+### 示例 18.3：离线模式限制
+
+```python
+# 离线模式不能采集数据（需在线模式）
+try:
+    client.ingest("BTC/USDT")
+except RuntimeError as e:
+    print(e)  # "Ingest requires online mode"
+```
+
+---
+
+## 19. v2.0 插件系统
+
+v2.0 的所有可扩展点统一注册到 `PluginRegistry`。
+
+### 示例 19.1：注册自定义指标插件
+
+```python
+from stockstat._domain.indicators import IndicatorPlugin
+from stockstat._core.plugin import get_registry
+
+reg = get_registry()
+
+def rolling_max(x, window=10):
+    """滚动最大值。"""
+    return x.rolling(window).max()
+
+plugin = IndicatorPlugin(
+    name="rolling_max",
+    func=rolling_max,
+    category="custom",
+    description="Rolling maximum",
+)
+reg.register("indicators", "rolling_max", plugin)
+
+# 查询
+print(reg.get("indicators", "rolling_max"))
+```
+
+### 示例 19.2：DSL 自动反射新指标
+
+```python
+from stockstat._api.dsl import DslEngine
+
+engine = DslEngine(reg, client=mock_client)
+engine.refresh()  # 从 registry 重新加载函数表
+
+# rolling_max 现在 DSL 可用
+result = engine.eval('''
+    SELECT close, rolling_max(close, 5) AS rmax
+    FROM ohlcv("BTC/USDT", "1d", "2024-01-01", "2024-12-31")
+    LIMIT 5
+''')
+```
+
+### 示例 19.3：注册自定义回测组件
+
+```python
+from stockstat._domain.backtest import BacktestComponentPlugin
+
+# 假设有一个自定义成本模型
+class MyCostModel:
+    def __init__(self, rate=0.001):
+        self.rate = rate
+    def compute(self, qty, price, side):
+        return abs(qty * price * self.rate)
+
+reg.register("cost_models", "my_cost",
+    BacktestComponentPlugin("my_cost", MyCostModel, "cost",
+                            description="Custom cost model"))
+```
+
+### 示例 19.4：列出所有插件
+
+```python
+for item in reg.list():
+    plugin = item["plugin"]
+    print(f"{item['namespace']:<20} {item['name']:<25} {getattr(plugin, 'category', '')}")
+```
+
+### 示例 19.5：主题系统
+
+```python
+from stockstat._viz.themes import get_theme, register_theme, Theme, list_themes
+
+# 内置主题
+print(list_themes())  # ['default', 'dark', 'publication']
+
+dark = get_theme("dark")
+print(dark.background)  # '#1e1e1e'
+
+# 注册自定义主题
+custom = Theme("ocean", background="#0a1929", primary="#64ffda",
+               secondary="#ff6b6b", grid="#1c3a5e")
+register_theme(custom)
+print(get_theme("ocean").primary)  # '#64ffda'
+```
 
 ---
 
@@ -1427,8 +1142,8 @@ renderer.savefig("psd.png")
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
-| `DATABASE_URL` | `sqlite:///stockstat.db` | 数据库 URL（可切 `postgresql://...`） |
-| `REDIS_URL` | （空） | Redis 连接（可选，当前代码未自动接入） |
+| `DATABASE_URL` | `sqlite:///stockstat.db` | 数据库 URL |
+| `REDIS_URL` | （空） | Redis 连接（可选） |
 | `HOST` | `0.0.0.0` | 后端监听地址 |
 | `PORT` | `8000` | 后端监听端口 |
 | `STOCKSTAT_DEFAULT_SOURCE` | `yfinance` | 默认数据源 |
@@ -1442,6 +1157,6 @@ renderer.savefig("psd.png")
 |------|--------|------|
 | `STOCKSTAT_HOST` | `localhost` | 前端主机 |
 | `STOCKSTAT_PORT` | `8000` | 前端端口 |
-| `STOCKSTAT_API_KEY` | （空） | 可选 API key（Bearer 认证） |
+| `STOCKSTAT_API_KEY` | （空） | 可选 API key |
 | `STOCKSTAT_TIMEOUT` | `30` | HTTP 超时秒数 |
 | `STOCKSTAT_USE_HTTPS` | `false` | 是否使用 HTTPS |

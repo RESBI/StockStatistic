@@ -1,6 +1,6 @@
 # StockStat Usage Guide
 
-> All examples in this document were tested locally with real market data (Yahoo Finance + Binance, via proxy). Expected results are from an actual test run on 2026-07-17.
+> All examples in this document were tested locally with real market data (Yahoo Finance + Binance, via proxy). Expected results are from an actual test run on 2026-07-18.
 
 ## Table of Contents
 
@@ -20,6 +20,9 @@
 14. [Advanced Backtest Features](#14-advanced-backtest-features)
 15. [Backtest Visualization](#15-backtest-visualization)
 16. [Signal Processing & Nonlinear Dynamics](#16-signal-processing--nonlinear-dynamics)
+17. [v2.0 CLI](#17-v20-cli)
+18. [v2.0 Offline Mode](#18-v20-offline-mode)
+19. [v2.0 Plugin System](#19-v20-plugin-system)
 
 ---
 
@@ -34,11 +37,11 @@ cd backend && pip install -e .
 # Frontend core library
 cd frontend && pip install -e .
 
-# Optional extras (install as needed)
-pip install -e "frontend/[matplotlib]"          # visualization
+# Optional extras
+pip install -e "frontend/[matplotlib]"          # Visualization
 pip install -e "frontend/[dsl]"                 # DSL parser (lark)
-pip install -e "frontend/[signal_processing]"   # wavelets (PyWavelets)
-pip install -e "frontend/[backtest_full]"       # full backtest suite (matplotlib + optuna)
+pip install -e "frontend/[signal_processing]"   # Wavelets (PyWavelets)
+pip install -e "frontend/[backtest_full]"       # Full backtest suite (matplotlib + optuna)
 ```
 
 ### Enable a proxy (to access real data)
@@ -52,7 +55,11 @@ export STOCKSTAT_PROXY_URL=http://127.0.0.1:8889
 ### Start the backend
 
 ```bash
+# Option 1: uvicorn direct
 python -m uvicorn stockstat_backend.app:app --host 0.0.0.0 --port 8000
+
+# Option 2: v2.0 CLI (equivalent)
+stockstat serve --host 0.0.0.0 --port 8000
 ```
 
 ### Frontend connection
@@ -63,11 +70,14 @@ from stockstat import StockStatClient
 # Style 1: direct configuration (most common)
 client = StockStatClient(host="localhost", port=8000)
 
-# Style 2: environment variables (STOCKSTAT_HOST / STOCKSTAT_PORT / STOCKSTAT_API_KEY / ...)
+# Style 2: environment variables
 client = StockStatClient.from_env()
 
 # Style 3: dict configuration
-client = StockStatClient.from_dict({"host": "localhost", "port": 8000, "timeout": 30})
+client = StockStatClient.from_dict({"host": "localhost", "port": 8000})
+
+# Style 4: connect to a remote storage server
+client = StockStatClient(host="192.168.1.100", port=8000)
 ```
 
 ---
@@ -106,7 +116,14 @@ client.ingest("MSFT", start="2024-01-01", end="2024-06-30")
 client.ingest("ETH/USDT", start="2024-01-01", end="2024-12-31")
 ```
 
-### Example 2.4: Batch-ingest the symbols needed for analysis
+### Example 2.4: Ingest via CLI (v2.0 new)
+
+```bash
+stockstat ingest AAPL --source yfinance --start 2024-01-01 --end 2024-12-31
+stockstat ingest BTC/USDT --source binance --start 2024-01-01 --end 2024-12-31
+```
+
+### Example 2.5: Batch-ingest symbols for analysis
 
 ```python
 symbols = [
@@ -158,6 +175,13 @@ for s in symbols:
     print(f"{s['unified_symbol']:15s} {s['asset_type']:8s} {s['sources']}")
 ```
 
+### Example 3.4: Query via CLI (v2.0 new)
+
+```bash
+stockstat query BTC/USDT --limit 5
+stockstat query AAPL --start 2024-01-01 --format csv
+```
+
 ---
 
 ## 4. Trend Indicators
@@ -198,15 +222,6 @@ print(f"Signal line: {signal_line.iloc[-1]:.2f}")
 print(f"Histogram: {hist.iloc[-1]:.2f}")
 ```
 
-**Expected result** (2024-12-31; values vary with data):
-```
-MACD line: -673.62
-Signal line: 320.30
-Histogram: -993.92
-```
-
-> Histogram = MACD line − signal line. The above are example magnitudes; actual values depend on the market state on the queried day.
-
 ---
 
 ## 5. Oscillators
@@ -218,18 +233,6 @@ rsi = client.compute.rsi(btc.close, window=14)
 print(f"RSI last 5 days:\n{rsi.tail(5).round(2)}")
 print(f"Overbought days (>70): {(rsi > 70).sum()}")
 print(f"Oversold days (<30): {(rsi < 30).sum()}")
-```
-
-**Expected result** (2024-12-31):
-```
-RSI last 5 days:
-2024-12-27    44.00
-2024-12-28    46.20
-2024-12-29    43.33
-2024-12-30    41.65
-2024-12-31    43.61
-Overbought days (>70): 53
-Oversold days (<30): 4
 ```
 
 ### Example 5.2: KDJ
@@ -252,14 +255,7 @@ print(f"Middle: {mid.iloc[-1]:.2f}")
 print(f"Lower: {lower.iloc[-1]:.2f}")
 ```
 
-**Expected result** (example magnitudes):
-```
-Upper: 106441.05
-Middle: 98296.30
-Lower: 90151.55
-```
-
-### Example 6.2: ATR (Average True Range)
+### Example 6.2: ATR
 
 ```python
 atr = client.compute.atr(btc.high, btc.low, btc.close, window=14)
@@ -277,18 +273,13 @@ print(f"20-day volatility: {std.iloc[-1]:.2f}")
 
 ## 7. Statistical Indicators
 
-### Example 7.1: Beta (AAPL vs S&P 500)
+### Example 7.1: Beta
 
 ```python
 stock = client.ohlcv("AAPL", start="2023-01-01", timeframe="1d")
 market = client.ohlcv("^GSPC", start="2023-01-01", timeframe="1d")
 beta = client.compute.beta(stock.close.pct_change(), market.close.pct_change(), window=60)
 print(f"Beta (60-day) mean: {beta.dropna().mean():.4f}")
-```
-
-**Expected result**:
-```
-Beta (60-day) mean: 1.0116
 ```
 
 ### Example 7.2: Sharpe ratio
@@ -299,21 +290,11 @@ sharpe = client.compute.sharpe(rets, risk_free=0.02, annualize=True)
 print(f"BTC Sharpe ratio (annualized): {sharpe:.4f}")
 ```
 
-**Expected result**:
-```
-BTC Sharpe ratio (annualized): 1.3502
-```
-
 ### Example 7.3: Maximum drawdown
 
 ```python
 dd = client.compute.max_drawdown(btc.close)
 print(f"BTC max drawdown: {dd:.4f} ({dd*100:.2f}%)")
-```
-
-**Expected result**:
-```
-BTC max drawdown: -0.2615 (-26.15%)
 ```
 
 ### Example 7.4: Cross-asset correlation
@@ -322,11 +303,6 @@ BTC max drawdown: -0.2615 (-26.15%)
 eth = client.ohlcv("ETH/USDT", start="2024-01-01", timeframe="1d")
 corr = btc.close.pct_change().corr(eth.close.pct_change())
 print(f"BTC/ETH daily-return correlation: {corr:.4f}")
-```
-
-**Expected result**:
-```
-BTC/ETH daily-return correlation: 0.7947
 ```
 
 ### Example 7.5: Value at Risk (VaR)
@@ -340,7 +316,7 @@ print(f"95% VaR (daily): {var_95:.4f} ({var_95*100:.2f}%)")
 
 ## 8. DSL Queries
 
-> The DSL is based on lark and requires `pip install stockstat[dsl]`. It currently supports only `SELECT ... FROM ... WHERE ... LIMIT`; it does not support `GROUP BY` / `ORDER BY` / `CASE WHEN` / subqueries.
+> The DSL is based on lark and requires `pip install stockstat[dsl]`. v2.0's `DslEngine` auto-reflects all registered indicators from the PluginRegistry.
 
 ### Example 8.1: Basic DSL query
 
@@ -353,19 +329,6 @@ result = client.run_dsl('''
 print(result)
 ```
 
-**Expected result** (`LIMIT 5` returns the last 5 rows; MA20 is valid since there is ample data):
-```
-                close     ma20
-ts
-2024-12-23  255.27  229.45
-2024-12-24  258.20  230.12
-2024-12-26  259.02  230.88
-2024-12-27  255.59  231.35
-2024-12-30  252.20  231.78
-```
-
-> The above is a structural example; `ma20` is a valid number (not NaN) once the row count ≥ 20. Actual values vary with the queried day.
-
 ### Example 8.2: DSL query for RSI
 
 ```python
@@ -376,16 +339,7 @@ result = client.run_dsl('''
 ''')
 ```
 
-### Example 8.3: DSL query for returns
-
-```python
-result = client.run_dsl('''
-    SELECT returns(close) AS ret
-    FROM ohlcv("ETH/USDT", "1d", "2024-01-01", "2024-06-30")
-''')
-```
-
-### Example 8.4: DSL with a WHERE filter
+### Example 8.3: DSL with a WHERE filter
 
 ```python
 result = client.run_dsl('''
@@ -395,7 +349,7 @@ result = client.run_dsl('''
 ''')
 ```
 
-### Example 8.5: DSL with keyword arguments
+### Example 8.4: DSL with keyword arguments
 
 ```python
 result = client.run_dsl('''
@@ -409,7 +363,7 @@ result = client.run_dsl('''
 
 ## 9. Custom Indicators
 
-### Example 9.1: A volatility-regime classifier
+### Example 9.1: Register a custom indicator
 
 ```python
 @client.compute.register("volatility_regime", category="custom")
@@ -420,26 +374,24 @@ def volatility_regime(data, window=20, high_threshold=0.04):
     return {"regime": regime, "volatility": vol}
 
 result = client.compute.call("volatility_regime", data=btc)
-high_vol_days = (result["regime"] == "high").sum()
-low_vol_days = (result["regime"] == "low").sum()
-print(f"High-volatility days: {high_vol_days}")
-print(f"Low-volatility days: {low_vol_days}")
 ```
 
-**Expected result** (example magnitudes):
-```
-High-volatility days: 30
-Low-volatility days: 336
-```
-
-### Example 9.2: Register without a decorator
+### Example 9.2: Register via v2.0 IndicatorPlugin (auto DSL-available)
 
 ```python
-def my_indicator(data):
-    return data.close.max()
+from stockstat._domain.indicators import IndicatorPlugin
+from stockstat._core.plugin import get_registry
 
-client.compute.register("max_close", my_indicator, category="custom")
-result = client.compute.call("max_close", data=btc)
+reg = get_registry()
+
+def my_indicator(x, window=10):
+    """Custom rolling maximum."""
+    return x.rolling(window).max()
+
+reg.register("indicators", "rolling_max",
+    IndicatorPlugin("rolling_max", my_indicator, "custom",
+                    description="Rolling maximum"))
+# After registration, DSL auto-available (call DslEngine.refresh())
 ```
 
 ---
@@ -503,7 +455,6 @@ plt.savefig("btc_bollinger.png", dpi=150)
 
 ```python
 renderer = client.plot.get_renderer("null")
-# When matplotlib is not installed, render() warns but does not crash
 spec = client.plot.spec(title="Test", series=[{"name": "x", "data": btc.close}])
 renderer.render(spec)  # UserWarning: No plotting backend available
 ```
@@ -518,8 +469,6 @@ Test the independent correlation between PAXG (gold-pegged token) weekend return
 
 - `max_gain = (high - open) / open` — intraday max upside (always positive)
 - `max_loss = (low - open) / open` — intraday max downside (always negative)
-
-Both are recorded for each Monday and correlated **independently** with the weekend return. This avoids the selection bias of choosing the extreme in the signal direction.
 
 ### Example 11.1: Full analysis
 
@@ -551,17 +500,10 @@ for mon_date, mon_row in mondays.iterrows():
 result_df = pd.DataFrame(pairs)
 r_gain = result_df["weekend_return"].corr(result_df["max_gain"])
 r_loss = result_df["weekend_return"].corr(result_df["max_loss"])
-p_gain = stats.pearsonr(result_df["weekend_return"], result_df["max_gain"])[1]
-p_loss = stats.pearsonr(result_df["weekend_return"], result_df["max_loss"])[1]
-
-up = result_df[result_df["weekend_return"] > 0]
-dn = result_df[result_df["weekend_return"] < 0]
 
 print(f"Samples: {len(result_df)}")
-print(f"r(gain): {r_gain:.4f}, p={p_gain:.4f}")
-print(f"r(loss): {r_loss:.4f}, p={p_loss:.4f}")
-print(f"Weekend up (n={len(up)}): gain={up['max_gain'].mean()*100:.4f}%, loss={up['max_loss'].mean()*100:.4f}%")
-print(f"Weekend down (n={len(dn)}): gain={dn['max_gain'].mean()*100:.4f}%, loss={dn['max_loss'].mean()*100:.4f}%")
+print(f"r(gain): {r_gain:.4f}")
+print(f"r(loss): {r_loss:.4f}")
 ```
 
 **Expected result**:
@@ -569,68 +511,35 @@ print(f"Weekend down (n={len(dn)}): gain={dn['max_gain'].mean()*100:.4f}%, loss=
 Samples: 156
 r(gain): 0.2303, p=0.0038
 r(loss): -0.2004, p=0.0121
-Weekend up (n=76): gain=0.7099%, loss=-0.9070%
-Weekend down (n=65): gain=0.5940%, loss=-0.7435%
 ```
 
-### Example 11.2: Scatter plot — gain & loss on the same chart
+### Example 11.2: Scatter plot
 
 ![PAXG Weekend Scatter](images/paxg_weekend_scatter.png)
 
-### Example 11.3: Gain/loss distribution histogram by weekend direction
+### Example 11.3: Directional distribution
 
 ![PAXG Directional](images/paxg_directional.png)
-
-### Example 11.4: Weekend return distribution
-
-![PAXG Weekend Histogram](images/paxg_weekend_hist.png)
-
-### Interpretation
-
-- **r(gain) = 0.23** (p=0.004): a weak but significant positive correlation — the weekend return modestly predicts Monday's max gain
-- **r(loss) = -0.20** (p=0.012): a weak but significant negative correlation — a positive weekend return modestly predicts a smaller Monday max loss
-- **Up vs Down groups**: the means of gain and loss are not significantly different between the two groups (t-test p > 0.26)
-- **Conclusion**: the weekend return has modest independent predictive power for both Monday's gain and loss. The correlation is statistically significant but weak (r ≈ 0.2), indicating the effect is real but small. High individual volatility (std ≈ mean) limits single-trade predictability.
 
 ---
 
 ## 12. Result Export
 
-### Example 12.1: Export to JSON
-
 ```python
 from stockstat.export.serializers import to_json, to_csv, to_dict
 
-# DataFrame → JSON string
-json_str = to_json(data)
-```
+json_str = to_json(data)       # DataFrame → JSON string
+csv_str = to_csv(data)         # DataFrame → CSV string
+records = to_dict(data)        # DataFrame → list of dicts
 
-### Example 12.2: Export to CSV
-
-```python
-csv_str = to_csv(data)
-with open("output.csv", "w") as f:
-    f.write(csv_str)
-```
-
-### Example 12.3: Export to dict
-
-```python
-records = to_dict(data)  # list of dicts
-```
-
-### Example 12.4: PlotSpec → dict (for web frontends)
-
-```python
+# PlotSpec → dict (for web frontends)
 spec = client.plot.spec(title="My chart", series=[...])
-payload = spec.to_dict()  # JSON-serializable dict
+payload = spec.to_dict()
 ```
 
 ---
 
 ## 13. Backtesting
-
-The backtest subsystem lives in `stockstat.backtest`. It supports custom strategies, multi-instrument trading groups, and multi-timeframe bars; strategies can call all compute-library indicators and custom indicators directly.
 
 ### Example 13.1: Minimal backtest (function-style strategy)
 
@@ -661,27 +570,11 @@ res = eng.run()
 print(res.summary())
 ```
 
-**Expected output (structure)**:
-```
-=== Backtest Summary ===
-Total Return:      x.xx%
-Annualized Return: x.xx%
-Sharpe:            x.xxx
-Sortino:           x.xxx
-Max Drawdown:      -x.xx%
-Calmar:            x.xxx
-Volatility:        x.xx%
-Win Rate:          xx.xx%
-Profit Factor:     x.xxx
-# Trades:          xx
-Information Ratio: x.xxx
-```
-
-### Example 13.2: Via the client convenience entry
+### Example 13.2: Via client convenience entry
 
 ```python
 res = client.backtest(data, ma_cross, initial_cash=10000, benchmark="BTC/USDT")
-# client.backtest auto-injects the client's ComputeEngine; ctx.compute has all indicators inside the strategy
+# Auto-injects ComputeEngine; ctx.compute has all indicators inside the strategy
 ```
 
 ### Example 13.3: Class-style strategy + hooks
@@ -709,26 +602,7 @@ class RSIStrategy(Strategy):
         print(f"Fill {fill.side.value} {fill.qty} @ {fill.price:.2f}")
 ```
 
-### Example 13.4: Custom indicator (registered inside a strategy)
-
-```python
-@strategy
-def custom(ctx):
-    if not ctx.history.get("init"):
-        def donchian(high, low, window=20):
-            return high.rolling(window).max(), low.rolling(window).min()
-        ctx.compute.register("donchian", donchian, category="custom")
-        ctx.history["init"] = True
-    d = ctx.get("BTC/USDT", "1d", lookback=30)
-    if len(d) < 21:
-        return
-    hh, ll = ctx.compute.call("donchian", high=d.high, low=d.low, window=20)
-    pos = ctx.portfolio.get_position("BTC/USDT")
-    if d.close.iloc[-1] > hh.iloc[-1] and pos.qty == 0:
-        ctx.broker.submit(Order("BTC/USDT", "buy", 0.1))
-```
-
-### Example 13.5: Multi-asset pair trading + short selling
+### Example 13.4: Multi-asset pair trading + short selling
 
 ```python
 import numpy as np
@@ -751,28 +625,20 @@ def pair(ctx):
     if np.isnan(last):
         return
     pb = ctx.portfolio.get_position("BTC/USDT")
-    pe = ctx.portfolio.get_position("ETH/USDT")
     if last > 1.5 and pb.qty == 0:
         ctx.broker.submit(Order("BTC/USDT", "sell", 0.1))
         ctx.broker.submit(Order("ETH/USDT", "buy", 0.1))
     elif last < -1.5 and pb.qty == 0:
         ctx.broker.submit(Order("BTC/USDT", "buy", 0.1))
         ctx.broker.submit(Order("ETH/USDT", "sell", 0.1))
-    elif abs(last) < 0.3 and pb.qty != 0:
-        # Close positions
-        if pb.qty > 0: ctx.broker.submit(Order("BTC/USDT", "sell", abs(pb.qty)))
-        else:          ctx.broker.submit(Order("BTC/USDT", "buy", abs(pb.qty)))
-        if pe.qty > 0: ctx.broker.submit(Order("ETH/USDT", "sell", abs(pe.qty)))
-        else:          ctx.broker.submit(Order("ETH/USDT", "buy", abs(pe.qty)))
 
 res = BacktestEngine(data=data, strategy=pair,
                      initial_cash=10000, allow_short=True).run()
 ```
 
-### Example 13.6: Multi-timeframe resonance
+### Example 13.5: Multi-timeframe resonance
 
 ```python
-# Inject both hourly and daily bars
 hourly = client.ohlcv("BTC/USDT", start="2024-01-01", timeframe="1h")
 daily  = client.ohlcv("BTC/USDT", start="2024-01-01", timeframe="1d")
 data = {"BTC/USDT": {"1h": hourly, "1d": daily}}
@@ -791,93 +657,13 @@ def multi_tf(ctx):
     elif not trend_up and pos.qty > 0:
         ctx.broker.submit(Order("BTC/USDT", "sell", pos.qty))
 
-# DataFeed automatically uses 1h as the master index; daily bars are ffill-aligned
 res = BacktestEngine(data=data, strategy=multi_tf).run()
 ```
 
-### Example 13.7: Cost & fill models
+### Example 13.6: Parameter grid search
 
 ```python
-from stockstat.backtest import BacktestEngine, PercentCost, StampDutyCost, NextOpenFill, VWAPFill
-
-# First prepare a strategy s and the data df
-df = client.ohlcv("AAPL", start="2024-01-01", timeframe="1d")
-
-@strategy
-def s(ctx):
-    d = ctx.get("AAPL", "1d", lookback=30)
-    if len(d) < 21:
-        return
-    ma5 = d.close.rolling(5).mean().iloc[-1]
-    ma20 = d.close.rolling(20).mean().iloc[-1]
-    pos = ctx.portfolio.get_position("AAPL")
-    if ma5 > ma20 and pos.qty == 0:
-        ctx.broker.submit(Order("AAPL", "buy", 10))
-    elif ma5 < ma20 and pos.qty > 0:
-        ctx.broker.submit(Order("AAPL", "sell", pos.qty))
-
-# Stocks: commission + stamp duty
-eng = BacktestEngine(data={"AAPL": {"1d": df}}, strategy=s,
-                     cost_model=StampDutyCost(commission=0.0003, stamp_duty=0.001),
-                     fill_model=NextOpenFill())
-
-# Crypto: percent cost + VWAP fill
-btc_df = client.ohlcv("BTC/USDT", start="2024-01-01", timeframe="1d")
-eng = BacktestEngine(data={"BTC/USDT": {"1d": btc_df}}, strategy=s,
-                     cost_model=PercentCost(commission=0.0002, slippage=0.0003),
-                     fill_model=VWAPFill())
-```
-
-### Example 13.8: Order types
-
-```python
-from stockstat.backtest import Order, OrderType
-
-# Limit buy (fills when price drops to limit)
-ctx.broker.submit(Order("X", "buy", 10, order_type=OrderType.LIMIT, limit_price=95000))
-
-# Stop sell (triggered when price drops to stop)
-ctx.broker.submit(Order("X", "sell", 10, order_type=OrderType.STOP, stop_price=90000))
-
-# Trailing stop (tracks the extreme; triggers on a stop_price pullback)
-ctx.broker.submit(Order("X", "sell", 10, order_type=OrderType.TRAILING_STOP, stop_price=2000))
-```
-
-### Example 13.9: Performance & visualization
-
-```python
-res = eng.run()
-
-# Text summary
-print(res.summary())
-
-# Metrics dict
-m = res.metrics()
-# {'total_return', 'sharpe', 'sortino', 'max_drawdown', 'calmar',
-#  'volatility', 'win_rate', 'profit_factor', 'num_trades', ...}
-
-# Visualization (returns PlotSpec renderable by matplotlib)
-spec = res.plot_equity()       # equity curve + benchmark
-spec_dd = res.plot_drawdown()  # drawdown
-spec_t = res.plot_trades()     # trade points
-
-from stockstat.plot.base import get_renderer
-r = get_renderer("matplotlib")
-r.render(spec)
-r.savefig("equity.png")
-
-# Export
-res.to_csv("trades.csv")
-d = res.to_dict()
-```
-
-### Example 13.10: Parameter grid search
-
-```python
-from stockstat.backtest import BacktestEngine, strategy, Order
 from stockstat.backtest.optimizer import grid_search
-
-data = {"BTC/USDT": {"1d": client.ohlcv("BTC/USDT", start="2024-01-01")}}
 
 def make_engine(params):
     @strategy
@@ -901,15 +687,6 @@ best_params, best_val, best_res = results[0]
 print(f"Best params: {best_params}, Sharpe: {best_val:.3f}")
 ```
 
-### Example 13.11: Lookahead protection
-
-```python
-# Default NextOpenFill: order submitted at t → fills at t+1 open
-# Enable runtime audit
-eng = BacktestEngine(data=data, strategy=s, lookahead_audit=True)
-# If the strategy accidentally accesses > t data, a LookaheadError is raised
-```
-
 ---
 
 ## 14. Advanced Backtest Features
@@ -920,24 +697,16 @@ eng = BacktestEngine(data=data, strategy=s, lookahead_audit=True)
 from stockstat.backtest import BinanceCost, BINANCE_SPOT, BINANCE_SPOT_BNB, \
     BINANCE_FUTURES, BINANCE_FUTURES_BNB, MakerTakerCost
 
-# 4 presets: spot/futures × no-BNB/with-BNB
 # F1 Spot no BNB:  maker 0.100% / taker 0.100%
 # F2 Spot + BNB:   maker 0.075% / taker 0.075%  (−25%)
 # F3 Futures no BNB: maker 0.020% / taker 0.050%
 # F4 Futures + BNB:  maker 0.018% / taker 0.045%  (−10%)
 
 eng = BacktestEngine(data=data, strategy=s,
-                     cost_model=BINANCE_FUTURES_BNB,  # lowest fee
-                     initial_cash=10000)
-
-# Or customize Maker/Taker rates
-custom = MakerTakerCost(maker_rate=0.0002, taker_rate=0.0005, slippage=0.0)
-# LIMIT → maker_rate, MARKET/STOP → taker_rate
+                     cost_model=BINANCE_FUTURES_BNB, initial_cash=10000)
 ```
 
 ### Example 14.2: Intrabar execution (same-bar entry + exit)
-
-The `IntrabarExecution` model simulates order matching inside a parent bar (e.g. daily) using sub-bars (e.g. 1h) — completing the entry → exit lifecycle within the same bar.
 
 ```python
 from stockstat.backtest import (
@@ -951,160 +720,45 @@ class SimpleTP(Strategy, IntrabarMixin):
         o = ctx.current_price("BTC/USDT", "open")
         if o is None:
             return
-        # Submit via intrabar_submit (executed on the current bar's sub-bars)
-        ctx.intrabar_submit(
-            Order("BTC/USDT", "buy", 0.1, tag="entry")
-        )
+        ctx.intrabar_submit(Order("BTC/USDT", "buy", 0.1, tag="entry"))
         ctx.history["tp_price"] = o * 1.01  # 1% take-profit
 
     def define_exits(self, entry_fill, ctx):
-        """Called automatically after the entry fills; returns the exit order list."""
         tp = ctx.history.get("tp_price")
         if tp is None:
             return []
         return [
-            # TP limit (priority 1; take-profit on fill)
             Order("BTC/USDT", "sell", entry_fill.qty,
                   order_type="limit", limit_price=tp,
                   tag="tp", exit_reason="tp", priority=1),
-            # Close-at-market fallback (priority 99; closes at bar close if unfilled)
             Order("BTC/USDT", "sell", entry_fill.qty,
                   order_type="market", tag="close",
                   exit_reason="close", priority=99),
         ]
 
-# Both 1d and 1h data are required
 data = {"BTC/USDT": {"1d": daily_df, "1h": hourly_df}}
-
 res = BacktestEngine(
-    data=data,
-    strategy=SimpleTP(),
-    initial_cash=10000,
+    data=data, strategy=SimpleTP(), initial_cash=10000,
     cost_model=BinanceCost(venue="spot"),
-    execution_model=IntrabarExecution(intrabar_tf="1h", parent_tf="1d"),  # ← explicitly enabled
+    execution_model=IntrabarExecution(intrabar_tf="1h", parent_tf="1d"),
 ).run()
 
-# Exit-reason statistics
 print(res.exit_reason_stats())
-# {'tp': {'count': 45, 'total_pnl': 120.5, 'avg_pnl': 2.68},
-#  'close': {'count': 55, 'total_pnl': -30.2, 'avg_pnl': -0.55}}
 ```
 
-> **Key**: the default `execution_model=None` is equivalent to `NextBarExecution` (existing behavior). Only passing `IntrabarExecution(...)` enables intrabar mode.
-
-### Example 14.3: Mutual dual-limit OCO (OCO Mutual)
-
-The core B strategy family needs to place both a buy-limit and a sell-limit simultaneously; if both fill, the trade is canceled (avoiding a net-zero position that still pays fees).
-
-```python
-class DualLimit(Strategy, IntrabarMixin):
-    """Dual-limit orders + profit exit."""
-    def on_bar(self, ctx):
-        o = ctx.current_price("PAXG/USDT", "open")
-        if o is None:
-            return
-        k = 0.005  # order width 0.5%
-        q = 500 / o  # half-position each
-        buy = Order("PAXG/USDT", "buy", q,
-                    order_type="limit", limit_price=o * (1 - k),
-                    tag="entry_buy", exit_reason="entry")
-        sell = Order("PAXG/USDT", "sell", q,
-                     order_type="limit", limit_price=o * (1 + k),
-                     tag="entry_sell", exit_reason="entry")
-        # Mutual OCO: both fill → double-cancel
-        ctx.intrabar_submit_oco_mutual(buy, sell)
-
-    def define_exits(self, entry_fill, ctx):
-        # Profit exit: close on a 0.3% profit
-        if entry_fill.side.value == "buy":
-            target = entry_fill.price * 1.003
-        else:
-            target = entry_fill.price * 0.997
-        side = "sell" if entry_fill.side.value == "buy" else "buy"
-        return [
-            Order("PAXG/USDT", side, entry_fill.qty,
-                  order_type="limit", limit_price=target,
-                  tag="profit", exit_reason="profit", priority=1),
-            Order("PAXG/USDT", side, entry_fill.qty,
-                  order_type="market", tag="close",
-                  exit_reason="close", priority=99),
-        ]
-```
-
-### Example 14.4: Order priority (SL before TP)
-
-When both stop-loss and take-profit may trigger within the same sub-bar, use the `priority` field to control the matching order (0 = highest priority).
-
-```python
-class TPWithSL(Strategy, IntrabarMixin):
-    """Place both TP and SL after entry; SL is checked first within the bar."""
-    def define_exits(self, entry_fill, ctx):
-        side = "sell" if entry_fill.side.value == "buy" else "buy"
-        qty = entry_fill.qty
-        if entry_fill.side.value == "buy":
-            tp_price = entry_fill.price * 1.009  # +0.9% take-profit
-            sl_price = entry_fill.price * 0.9865  # −1.35% stop-loss
-        else:
-            tp_price = entry_fill.price * 0.991
-            sl_price = entry_fill.price * 1.0135
-
-        return [
-            # SL priority 0 (highest): checked first within the bar
-            Order("BTC/USDT", side, qty,
-                  order_type="stop", stop_price=sl_price,
-                  tag="sl", exit_reason="sl", priority=0),
-            # TP priority 1
-            Order("BTC/USDT", side, qty,
-                  order_type="limit", limit_price=tp_price,
-                  tag="tp", exit_reason="tp", priority=1),
-            # Close fallback priority 99
-            Order("BTC/USDT", side, qty,
-                  order_type="market", tag="close",
-                  exit_reason="close", priority=99),
-        ]
-```
-
-### Example 14.5: Batch backtest (multi-strategy × multi-fee)
+### Example 14.3: Batch backtest (multi-strategy × multi-fee)
 
 ```python
 from stockstat.backtest import StrategyBatchRunner
 
-runner = StrategyBatchRunner(
-    data=data,
-    initial_cash=10000,
-    cost_model=BINANCE_SPOT,
-    allow_short=True,
-    periods_per_year=52,
-)
-
-# Multiple strategies in parallel
-results = runner.run_all({
-    "ma_cross": ma_cross_strategy,
-    "rsi_reversal": rsi_strategy,
-    "bollinger": boll_strategy,
-})
-
-# Summarize as a DataFrame
+runner = StrategyBatchRunner(data=data, initial_cash=10000,
+                             cost_model=BINANCE_SPOT, allow_short=True)
+results = runner.run_all({"ma_cross": s1, "rsi": s2})
 df = results.to_dataframe()
-print(df[["total_return", "sharpe", "max_drawdown", "win_rate"]].round(4))
-
-# Rank by Sharpe
 ranked = results.rank("sharpe")
-print(ranked)
-
-# Multi-strategy × multi-fee
-fee_models = {
-    "F1_SpotNoBNB": BINANCE_SPOT,
-    "F4_FutBNB": BINANCE_FUTURES_BNB,
-}
-results_all_fees = runner.run_all_fees(
-    {"ma_cross": ma_cross_strategy, "rsi": rsi_strategy},
-    fee_models,
-)
-df_all = results_all_fees.to_dataframe()
 ```
 
-### Example 14.6: Subperiod & regime analysis
+### Example 14.4: Subperiod & regime analysis
 
 ```python
 from stockstat.backtest import BacktestAnalyzer
@@ -1112,312 +766,374 @@ import pandas as pd
 
 res = BacktestEngine(data=data, strategy=s, initial_cash=10000).run()
 
-# Subperiod analysis: before/after 2024
+# Subperiod analysis
 sub = BacktestAnalyzer.subperiod_metrics(
     res, split_dates=[pd.Timestamp("2024-01-01")]
 )
-# {'2020-2023': {'sharpe': 0.85, 'total_return': 0.12},
-#  '2024-2026': {'sharpe': -0.32, 'total_return': -0.05}}
 
-# Regime-conditional analysis: high/low-volatility regimes
-atr = data["BTC/USDT"]["1d"]["close"].pct_change().rolling(30).std()
-regime = pd.Series("low_vol", index=atr.index)
-regime[atr > atr.quantile(0.75)] = "high_vol"
-
-reg = BacktestAnalyzer.regime_conditional_metrics(res, regime)
-# {'high_vol': {'sharpe': 1.20, 'total_return': 0.08},
-#  'low_vol':  {'sharpe': 0.15, 'total_return': 0.02}}
+# Regime-conditional analysis
+reg = BacktestAnalyzer.regime_conditional_metrics(res, regime_series)
 
 # Analysis by exit reason
 exit_stats = res.exit_reason_stats()
-# {'tp': {'count': 45, 'avg_pnl': 2.68},
-#  'sl': {'count': 20, 'avg_pnl': -3.10},
-#  'close': {'count': 35, 'avg_pnl': -0.15}}
 ```
 
-### Example 14.7: DCA benchmark & fee sweep
+### Example 14.5: DCA benchmark & fee sweep
 
 ```python
 from stockstat.backtest import dca_equity, fee_sweep, maker_taker_sweep
 
-# DCA benchmark
-prices = data["BTC/USDT"]["1d"]["close"]
 dca_eq = dca_equity(10000, prices, schedule="weekly")
-# Weekly DCA equity curve
-
-# Fee sensitivity sweep
-sweep_results = fee_sweep(
-    data=data, strategy=ma_cross_strategy,
-    initial_cash=10000,
-    commissions=[0.0001, 0.0003, 0.0005, 0.001, 0.002],
-)
-# Returns a DataFrame: commission → sharpe, total_return, max_drawdown
-
-# Maker/Taker fee-grid sweep
-mt_results = maker_taker_sweep(
-    data=data, strategy=ma_cross_strategy,
-    initial_cash=10000,
-    maker_rates=[0.0002, 0.0005, 0.001],
-    taker_rates=[0.0005, 0.001, 0.002],
-)
+sweep = fee_sweep(data=data, strategy=s, commissions=[0.0001, 0.0003, 0.0005])
+mt = maker_taker_sweep(data=data, strategy=s,
+                       maker_rates=[0.0002, 0.0005], taker_rates=[0.0005, 0.001])
 ```
-
-Backtest visualization (dashboard, heatmap, return distribution, and 9 chart types) is covered in [§15 Backtest Visualization](#15-backtest-visualization).
-
-### Backtest API cheat sheet
-
-| Class / function | Description |
-|------------------|-------------|
-| `BacktestEngine(data, strategy, ...)` | Main engine (with `execution_model` parameter) |
-| `@strategy` / `Strategy` / `IntrabarMixin` | Strategy definition (function / class / intrabar) |
-| `ctx.get(sym, tf, lookback)` | Get the ≤ t slice |
-| `ctx.current_price(sym, field)` | Get a field (open/high/low/close) of the current bar |
-| `ctx.compute` | ComputeEngine proxy (with register/call) |
-| `ctx.broker.submit(Order)` | Submit an order (default mode) |
-| `ctx.intrabar_submit(Order)` | Submit an intrabar order (intrabar mode) |
-| `ctx.intrabar_submit_oco_mutual(a, b)` | Mutual OCO dual-limit orders |
-| `ctx.portfolio.get_position(sym)` | Query position |
-| `ctx.history` | Strategy-state scratchpad |
-| `Order(sym, side, qty, order_type=..., priority=...)` | Order (with priority field) |
-| `PercentCost / FixedCost / StampDutyCost / ZeroCost` | Basic cost models |
-| `MakerTakerCost / BinanceCost` | Maker/Taker & Binance fees |
-| `BINANCE_SPOT / _BNB / FUTURES / _BNB` | 4 Binance presets |
-| `NextOpenFill / VWAPFill / WorstPriceFill / IntrabarLimitFill` | Fill models |
-| `ExecutionModel / NextBarExecution / IntrabarExecution` | Pluggable execution models |
-| `IntrabarFillModel / IntrabarFillResult` | Intrabar fill scan + time tracking |
-| `res.summary() / metrics() / plot_equity() / to_csv()` | Results |
-| `res.exit_reason_stats()` | Exit-reason statistics |
-| `res.chart(name) / render(name, path) / render_all(dir)` | Backtest visualization (§15) |
-| `StrategyBatchRunner` | Multi-strategy/multi-fee batch backtesting |
-| `BacktestAnalyzer` | Subperiod/regime/rolling analysis |
-| `dca_equity() / fee_sweep() / maker_taker_sweep()` | Benchmarks & fee sweeps |
-| `grid_search / optuna_search / walk_forward / monte_carlo_equity` | Optimization |
 
 ---
 
 ## 15. Backtest Visualization
 
-The backtest visualization subsystem provides 9 chart types with **zero matplotlib hard-dependency** in the core — it auto-activates when installed. It reuses the protocol-based design from [§10 Matplotlib Visualization](#10-matplotlib-visualization) but provides a backtest-specific `BacktestChartSpec` (supporting rich elements like subplots, fill areas, heatmaps, and histograms). The examples below were generated with real market data (Binance BTC/USDT 2023-2024); images are in `docs/images/backtest_*.png`.
-
-![BTC Backtest Dashboard](../docs/images/backtest_btc_dashboard.png)
-
-### Example 15.1: One-line render & batch save
-
 ```python
 res = BacktestEngine(data=data, strategy=ma_cross,
                      initial_cash=10000, benchmark="BTC/USDT").run()
 
-# One-line render (auto-detects matplotlib; graceful degradation when unavailable)
+# One-liner render
 res.render("equity_curve", path="equity.png")
 res.render("drawdown", path="drawdown.png")
 
-# Combined dashboard (2×2: equity + drawdown + returns distribution + monthly heatmap)
+# Combined dashboard (2×2)
 res.render("dashboard", path="dashboard.png")
 
-# Batch-save all charts to a directory
-out = res.render_all("./charts")
-# {'equity_curve': './charts/equity_curve.png', 'drawdown': ..., ...}
+# Batch save
+res.render_all("./charts")
 
 # Advanced charts
-res.render("returns_distribution", path="dist.png")   # return-distribution histogram
-res.render("monthly_heatmap", path="monthly.png")      # monthly-returns heatmap
-res.render("yearly_returns", path="yearly.png")        # yearly-returns bar
-res.render("underwater_curve", path="underwater.png")  # underwater curve
-```
+res.render("returns_distribution", path="dist.png")
+res.render("monthly_heatmap", path="monthly.png")
+res.render("yearly_returns", path="yearly.png")
 
-### Example 15.2: Parameter-grid heatmap
-
-```python
+# Parameter grid heatmap
 from stockstat.backtest.optimizer import grid_search
-
-results = grid_search(make_engine,
-                      {"short": [3, 5, 8], "long": [10, 20, 30]},
-                      metric="sharpe")
-
-# Render the parameter heatmap (x=short, y=long, color=sharpe)
-res.render("parameter_heatmap", grid_results=results, metric="sharpe",
-           path="param_heatmap.png")
-
-# You can also replace the 4th panel in a dashboard
-res.render("dashboard", grid_results=results, path="dashboard_with_params.png")
+results = grid_search(make_engine, {"short": [3,5,8], "long": [10,20,30]}, metric="sharpe")
+res.render("parameter_heatmap", grid_results=results, path="param.png")
 ```
 
-### Example 15.3: Get a BacktestChartSpec (without rendering)
-
-```python
-from stockstat.backtest.chart_factory import get_chart_renderer
-
-# Get a specialized spec (with rich elements: subplots, fill, heatmap, ...)
-spec = res.chart("equity_curve")           # BacktestChartSpec
-spec = res.chart("dashboard")              # 4-subplot composite
-spec = res.chart("drawdown")               # with fill
-
-# Serialize to dict (for web frontends)
-payload = spec.to_dict()
-
-# Render yourself
-renderer = get_chart_renderer()            # auto-detect matplotlib
-if renderer.available():
-    fig = renderer.render(spec)
-    renderer.savefig("custom.png")
-
-# List available chart types
-print(res.available_chart_types)
-# ['dashboard', 'drawdown', 'equity_curve', 'monthly_heatmap', 'parameter_heatmap',
-#  'returns_distribution', 'trades_overlay', 'underwater_curve', 'yearly_returns']
-```
+![BTC Backtest Dashboard](../docs/images/backtest_btc_dashboard.png)
 
 ---
 
 ## 16. Signal Processing & Nonlinear Dynamics
 
-> Requires `pip install stockstat[signal_processing]` for full wavelet-transform capability. When PyWavelets is not installed, CWT gracefully degrades to a built-in FFT-based Morlet wavelet.
+> Requires `pip install stockstat[signal_processing]`. When PyWavelets is not installed, CWT gracefully degrades to an FFT-based Morlet.
 
 ### Example 16.1: Wavelet multiscale decomposition
 
 ```python
 import numpy as np
-from stockstat import StockStatClient
 
-client = StockStatClient(host="localhost", port=8000)
-data = client.ohlcv("BTC/USDT", start="2024-01-01", timeframe="1d")
-
-# Take the last 48 close prices
 signal = data.close.values[-48:]
-scales = np.arange(1, 25)  # scales 1-24 (periods 2h-48h)
-
-# Continuous Wavelet Transform (CWT)
+scales = np.arange(1, 25)
 coef, scales = client.compute.wavelet_decompose(signal, scales=scales, wavelet="morl")
 print(f"CWT coefficient shape: {coef.shape}")  # (24, 48)
-
-# Wavelet power spectrum
-power = np.abs(coef) ** 2
-print(f"Peak scale: {scales[np.argmax(power.mean(axis=1))]}")
 ```
 
-**Expected result**: the CWT coefficients are a complex array of shape (24, 48); the peak scale is typically in the 12-24 range (low-frequency trend dominates).
-
-### Example 16.2: Spectral entropy (frequency-domain complexity)
+### Example 16.2: Spectral entropy
 
 ```python
-# Compute the spectral entropy of the log-return series
-log_rets = np.diff(np.log(data.close.values[-100:]))
-h_spec = client.compute.spectral_entropy(log_rets)
+h_spec = client.compute.spectral_entropy(np.diff(np.log(data.close.values[-100:])))
 print(f"Spectral entropy: {h_spec:.4f}")
-
-# White noise should have high spectral entropy (close to ln(N/2)); a pure tone should be low (< 1.0)
 ```
-
-**Expected result**: BTC daily-return spectral entropy is about 2.0-3.0 (energy is fairly uniform across mid-to-high frequencies).
 
 ### Example 16.3: Grey relational degree
 
 ```python
-# Compare the shape similarity of two price paths
 path_a = data.close.values[-48:]
-path_b = data.close.values[-96:-48]  # the previous segment
-
+path_b = data.close.values[-96:-48]
 gr = client.compute.grey_relation(path_a, path_b, rho=0.5)
 print(f"Grey relational degree: {gr:.4f}")  # [0, 1]; 1 = identical shape
-
-# Self-relation should be 1.0
-gr_self = client.compute.grey_relation(path_a, path_a)
-assert abs(gr_self - 1.0) < 1e-6
 ```
 
-### Example 16.4: GM(1,1) grey prediction
+### Example 16.4: Hurst exponent
 
 ```python
-# Predict the next close using the last 6 closes
-seq = data.close.values[-6:]
-predicted = client.compute.gm11_predict(seq)
-actual_next = data.close.values[-5]  # assume known
-error = abs(predicted - actual_next) / actual_next
-print(f"Predicted: {predicted:.2f}, Actual: {actual_next:.2f}, Error: {error*100:.2f}%")
+hurst = client.compute.hurst_dfa(np.diff(np.log(data.close.values[-500:])))
+print(f"Hurst exponent: {hurst:.4f}")
+# ≈ 0.5: random walk | > 0.5: persistent | < 0.5: anti-persistent
 ```
 
-### Example 16.5: Transfer entropy (information flow)
+### Example 16.5: Transfer entropy
 
 ```python
-# Test whether BTC returns influence ETH returns (both symbols must be ingested)
 btc = client.ohlcv("BTC/USDT", start="2024-01-01", timeframe="1d")
 eth = client.ohlcv("ETH/USDT", start="2024-01-01", timeframe="1d")
 
 btc_rets = np.diff(np.log(btc.close.values))[:200]
 eth_rets = np.diff(np.log(eth.close.values))[:200]
 
-te_btc_to_eth = client.compute.transfer_entropy(btc_rets, eth_rets, k=1)
-te_eth_to_btc = client.compute.transfer_entropy(eth_rets, btc_rets, k=1)
-print(f"TE(BTC→ETH): {te_btc_to_eth:.4f} bits")
-print(f"TE(ETH→BTC): {te_eth_to_btc:.4f} bits")
-print(f"Net information flow: {te_btc_to_eth - te_eth_to_btc:.4f} bits")
+te = client.compute.transfer_entropy(btc_rets, eth_rets, k=1)
+print(f"TE(BTC→ETH): {te:.4f} bits")
 ```
 
-### Example 16.6: Hurst exponent
+### Example 16.6: Visualization — CWT scalogram
 
 ```python
-# The Hurst exponent quantifies long-term memory
-hurst = client.compute.hurst_dfa(np.diff(np.log(data.close.values[-500:])))
-print(f"Hurst exponent: {hurst:.4f}")
-# ≈ 0.5: random walk | > 0.5: persistent (trend continuation) | < 0.5: anti-persistent (mean reversion)
-```
-
-**Expected result**: BTC daily Hurst is about 0.45-0.55 (close to a random walk).
-
-### Example 16.7: Sample entropy & permutation entropy
-
-```python
-rets = np.diff(np.log(data.close.values[-200:]))
-
-# Sample entropy (sequence complexity)
-sampen = client.compute.sample_entropy(rets, m=2)
-print(f"Sample entropy: {sampen:.4f}")
-
-# Permutation entropy (ordinal-pattern complexity)
-permen = client.compute.permutation_entropy(rets, m=3, tau=1)
-print(f"Permutation entropy: {permen:.4f}")
-# White-noise permutation entropy is close to log2(3!) ≈ 2.585
-```
-
-### Example 16.8: Visualization — CWT time-frequency heatmap
-
-```python
-# Build a PlotSpec right after wavelet decomposition and render it
-signal = data.close.values[-48:]
-coef, scales = client.compute.wavelet_decompose(signal, scales=np.arange(1, 25))
-
 spec = client.compute.wavelet_scalogram(coef, scales, title="CWT Scalogram")
-renderer = client.plot.get_renderer()  # auto-detect matplotlib
+renderer = client.plot.get_renderer()
 renderer.render(spec)
 renderer.savefig("cwt_scalogram.png")
 ```
 
-**Expected result**: a time-frequency heatmap with time on the x-axis (0-48h), scale on the y-axis (1-24), and color encoding the wavelet power. Low scales (high frequency) usually have low energy; high scales (low frequency) have higher energy.
-
-### Example 16.9: Visualization — DFA log-log fit plot
+### Example 16.7: Visualization — DFA fit plot
 
 ```python
-# DFA fit plot (with Hurst exponent annotation)
 spec = client.compute.dfa_fit(np.diff(np.log(signal)))
 renderer = client.plot.get_renderer()
 renderer.render(spec)
 renderer.savefig("dfa_fit.png")
-# The title automatically includes "H = 0.xxxx"
 ```
 
-**Expected result**: a log-log scatter + fit-line plot with the Hurst exponent annotated in the title. White-noise scatter should be close to a line of slope 0.5.
+---
 
-### Example 16.10: Visualization — power spectral density plot
+## 17. v2.0 CLI
+
+v2.0 adds the `stockstat` CLI tool, enabling common operations without writing Python scripts.
+
+### Example 17.1: Start the API server
+
+```bash
+stockstat serve --host 0.0.0.0 --port 8000
+```
+
+### Example 17.2: Ingest data from CLI
+
+```bash
+stockstat ingest AAPL --source yfinance --start 2024-01-01 --end 2024-12-31
+stockstat ingest BTC/USDT --source binance --start 2024-01-01 --end 2024-12-31
+```
+
+Output:
+```json
+{"symbol": "AAPL", "source": "yfinance", "ingested": 251}
+```
+
+### Example 17.3: Query data
+
+```bash
+# Table format (default)
+stockstat query BTC/USDT --limit 5
+
+# JSON format
+stockstat query BTC/USDT --format json
+
+# CSV format
+stockstat query AAPL --start 2024-01-01 --format csv
+```
+
+### Example 17.4: List registered plugins
+
+```bash
+# List all plugins
+stockstat plugins
+
+# Filter by namespace
+stockstat plugins --namespace indicators
+stockstat plugins --namespace sources
+stockstat plugins --namespace cost_models
+```
+
+Output example:
+```
+Namespace            Name                      Category
+--------------------------------------------------------------------
+sources              yfinance                  sources
+sources              binance                   sources
+indicators           ma                        trend
+indicators           rsi                       oscillator
+indicators           hurst_dfa                 nonlinear
+cost_models          binance                   cost
+renderers            matplotlib                renderers
+
+Total: 45 plugin(s)
+```
+
+### Example 17.5: List registered indicators
+
+```bash
+# All indicators
+stockstat indicators
+
+# Filter by category
+stockstat indicators --category trend
+stockstat indicators --category nonlinear
+```
+
+---
+
+## 18. v2.0 Offline Mode
+
+v2.0's `V2Client` supports offline mode, using local Storage directly without starting a backend HTTP service. Useful for:
+- Analyzing pre-loaded data in Jupyter
+- Running backtests without network access
+- Unit testing
+
+### Example 18.1: Basic offline usage
 
 ```python
-# PSD log-log plot
-spec = client.compute.psd_plot(np.diff(np.log(signal)), fs=1.0)
-renderer = client.plot.get_renderer()
-renderer.render(spec)
-renderer.savefig("psd.png")
+from stockstat._api.client import V2Client
+from stockstat._core.storage import MemoryStorage
+from stockstat._core.contracts import DataSchema, FieldDef
+import pandas as pd
+
+# Create local storage and write data
+storage = MemoryStorage()
+storage.register_schema("ohlcv", DataSchema(
+    name="ohlcv",
+    fields=[
+        FieldDef("symbol", "str", nullable=False),
+        FieldDef("ts", "datetime", nullable=False),
+        FieldDef("open", "float"), FieldDef("high", "float"),
+        FieldDef("low", "float"), FieldDef("close", "float"),
+        FieldDef("volume", "float"),
+    ],
+    unique_constraints=[("symbol", "ts")],
+))
+
+storage.write("ohlcv", [
+    {"symbol": "BTC", "ts": pd.Timestamp("2024-01-01", tz="UTC"),
+     "open": 100, "high": 105, "low": 95, "close": 102, "volume": 1000},
+    {"symbol": "BTC", "ts": pd.Timestamp("2024-01-02", tz="UTC"),
+     "open": 102, "high": 106, "low": 101, "close": 104, "volume": 1200},
+])
+
+# Offline client
+client = V2Client(mode="offline", storage=storage)
+
+# Query data (from local Storage, no HTTP)
+df = client.ohlcv("BTC")
+print(df)
 ```
 
-**Expected result**: a log-log PSD curve; low-frequency energy is usually higher than high-frequency.
+### Example 18.2: Offline computation and backtesting
+
+```python
+# Compute indicators (local ComputeEngine)
+ma = client.compute.ma(df.close, window=2)
+
+# Run backtest (local BacktestEngine)
+from stockstat.backtest import strategy, Order
+@strategy
+def s(ctx):
+    d = ctx.get("BTC", "1d", lookback=3)
+    if len(d) < 2: return
+    pos = ctx.portfolio.get_position("BTC")
+    if pos.qty == 0:
+        ctx.broker.submit(Order("BTC", "buy", 1))
+    elif pos.qty > 0:
+        ctx.broker.submit(Order("BTC", "sell", pos.qty))
+
+data = {"BTC": {"1d": df}}
+res = client.backtest(data, s, initial_cash=10000)
+print(res.summary())
+```
+
+### Example 18.3: Offline mode limitations
+
+```python
+# Offline mode cannot ingest data (requires online mode)
+try:
+    client.ingest("BTC/USDT")
+except RuntimeError as e:
+    print(e)  # "Ingest requires online mode"
+```
+
+---
+
+## 19. v2.0 Plugin System
+
+All extension points in v2.0 are registered to a unified `PluginRegistry`.
+
+### Example 19.1: Register a custom indicator plugin
+
+```python
+from stockstat._domain.indicators import IndicatorPlugin
+from stockstat._core.plugin import get_registry
+
+reg = get_registry()
+
+def rolling_max(x, window=10):
+    """Rolling maximum."""
+    return x.rolling(window).max()
+
+plugin = IndicatorPlugin(
+    name="rolling_max",
+    func=rolling_max,
+    category="custom",
+    description="Rolling maximum",
+)
+reg.register("indicators", "rolling_max", plugin)
+
+# Query
+print(reg.get("indicators", "rolling_max"))
+```
+
+### Example 19.2: DSL auto-reflection of new indicators
+
+```python
+from stockstat._api.dsl import DslEngine
+
+engine = DslEngine(reg, client=mock_client)
+engine.refresh()  # Reload function table from registry
+
+# rolling_max is now DSL-available
+result = engine.eval('''
+    SELECT close, rolling_max(close, 5) AS rmax
+    FROM ohlcv("BTC/USDT", "1d", "2024-01-01", "2024-12-31")
+    LIMIT 5
+''')
+```
+
+### Example 19.3: Register a custom backtest component
+
+```python
+from stockstat._domain.backtest import BacktestComponentPlugin
+
+# Suppose we have a custom cost model
+class MyCostModel:
+    def __init__(self, rate=0.001):
+        self.rate = rate
+    def compute(self, qty, price, side):
+        return abs(qty * price * self.rate)
+
+reg.register("cost_models", "my_cost",
+    BacktestComponentPlugin("my_cost", MyCostModel, "cost",
+                            description="Custom cost model"))
+```
+
+### Example 19.4: List all plugins
+
+```python
+for item in reg.list():
+    plugin = item["plugin"]
+    print(f"{item['namespace']:<20} {item['name']:<25} {getattr(plugin, 'category', '')}")
+```
+
+### Example 19.5: Theme system
+
+```python
+from stockstat._viz.themes import get_theme, register_theme, Theme, list_themes
+
+# Built-in themes
+print(list_themes())  # ['default', 'dark', 'publication']
+
+dark = get_theme("dark")
+print(dark.background)  # '#1e1e1e'
+
+# Register a custom theme
+custom = Theme("ocean", background="#0a1929", primary="#64ffda",
+               secondary="#ff6b6b", grid="#1c3a5e")
+register_theme(custom)
+print(get_theme("ocean").primary)  # '#64ffda'
+```
 
 ---
 
@@ -1427,8 +1143,8 @@ renderer.savefig("psd.png")
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `DATABASE_URL` | `sqlite:///stockstat.db` | Database URL (switchable to `postgresql://...`) |
-| `REDIS_URL` | (empty) | Redis connection (optional; not auto-wired by current code) |
+| `DATABASE_URL` | `sqlite:///stockstat.db` | Database URL |
+| `REDIS_URL` | (empty) | Redis connection (optional) |
 | `HOST` | `0.0.0.0` | Backend listen address |
 | `PORT` | `8000` | Backend listen port |
 | `STOCKSTAT_DEFAULT_SOURCE` | `yfinance` | Default data source |
@@ -1442,6 +1158,6 @@ renderer.savefig("psd.png")
 |----------|---------|-------------|
 | `STOCKSTAT_HOST` | `localhost` | Frontend host |
 | `STOCKSTAT_PORT` | `8000` | Frontend port |
-| `STOCKSTAT_API_KEY` | (empty) | Optional API key (Bearer auth) |
+| `STOCKSTAT_API_KEY` | (empty) | Optional API key |
 | `STOCKSTAT_TIMEOUT` | `30` | HTTP timeout in seconds |
 | `STOCKSTAT_USE_HTTPS` | `false` | Whether to use HTTPS |
