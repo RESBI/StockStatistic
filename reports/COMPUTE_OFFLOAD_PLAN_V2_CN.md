@@ -667,12 +667,16 @@ graph TB
 | `task.cancel` | Client → Dispatcher | `application/json` | 取消任务 |
 | `task.progress` | Worker → Dispatcher → Client | `application/json` | 进度推送 |
 | `task.error` | Worker → Dispatcher → Client | `application/json` | 错误上报 |
+| `cluster.info` | Client → Dispatcher | `application/json` | 查询集群拓扑与节点信息 |
+| `cluster.info.reply` | Dispatcher → Client | `application/json` | 返回完整集群拓扑 |
 | **调度面（Dispatcher ↔ Worker）** | | | |
 | `dispatch.assign` | Dispatcher → Worker | `application/vnd.stockstat.task+json` | 分配任务分片 |
 | `dispatch.ack` | Worker → Dispatcher | `application/json` | 确认接收分片 |
 | `dispatch.complete` | Worker → Dispatcher | `application/vnd.stockstat.result+<codec>` | 完成并回传结果 |
 | `dispatch.fail` | Worker → Dispatcher | `application/json` | 失败上报 |
-| `dispatch.heartbeat` | Worker → Dispatcher | `application/json` | 心跳 |
+| `dispatch.heartbeat` | Worker → Dispatcher | `application/json` | 心跳（含硬件配置 + 负载） |
+| `dispatch.register` | Worker → Dispatcher | `application/json` | Worker 注册（首次上线，含完整硬件信息） |
+| `dispatch.unregister` | Worker → Dispatcher | `application/json` | Worker 主动下线 |
 | **数据面（大块数据传输）** | | | |
 | `data.fetch` | Dispatcher → Storage | `application/json` | 预取数据请求 |
 | `data.stream` | Storage → Dispatcher | `application/vnd.apache.arrow.file` | 数据流（Arrow） |
@@ -895,6 +899,456 @@ graph LR
 | **破坏性变更** | 升 `version`，双版本过渡 | v2.0 改变 Envelope 结构 |
 
 **协商机制**：Client 在 `task.submit` 的 `headers` 中声明支持的 `protocol_version` 和 `codecs`；Dispatcher 在 `task.ack` 中返回实际使用的版本和 codec。如不兼容，Dispatcher 返回 `task.error` {error_code: "PROTOCOL_MISMATCH"}。
+
+### 12.13 集群拓扑查询与节点信息
+
+#### 12.13.1 设计目标
+
+Client 需要获取计算集群的完整拓扑信息，用于：
+- **任务规划**：根据可用 Worker 数和硬件能力决定分片粒度
+- **资源选优**：将 GPU 任务发送到有 GPU 的 Worker；将大内存任务发送到高内存 Worker
+- **负载监控**：查看各节点实时负载，避免向过载节点提交任务
+- **故障排查**：确认哪些节点在线/离线，哪些能力可用
+
+#### 12.13.2 Worker 注册消息 `dispatch.register`
+
+Worker 首次启动时向 Dispatcher 发送注册消息，包含完整硬件配置和自定义别名：
+
+```json
+{
+  "type": "dispatch.register",
+  "id": "msg-uuid",
+  "headers": {"content_type": "application/json"},
+  "payload": {
+    "worker_id": "worker-01",
+    "alias": "gpu-box-alpha",
+    "address": "192.168.1.101",
+    "port": 9100,
+    "concurrency": 8,
+    "hardware": {
+      "cpu": {
+        "model": "AMD Ryzen 9 7950X",
+        "cores_physical": 16,
+        "cores_logical": 32,
+        "threads": 32,
+        "freq_mhz": 4500
+      },
+      "memory": {
+        "total_gb": 64.0,
+        "available_gb": 48.5
+      },
+      "gpu": {
+        "devices": [
+          {"model": "NVIDIA RTX 4090", "vram_gb": 24.0, "cuda_version": "12.1"}
+        ]
+      },
+      "disk": {
+        "total_gb": 2000.0,
+        "available_gb": 1500.0
+      },
+      "os": "Ubuntu 22.04",
+      "python_version": "3.11.4"
+    },
+    "capabilities": ["backtest", "grid_search", "indicator", "monte_carlo", "gpu_compute"],
+    "stockstat_version": "2.0.0",
+    "labels": {
+      "rack": "A-12",
+      "zone": "datacenter-east",
+      "priority": "high"
+    }
+  }
+}
+```
+
+**字段说明**：
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `worker_id` | string | 是 | Worker 唯一 ID（UUID 或主机名+PID） |
+| `alias` | string | 否 | **用户自定义机器别名**（如 `"gpu-box-alpha"`），便于人读；未设置时用 `worker_id` |
+| `address` | string | 是 | Worker 监听地址 |
+| `port` | int | 是 | Worker 监听端口 |
+| `concurrency` | int | 是 | Worker 最大并发任务数（通常 = 逻辑 CPU 线程数） |
+| `hardware` | object | 是 | 硬件配置（见下表） |
+| `capabilities` | list[string] | 是 | 支持的任务类型列表 |
+| `stockstat_version` | string | 是 | Worker 安装的 stockstat 版本 |
+| `labels` | dict | 否 | 用户自定义标签（rack/zone/priority 等），Dispatcher 可按标签路由 |
+
+**`hardware` 字段**：
+
+| 子字段 | 属性 | 说明 |
+|--------|------|------|
+| `cpu` | `model` | CPU 型号字符串 |
+| | `cores_physical` | 物理核心数 |
+| | `cores_logical` | 逻辑核心数（含超线程） |
+| | `threads` | 线程数（= 逻辑核心数，显式声明便于跨语言解析） |
+| | `freq_mhz` | 基础频率 MHz |
+| `memory` | `total_gb` | 总内存 GB |
+| | `available_gb` | 可用内存 GB（注册时快照） |
+| `gpu` | `devices` | GPU 设备列表（无 GPU 时为空数组） |
+| | `.model` | GPU 型号 |
+| | `.vram_gb` | 显存 GB |
+| | `.cuda_version` | CUDA 版本 |
+| `disk` | `total_gb` | 磁盘总容量 GB |
+| | `available_gb` | 可用磁盘 GB |
+| `os` | — | 操作系统 |
+| `python_version` | — | Python 版本 |
+
+#### 12.13.3 Worker 心跳消息 `dispatch.heartbeat`
+
+注册后，Worker 定期（默认 10s）发送心跳，携带实时负载信息：
+
+```json
+{
+  "type": "dispatch.heartbeat",
+  "id": "msg-uuid",
+  "headers": {"content_type": "application/json"},
+  "payload": {
+    "worker_id": "worker-01",
+    "alias": "gpu-box-alpha",
+    "timestamp": "2026-07-18T10:30:00Z",
+    "load": {
+      "cpu_percent": 37.5,
+      "memory_used_gb": 15.2,
+      "memory_available_gb": 48.8,
+      "gpu_percent": [85.0],
+      "gpu_memory_used_gb": [18.5],
+      "disk_available_gb": 1498.0
+    },
+    "active_tasks": 3,
+    "completed_tasks": 156,
+    "failed_tasks": 2,
+    "avg_task_duration_s": 12.3,
+    "status": "online"
+  }
+}
+```
+
+**心跳负载字段**：
+
+| 字段 | 说明 |
+|------|------|
+| `load.cpu_percent` | CPU 使用率 %（0~100） |
+| `load.memory_used_gb` | 已用内存 GB |
+| `load.memory_available_gb` | 可用内存 GB（实时） |
+| `load.gpu_percent` | 各 GPU 使用率 %（列表，对应 `devices` 顺序） |
+| `load.gpu_memory_used_gb` | 各 GPU 已用显存 GB |
+| `load.disk_available_gb` | 可用磁盘 GB（实时） |
+| `active_tasks` | 当前正在执行的任务数 |
+| `completed_tasks` | 累计完成任务数 |
+| `failed_tasks` | 累计失败任务数 |
+| `avg_task_duration_s` | 平均任务耗时秒 |
+| `status` | `"online"` / `"busy"` / `"draining"` |
+
+**Worker 状态定义**：
+
+| status | 含义 | Dispatcher 行为 |
+|--------|------|----------------|
+| `online` | 正常，接受任务 | 正常分发 |
+| `busy` | 活动任务 = concurrency | 不再分发新任务 |
+| `draining` | 优雅下线中，不接受新任务 | 等待现有任务完成后标记 `offline` |
+| `offline` | 心跳超时或主动下线 | 从可用 Worker 列表移除 |
+
+#### 12.13.4 集群查询消息 `cluster.info`
+
+Client 向 Dispatcher 查询集群拓扑：
+
+**请求**：
+
+```json
+{
+  "type": "cluster.info",
+  "id": "msg-uuid",
+  "headers": {"content_type": "application/json"},
+  "payload": {
+    "include_offline": false,
+    "include_hardware": true,
+    "include_labels": true,
+    "filter_labels": {"zone": "datacenter-east"}
+  }
+}
+```
+
+| 请求字段 | 说明 |
+|---------|------|
+| `include_offline` | 是否包含离线节点（默认 false） |
+| `include_hardware` | 是否包含硬件配置（默认 true） |
+| `include_labels` | 是否包含自定义标签（默认 true） |
+| `filter_labels` | 按标签过滤（只返回匹配的 Worker） |
+
+**响应** `cluster.info.reply`：
+
+```json
+{
+  "type": "cluster.info.reply",
+  "id": "msg-uuid",
+  "headers": {"content_type": "application/json"},
+  "payload": {
+    "dispatcher": {
+      "id": "dispatcher-01",
+      "alias": "dispatch-primary",
+      "address": "192.168.1.100:9000",
+      "status": "online",
+      "uptime_s": 86400,
+      "queue_depth": 3,
+      "cache_size_mb": 120.5,
+      "cache_hit_rate": 0.85
+    },
+    "workers": [
+      {
+        "worker_id": "worker-01",
+        "alias": "gpu-box-alpha",
+        "address": "192.168.1.101:9100",
+        "status": "online",
+        "concurrency": 8,
+        "active_tasks": 3,
+        "completed_tasks": 156,
+        "failed_tasks": 2,
+        "avg_task_duration_s": 12.3,
+        "last_heartbeat": "2026-07-18T10:30:00Z",
+        "capabilities": ["backtest", "grid_search", "indicator", "monte_carlo", "gpu_compute"],
+        "stockstat_version": "2.0.0",
+        "hardware": {
+          "cpu": {"model": "AMD Ryzen 9 7950X", "cores_physical": 16, "cores_logical": 32, "threads": 32, "freq_mhz": 4500},
+          "memory": {"total_gb": 64.0, "available_gb": 48.8},
+          "gpu": {"devices": [{"model": "NVIDIA RTX 4090", "vram_gb": 24.0, "cuda_version": "12.1"}]},
+          "disk": {"total_gb": 2000.0, "available_gb": 1498.0},
+          "os": "Ubuntu 22.04",
+          "python_version": "3.11.4"
+        },
+        "load": {
+          "cpu_percent": 37.5,
+          "memory_used_gb": 15.2,
+          "memory_available_gb": 48.8,
+          "gpu_percent": [85.0],
+          "gpu_memory_used_gb": [18.5]
+        },
+        "labels": {"rack": "A-12", "zone": "datacenter-east", "priority": "high"}
+      },
+      {
+        "worker_id": "worker-02",
+        "alias": "cpu-farm-beta",
+        "address": "192.168.1.102:9100",
+        "status": "online",
+        "concurrency": 16,
+        "active_tasks": 0,
+        "completed_tasks": 89,
+        "failed_tasks": 0,
+        "avg_task_duration_s": 8.7,
+        "last_heartbeat": "2026-07-18T10:29:58Z",
+        "capabilities": ["backtest", "monte_carlo"],
+        "stockstat_version": "2.0.0",
+        "hardware": {
+          "cpu": {"model": "Intel Xeon Gold 6338", "cores_physical": 32, "cores_logical": 64, "threads": 64, "freq_mhz": 2000},
+          "memory": {"total_gb": 256.0, "available_gb": 240.0},
+          "gpu": {"devices": []},
+          "disk": {"total_gb": 4000.0, "available_gb": 3800.0},
+          "os": "Ubuntu 22.04",
+          "python_version": "3.11.4"
+        },
+        "load": {
+          "cpu_percent": 0.0,
+          "memory_used_gb": 2.1,
+          "memory_available_gb": 253.9,
+          "gpu_percent": [],
+          "gpu_memory_used_gb": []
+        },
+        "labels": {"rack": "B-05", "zone": "datacenter-east", "priority": "normal"}
+      }
+    ],
+    "sub_dispatchers": [
+      {
+        "id": "sub-dispatcher-01",
+        "alias": "dispatch-west",
+        "address": "192.168.2.100:9000",
+        "status": "online",
+        "worker_count": 4,
+        "total_concurrency": 32
+      }
+    ],
+    "stats": {
+      "total_workers": 2,
+      "online_workers": 2,
+      "offline_workers": 0,
+      "total_concurrency": 24,
+      "available_concurrency": 21,
+      "active_tasks": 3,
+      "total_completed": 245,
+      "total_failed": 2,
+      "queue_depth": 3,
+      "avg_queue_wait_s": 1.2
+    }
+  }
+}
+```
+
+#### 12.13.5 响应字段完整定义
+
+**`dispatcher` 对象**：
+
+| 字段 | 说明 |
+|------|------|
+| `id` / `alias` | Dispatcher 标识与自定义别名 |
+| `address` | 监听地址 |
+| `status` | `online` / `degraded` / `offline` |
+| `uptime_s` | 运行时长秒 |
+| `queue_depth` | 当前队列中待处理任务数 |
+| `cache_size_mb` | 数据缓存大小 MB |
+| `cache_hit_rate` | 缓存命中率（0~1） |
+
+**`workers[]` 数组元素**：
+
+| 字段 | 说明 |
+|------|------|
+| `worker_id` / `alias` | Worker 标识与**自定义机器别名** |
+| `address` / `port` | 网络地址 |
+| `status` | `online` / `busy` / `draining` / `offline` |
+| `concurrency` | 最大并发数 |
+| `active_tasks` | 当前执行中任务数 |
+| `completed_tasks` / `failed_tasks` | 累计统计 |
+| `avg_task_duration_s` | 平均任务耗时 |
+| `last_heartbeat` | 最后心跳时间 |
+| `capabilities` | 支持的任务类型 |
+| `stockstat_version` | stockstat 版本 |
+| `hardware` | 完整硬件配置（同 §12.13.2） |
+| `load` | 实时负载（同 §12.13.3 心跳） |
+| `labels` | 用户自定义标签 |
+
+**`sub_dispatchers[]` 数组元素**（多级 Dispatcher 时）：
+
+| 字段 | 说明 |
+|------|------|
+| `id` / `alias` | 子 Dispatcher 标识 |
+| `address` | 子 Dispatcher 地址 |
+| `status` | 在线状态 |
+| `worker_count` | 该子级管理的 Worker 数 |
+| `total_concurrency` | 该子级总并发能力 |
+
+**`stats` 聚合统计**：
+
+| 字段 | 说明 |
+|------|------|
+| `total_workers` / `online_workers` / `offline_workers` | Worker 计数 |
+| `total_concurrency` / `available_concurrency` | 总并发 / 可用并发（= 总 - 活动任务） |
+| `active_tasks` | 全集群正在执行的任务数 |
+| `total_completed` / `total_failed` | 全集群累计统计 |
+| `queue_depth` | Dispatcher 队列深度 |
+| `avg_queue_wait_s` | 平均队列等待时间秒 |
+
+#### 12.13.6 多级 Dispatcher 级联查询
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant D1 as 主 Dispatcher
+    participant D2 as 子 Dispatcher
+    participant W as Worker
+
+    C->>D1: cluster.info
+    D1->>D2: cluster.info (原样转发)
+    D2->>D2: 收集本地 Worker 信息
+    D2-->>D1: cluster.info.reply (本地 workers + stats)
+    D1->>D1: 合并自身 + D2 的回复
+    D1-->>C: cluster.info.reply (全局拓扑)
+```
+
+- 主 Dispatcher 向所有子 Dispatcher 转发 `cluster.info`
+- 各子 Dispatcher 返回本地 Worker 列表和统计
+- 主 Dispatcher 合并后返回全局视图（含 `sub_dispatchers` 字段）
+- Client 一次查询获取全集群拓扑
+
+#### 12.13.7 用户 API
+
+**Python Client**：
+
+```python
+# 查询集群拓扑
+topology = client.compute.cluster_info()
+
+# 查看所有 Worker
+for w in topology["workers"]:
+    print(f"{w['alias']:20s}  {w['status']:8s}  "
+          f"CPU {w['hardware']['cpu']['cores_logical']}核  "
+          f"内存 {w['hardware']['memory']['total_gb']}GB  "
+          f"负载 {w['load']['cpu_percent']:.1f}%  "
+          f"活动任务 {w['active_tasks']}/{w['concurrency']}")
+
+# 按标签过滤
+topology = client.compute.cluster_info(filter_labels={"zone": "datacenter-east"})
+
+# 只看在线节点，不含硬件详情（轻量）
+topology = client.compute.cluster_info(include_hardware=False)
+
+# 查看集群汇总
+stats = topology["stats"]
+print(f"集群: {stats['online_workers']} 节点在线, "
+      f"可用并发 {stats['available_concurrency']}/{stats['total_concurrency']}, "
+      f"队列 {stats['queue_depth']} 任务")
+```
+
+**CLI**：
+
+```bash
+stockstat cluster info                          # 查看集群拓扑
+stockstat cluster info --filter zone=east       # 按标签过滤
+stockstat cluster info --no-hardware            # 轻量查询（不含硬件）
+stockstat cluster workers                       # 只列出 Worker
+stockstat cluster stats                         # 只看汇总统计
+```
+
+输出示例：
+
+```
+Cluster Topology
+═══════════════════════════════════════════════════════════════════════
+Dispatcher: dispatch-primary @ 192.168.1.100:9000  [online, uptime 1d]
+Queue: 3 pending | Cache: 120MB (85% hit rate)
+
+Workers:
+  Alias              Address            Status   CPU           Mem      GPU         Load   Active
+  gpu-box-alpha      192.168.1.101:9100 online   32 threads    64 GB    RTX 4090    37.5%  3/8
+  cpu-farm-beta      192.168.1.102:9100 online   64 threads    256 GB   —           0.0%   0/16
+
+Sub-Dispatchers:
+  dispatch-west      192.168.2.100:9000 online   4 workers, 32 concurrency
+
+Stats:
+  Workers: 2 online, 0 offline
+  Concurrency: 21 available / 24 total
+  Tasks: 3 active, 245 completed, 2 failed
+  Queue wait: 1.2s avg
+═══════════════════════════════════════════════════════════════════════
+```
+
+#### 12.13.8 Worker 别名配置
+
+Worker 启动时通过 `--alias` 参数指定自定义机器别名：
+
+```bash
+stockstat-compute worker \
+    --dispatcher-host 192.168.1.100 \
+    --dispatcher-port 9000 \
+    --concurrency 8 \
+    --alias "gpu-box-alpha"
+```
+
+或在配置文件中指定：
+
+```toml
+# stockstat-compute.toml
+[worker]
+alias = "gpu-box-alpha"
+concurrency = 8
+labels = {rack = "A-12", zone = "datacenter-east", priority = "high"}
+```
+
+别名用于：
+- `cluster.info.reply` 中的显示（人可读）
+- Client 按别名筛选 Worker
+- CLI `stockstat cluster workers` 输出
+- 日志中标识节点（比 IP 更易识别）
+
+未设置别名时，回退到 `worker_id`（通常是 `hostname-pid` 格式）。
 
 ---
 
