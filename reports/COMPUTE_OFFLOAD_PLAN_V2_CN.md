@@ -548,7 +548,357 @@ stockstat-compute/           # Worker 独立包
 
 ---
 
-## 12. 安全性
+## 12. 通信协议设计
+
+### 12.1 设计目标
+
+| 目标 | 说明 |
+|------|------|
+| **最大通用性** | 协议不绑定特定计算类型；回测、指标、网格搜索、自定义任务均走同一套消息格式 |
+| **传输无关** | 同一套消息可在 HTTP、WebSocket、TCP socket、Redis pub/sub、共享内存上传输 |
+| **语言无关** | 控制面用 JSON（任何语言可解析）；数据面用 Arrow（跨语言列式格式） |
+| **可扩展** | 新增任务类型不需要改协议；新增传输通道不需要改消息格式 |
+| **可组合** | 多级 Dispatcher 级联时，消息可原样转发 |
+
+### 12.2 协议分层
+
+```mermaid
+graph TB
+    subgraph "Layer 3: 传输层 Transport"
+        T_HTTP["HTTP/REST<br/>控制面"]
+        T_WS["WebSocket<br/>流式/推送"]
+        T_TCP["Raw TCP<br/>高性能数据面"]
+        T_REDIS["Redis pub/sub<br/>队列"]
+        T_SHM["共享内存<br/>同机零拷贝"]
+    end
+
+    subgraph "Layer 2: 消息层 Message"
+        M_ENVELOPE["信封 Envelope<br/>protocol/version/type/id/headers"]
+        M_PAYLOAD["载荷 Payload<br/>task_spec / data_ref / result / error"]
+    end
+
+    subgraph "Layer 1: 编码层 Codec"
+        C_JSON["JSON<br/>控制消息（语言无关）"]
+        C_ARROW["Arrow IPC<br/>表格数据（零拷贝）"]
+        C_PICKLE["cloudpickle<br/>策略函数（Python 闭包）"]
+        C_RAW["raw bytes<br/>二进制透传"]
+    end
+
+    T_HTTP --> M_ENVELOPE
+    T_WS --> M_ENVELOPE
+    T_TCP --> M_ENVELOPE
+    T_REDIS --> M_ENVELOPE
+    T_SHM --> M_ENVELOPE
+    M_ENVELOPE --> M_PAYLOAD
+    M_PAYLOAD --> C_JSON
+    M_PAYLOAD --> C_ARROW
+    M_PAYLOAD --> C_PICKLE
+    M_PAYLOAD --> C_RAW
+```
+
+**三层分离原则**：
+- **编码层**：决定"载荷如何序列化为字节"——与传输无关
+- **消息层**：决定"字节如何包装为有意义的消息"——与编码无关
+- **传输层**：决定"消息如何在节点间移动"——与消息内容无关
+
+任何一层可独立替换：换传输不动消息格式，换编码不动传输。
+
+### 12.3 消息信封 Envelope
+
+所有节点间通信都包装在统一信封中。信封本身是 JSON（任何语言可解析），载荷部分按 `content_type` 指示的编码方式解码。
+
+```json
+{
+  "protocol": "stockstat-rpc",
+  "version": "1.0",
+  "type": "task.submit",
+  "id": "550e8400-e29b-41d4-a716-446655440000",
+  "reply_to": "client-abc-123",
+  "headers": {
+    "content_type": "application/vnd.stockstat.task+json",
+    "data_codec": "arrow",
+    "strategy_codec": "cloudpickle",
+    "priority": 0,
+    "timeout": 3600,
+    "trace_id": "trace-xyz-789"
+  },
+  "payload": "<base64 or raw bytes depending on transport>"
+}
+```
+
+**信封字段定义**：
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `protocol` | string | 是 | 固定 `"stockstat-rpc"`，标识协议 |
+| `version` | string | 是 | 协议版本（语义化，如 `"1.0"`） |
+| `type` | string | 是 | 消息类型（见 §12.4 消息类型表） |
+| `id` | string | 是 | 消息唯一 ID（UUID v4） |
+| `reply_to` | string | 否 | 回复目标 ID（用于异步回调） |
+| `headers` | object | 是 | 元数据头（见下表） |
+| `payload` | bytes/string | 是 | 载荷（按 `content_type` 编码） |
+
+**Headers 字段**：
+
+| 字段 | 类型 | 默认 | 说明 |
+|------|------|------|------|
+| `content_type` | string | — | 载荷的 MIME 类型（决定解码方式） |
+| `data_codec` | string | `"arrow"` | 表格数据的编码格式：`arrow` / `json` / `parquet` |
+| `strategy_codec` | string | `"cloudpickle"` | 策略函数的编码格式：`cloudpickle` / `json` / `none` |
+| `priority` | int | `0` | 任务优先级（0=普通，-1=高，1=低） |
+| `timeout` | int | `3600` | 超时秒数 |
+| `trace_id` | string | `""` | 分布式追踪 ID（贯穿全链路） |
+| `data_ref` | string | `""` | 数据引用（`shm://id` / `storage://symbol` / `inline`） |
+| `retry_count` | int | `0` | 重试次数 |
+
+### 12.4 消息类型表
+
+所有消息类型共用同一信封，通过 `type` 字段区分：
+
+| `type` | 方向 | `content_type` | 说明 |
+|--------|------|----------------|------|
+| **控制面（轻量 JSON）** | | | |
+| `task.submit` | Client → Dispatcher | `application/vnd.stockstat.task+json` | 提交任务 |
+| `task.ack` | Dispatcher → Client | `application/json` | 确认接收，返回 task_id |
+| `task.status` | Client → Dispatcher | `application/json` | 查询状态 |
+| `task.status.reply` | Dispatcher → Client | `application/json` | 返回状态 |
+| `task.result` | Client → Dispatcher | `application/json` | 获取结果 |
+| `task.result.reply` | Dispatcher → Client | `application/vnd.stockstat.result+<codec>` | 返回结果 |
+| `task.cancel` | Client → Dispatcher | `application/json` | 取消任务 |
+| `task.progress` | Worker → Dispatcher → Client | `application/json` | 进度推送 |
+| `task.error` | Worker → Dispatcher → Client | `application/json` | 错误上报 |
+| **调度面（Dispatcher ↔ Worker）** | | | |
+| `dispatch.assign` | Dispatcher → Worker | `application/vnd.stockstat.task+json` | 分配任务分片 |
+| `dispatch.ack` | Worker → Dispatcher | `application/json` | 确认接收分片 |
+| `dispatch.complete` | Worker → Dispatcher | `application/vnd.stockstat.result+<codec>` | 完成并回传结果 |
+| `dispatch.fail` | Worker → Dispatcher | `application/json` | 失败上报 |
+| `dispatch.heartbeat` | Worker → Dispatcher | `application/json` | 心跳 |
+| **数据面（大块数据传输）** | | | |
+| `data.fetch` | Dispatcher → Storage | `application/json` | 预取数据请求 |
+| `data.stream` | Storage → Dispatcher | `application/vnd.apache.arrow.file` | 数据流（Arrow） |
+| `data.ref` | Dispatcher → Worker | `application/json` | 数据引用（共享内存 ID 或 Storage URL） |
+
+### 12.5 任务规范 TaskSpec
+
+`task.submit` 的载荷是一个 TaskSpec JSON，描述"算什么"但不描述"怎么传"：
+
+```json
+{
+  "task_type": "grid_search",
+  "task_id": "task-2024-001",
+  "data_spec": {
+    "symbols": ["BTC/USDT"],
+    "timeframe": "1d",
+    "start": "2024-01-01",
+    "end": "2024-12-31",
+    "source": "binance"
+  },
+  "compute_spec": {
+    "strategy_ref": "cloudpickle:base64...",
+    "param_grid": {
+      "short": [3, 5, 8, 10],
+      "long": [10, 20, 30, 50]
+    },
+    "metric": "sharpe",
+    "initial_cash": 10000,
+    "cost_model": "binance_spot"
+  },
+  "dispatch_spec": {
+    "split_strategy": "param_wise",
+    "max_workers": 8,
+    "data_dispatch": "auto"
+  }
+}
+```
+
+**TaskSpec 三段式结构**：
+
+| 段 | 职责 | 通用性 |
+|---|------|--------|
+| `data_spec` | 描述需要什么数据（symbol/tf/range） | 任何任务类型通用 |
+| `compute_spec` | 描述做什么计算（策略/参数/配置） | 按 `task_type` 分发到对应处理器 |
+| `dispatch_spec` | 描述如何分发（分片策略/Worker 数/数据传输方式） | 任何任务类型通用 |
+
+**新增任务类型只需**：定义新的 `task_type` + 对应的 `compute_spec` schema + Worker 侧处理器。协议、信封、传输层零改动。
+
+### 12.6 数据传输策略
+
+Dispatcher 根据 `dispatch_spec.data_dispatch` 和数据大小选择传输方式：
+
+| 策略 | `data_dispatch` | 数据路径 | 编码 | 适用 |
+|------|-----------------|---------|------|------|
+| **随任务内联** | `"inline"` | Dispatcher → Worker（随 `dispatch.assign` 消息） | Arrow IPC | < 10MB，跨机 |
+| **共享内存** | `"shared_memory"` | Dispatcher 写入 shm → Worker 通过 ID 读取 | raw bytes | 同机，任意大小 |
+| **Storage 引用** | `"storage_ref"` | Worker 直接从 Storage 拉取 | HTTP + Arrow | > 100MB，Worker 可达 Storage |
+| **Dispatcher 流式** | `"stream"` | Dispatcher 通过 WebSocket/TCP 推流 | Arrow IPC stream | 10~100MB，跨机 |
+| **自动** | `"auto"` | Dispatcher 按数据大小+拓扑自动选择 | — | 默认 |
+
+```python
+# Dispatcher 自动选择逻辑
+def choose_data_dispatch(data_size: int, workers_same_host: bool,
+                         workers_can_reach_storage: bool) -> str:
+    if data_size < 10 * 1024 * 1024:  # < 10MB
+        return "inline"
+    elif workers_same_host:
+        return "shared_memory"
+    elif data_size > 100 * 1024 * 1024 and workers_can_reach_storage:
+        return "storage_ref"
+    else:
+        return "stream"
+```
+
+### 12.7 传输层映射
+
+同一套消息可映射到不同传输协议：
+
+| 传输 | 控制面 | 数据面 | 心跳 | 适用场景 |
+|------|--------|--------|------|---------|
+| **HTTP/REST** | POST/GET | multipart / base64 | 无 | 简单部署，跨网段 |
+| **WebSocket** | JSON frame | binary frame | ping/pong | 实时进度推送 |
+| **Raw TCP** | length-prefixed JSON | length-prefixed binary | 定时 | 高性能局域网 |
+| **Redis pub/sub** | publish/subscribe | — | TTL | 队列解耦 |
+| **共享内存** | `multiprocessing.Queue` | `SharedMemory` | 进程存活 | 同机零拷贝 |
+| **gRPC**（规划） | protobuf | streaming | health check | 强类型场景 |
+
+**传输无关的实现**：消息层定义 `Transport` 协议，各传输实现该协议：
+
+```python
+class Transport(Protocol):
+    """传输层抽象——消息如何从 A 到 B。"""
+    def send(self, envelope: Envelope) -> None: ...
+    def receive(self, timeout: float = None) -> Envelope: ...
+    def send_data(self, data: bytes, content_type: str) -> str: ...
+    """返回数据引用 ID（如 shm://xxx 或 inline）"""
+```
+
+每种传输实现 `Transport`：
+
+| 实现 | `send` | `send_data` |
+|------|--------|-------------|
+| `HttpTransport` | POST body = JSON(envelope) | multipart upload |
+| `WebSocketTransport` | JSON frame | binary frame |
+| `TcpTransport` | `[4-byte len][JSON]` | `[4-byte len][binary]` |
+| `SharedMemoryTransport` | `multiprocessing.Queue` | `SharedMemory` + 返回 `shm://id` |
+| `RedisTransport` | `LPUSH queue_name JSON` | 不支持大数据（用引用） |
+
+### 12.8 生命周期消息流
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant D as Dispatcher
+    participant S as Storage
+    participant W as Worker
+
+    Note over C,D: 控制面 (轻量 JSON)
+    C->>D: task.submit (TaskSpec JSON)
+    D-->>C: task.ack {task_id, status: "pending"}
+
+    Note over D,S: 数据面 (Arrow, 1次拉取)
+    D->>S: data.fetch {symbol, start, end}
+    S-->>D: data.stream (Arrow IPC binary)
+
+    Note over D,W: 调度面 (任务+数据分发)
+    D->>D: 分片 (grid 1000组 → 8片)
+    loop 每个分片
+        D->>W: dispatch.assign {task_slice, data_ref: "shm://abc"}
+        W-->>D: dispatch.ack
+    end
+
+    Note over W: 计算 (进程内)
+    W->>W: 执行回测/指标计算
+    W->>D: task.progress {completed: 125/1000}
+
+    Note over W,D: 结果回传 (轻量)
+    W->>D: dispatch.complete {result_slice (Arrow)}
+
+    Note over D: 合并
+    D->>D: 合并 8 个分片
+
+    Note over C,D: 控制面 (返回结果)
+    C->>D: task.result {task_id}
+    D-->>C: task.result.reply {merged_result (Arrow)}
+
+    Note over W,D: 心跳 (定时)
+    W->>D: dispatch.heartbeat {worker_id, load: 0.3}
+```
+
+### 12.9 错误处理协议
+
+| 场景 | 消息 | 处理 |
+|------|------|------|
+| Worker 计算崩溃 | `dispatch.fail` {error, traceback} | Dispatcher 重新分配分片给其他 Worker |
+| Worker 心跳超时 | 无心跳 30s | Dispatcher 标记 Worker 离线，重新分配其任务 |
+| Worker 超时 | `dispatch.complete` 未在 `timeout` 内到达 | Dispatcher 取消该分片，重新分配 |
+| Dispatcher 崩溃 | Client 轮询 `task.status` 超时 | Client 向备用 Dispatcher 重试（多级模式） |
+| Storage 不可达 | `data.fetch` 失败 | Dispatcher 返回 `task.error` 给 Client |
+| 数据解码失败 | Worker 解码 Arrow 失败 | 返回 `dispatch.fail` {error: "codec_error"} |
+
+**错误消息格式**：
+
+```json
+{
+  "type": "task.error",
+  "id": "msg-uuid",
+  "headers": {"content_type": "application/json", "trace_id": "trace-xyz"},
+  "payload": {
+    "task_id": "task-2024-001",
+    "slice_id": "slice-3",
+    "error_code": "COMPUTE_FAILED",
+    "error_message": "BacktestError: insufficient data for window=50",
+    "traceback": "...",
+    "retryable": true
+  }
+}
+```
+
+### 12.10 多级 Dispatcher 级联
+
+多级 Dispatcher 时，消息原样转发，只需修改 `reply_to` 和 `headers.trace_id`：
+
+```mermaid
+graph LR
+    C["Client"] -->|"task.submit"| D1["主 Dispatcher"]
+    D1 -->|"dispatch.assign<br/>(原样转发+改 reply_to)"| D2["子 Dispatcher"]
+    D2 -->|"dispatch.assign"| W1["Worker"]
+    W1 -->|"dispatch.complete"| D2
+    D2 -->|"dispatch.complete<br/>(原样转发)"| D1
+    D1 -->|"task.result.reply"| C
+```
+
+- `trace_id` 贯穿全链路，任何一级可记录日志
+- 主 Dispatcher 不需要知道子 Dispatcher 的 Worker 拓扑
+- 消息格式在所有级别完全相同
+
+### 12.11 通用性保证
+
+| 维度 | 设计 | 通用性体现 |
+|------|------|-----------|
+| **任务类型** | `task_type` 字段 + 可扩展 `compute_spec` | 新增 `"monte_carlo"` 只需定义 compute_spec schema + Worker 处理器，协议零改动 |
+| **数据格式** | `data_codec` header | 同一任务可按 Arrow/JSON/Parquet 传输，Worker 按 header 自动解码 |
+| **策略编码** | `strategy_codec` header | Python 用 cloudpickle，未来 Go/Rust Worker 可用 JSON schema |
+| **传输方式** | `Transport` 协议抽象 | 同一套消息走 HTTP/WebSocket/TCP/SHM/Redis，上层无感知 |
+| **数据分发** | `data_dispatch` 字段 | inline/shm/stream/ref 四策略自动选择，覆盖任意数据大小+拓扑 |
+| **多级级联** | 消息原样转发 | 主/子 Dispatcher 消息格式完全相同，无限级联 |
+| **跨语言** | 信封=JSON，数据=Arrow | 控制面任何语言可解析；数据面 Arrow 是跨语言标准 |
+| **版本兼容** | `version` 字段 | 新版本可增加字段，旧版本忽略未知字段（前向兼容） |
+
+### 12.12 协议版本演进策略
+
+| 演进类型 | 策略 | 示例 |
+|---------|------|------|
+| **增加字段** | 直接加，旧端忽略 | v1.1 增加 `headers.gpu_required` |
+| **增加消息类型** | 直接加，旧端不处理 | v1.1 增加 `task.heartbeat` 类型 |
+| **增加 task_type** | 直接加，Dispatcher 按能力路由 | v1.1 增加 `"monte_carlo"` |
+| **增加 Codec** | 直接加，通过 `content_type` 协商 | v1.1 增加 `"msgpack"` codec |
+| **增加 Transport** | 直接加，配置选择 | v1.1 增加 gRPC transport |
+| **破坏性变更** | 升 `version`，双版本过渡 | v2.0 改变 Envelope 结构 |
+
+**协商机制**：Client 在 `task.submit` 的 `headers` 中声明支持的 `protocol_version` 和 `codecs`；Dispatcher 在 `task.ack` 中返回实际使用的版本和 codec。如不兼容，Dispatcher 返回 `task.error` {error_code: "PROTOCOL_MISMATCH"}。
+
+---
+
+## 13. 安全性
 
 | 风险 | 缓解 |
 |------|------|
@@ -559,7 +909,7 @@ stockstat-compute/           # Worker 独立包
 
 ---
 
-## 13. 总结
+## 14. 总结
 
 | 决策 | 选择 | 理由 |
 |------|------|------|
