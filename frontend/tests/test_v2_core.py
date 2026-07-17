@@ -183,7 +183,11 @@ class TestPluginRegistry:
 
 class TestConfig:
 
-    def test_defaults_loaded(self):
+    def test_defaults_loaded(self, monkeypatch):
+        # Clear env vars that might override defaults when tests run together
+        for key in ["DATABASE_URL", "REDIS_URL", "HOST", "PORT",
+                     "STOCKSTAT_HOST", "STOCKSTAT_PORT", "STOCKSTAT_PROXY_ENABLED"]:
+            monkeypatch.delenv(key, raising=False)
         from stockstat._core.config import load_config
         cfg = load_config()
         assert cfg.backend.database_url == "sqlite:///stockstat.db"
