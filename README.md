@@ -85,16 +85,6 @@ docker compose up -d
 # API available at http://localhost:8000
 ```
 
-## CLI (v2.0 new)
-
-```bash
-stockstat serve --host 0.0.0.0 --port 8000      # Start API server
-stockstat ingest BTC/USDT --source binance       # Ingest from CLI
-stockstat query BTC/USDT --limit 5               # Query and output
-stockstat plugins --namespace indicators         # List registered plugins
-stockstat indicators --category nonlinear        # List indicators by category
-```
-
 ## Optional Extras
 
 | Extra | Install command | Purpose |
@@ -116,7 +106,17 @@ The backend supports HTTP/SOCKS5 proxies for accessing real data sources. **Disa
 
 ## Usage
 
+StockStat provides three usage entry points:
+
+- **Python library**: `StockStatClient` — full-featured programmatic API (§1–§5 below)
+- **CLI**: `stockstat` command — ingest, query, and manage plugins without writing Python
+- **DSL**: SQL-like declarative query language — one-liner for common statistics
+
+> All three share the same backend service and data. Each section below shows both Python and CLI usage side by side.
+
 ### 1. Ingest data
+
+**Python:**
 
 ```python
 from stockstat import StockStatClient
@@ -136,7 +136,22 @@ client.ingest("PAXG/USDT", source="binance", start="2022-01-01", end="2024-12-31
 client.ingest("MSFT", start="2024-01-01", end="2024-06-30")
 ```
 
+**CLI:**
+
+```bash
+# Ingest stock data
+stockstat ingest AAPL --source yfinance --start 2024-01-01 --end 2024-12-31
+
+# Ingest crypto (source auto-detected)
+stockstat ingest BTC/USDT --start 2024-01-01 --end 2024-12-31
+
+# Specify timeframe
+stockstat ingest BTC/USDT --source binance --start 2024-01-01 --tf 1h
+```
+
 ### 2. Query OHLCV data
+
+**Python:**
 
 ```python
 data = client.ohlcv("AAPL", start="2024-01-01", timeframe="1d")
@@ -146,7 +161,20 @@ data = client.ohlcv("AAPL", start="2024-01-01", timeframe="1d")
 # 2024-01-03  184.22  185.88  183.43  184.40  58414500
 ```
 
+**CLI:**
+
+```bash
+# Table format (default)
+stockstat query BTC/USDT --limit 5
+
+# Specify time range and format
+stockstat query AAPL --start 2024-01-01 --end 2024-06-30 --format csv
+stockstat query BTC/USDT --tf 1h --format json
+```
+
 ### 3. Compute indicators
+
+**Python:**
 
 ```python
 sma = client.compute.ma(data.close, window=20)
@@ -155,6 +183,17 @@ upper, mid, lower = client.compute.bollinger(data.close, window=20, k=2.0)
 beta = client.compute.beta(asset_returns, benchmark_returns, window=60)
 sharpe = client.compute.sharpe(returns, risk_free=0.02, annualize=True)
 dd = client.compute.max_drawdown(data.close)
+```
+
+> Indicator computation is currently available via the Python library only. The `stockstat indicators` CLI command lists all registered indicators and their categories for quick reference:
+
+```bash
+# List all indicators
+stockstat indicators
+
+# Filter by category
+stockstat indicators --category trend
+stockstat indicators --category nonlinear
 ```
 
 ### 4. DSL queries
@@ -235,10 +274,22 @@ te = client.compute.transfer_entropy(weekend_returns, monday_returns)
 
 ## v2.0 Plugin System
 
-All extension points in v2.0 are registered to a unified `PluginRegistry`, queryable via CLI or code:
+All extension points in v2.0 (data sources, indicators, cost models, fill models, execution models, renderers) are registered to a unified `PluginRegistry`, queryable via CLI or code.
+
+**CLI:**
 
 ```bash
-$ stockstat plugins
+# List all registered plugins
+stockstat plugins
+
+# Filter by namespace
+stockstat plugins --namespace indicators
+stockstat plugins --namespace sources
+stockstat plugins --namespace cost_models
+```
+
+Output example:
+```
 Namespace            Name                      Category
 --------------------------------------------------------------------
 sources              yfinance                  sources
@@ -258,8 +309,9 @@ renderers            matplotlib                renderers
 Total: 45 plugin(s)
 ```
 
+**Python:**
+
 ```python
-# Query in code
 from stockstat._core.plugin import PluginRegistry
 from stockstat._domain.indicators import register_default_indicators, list_indicators
 

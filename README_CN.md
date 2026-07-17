@@ -85,16 +85,6 @@ docker compose up -d
 # API 可通过 http://localhost:8000 访问
 ```
 
-## CLI 命令行（v2.0 新增）
-
-```bash
-stockstat serve --host 0.0.0.0 --port 8000      # 启动 API 服务器
-stockstat ingest BTC/USDT --source binance       # 命令行采集
-stockstat query BTC/USDT --limit 5               # 查询并输出
-stockstat plugins --namespace indicators         # 列出已注册插件
-stockstat indicators --category nonlinear        # 按类别列出指标
-```
-
 ## 可选 extras
 
 | extras | 安装命令 | 用途 |
@@ -116,7 +106,17 @@ stockstat indicators --category nonlinear        # 按类别列出指标
 
 ## 使用方式
 
+StockStat 提供三种使用入口：
+
+- **Python 库**：`StockStatClient` — 全功能编程接口（以下 §1~§5 示例）
+- **CLI 命令行**：`stockstat` 命令 — 无需写 Python 脚本即可完成采集、查询、插件管理
+- **DSL 查询**：SQL-like 声明式查询语言 — 一行完成常见统计
+
+> 三种入口共享同一后端服务和数据。以下按功能逐节介绍，每节同时给出 Python 与 CLI 两种用法。
+
 ### 1. 采集数据
+
+**Python：**
 
 ```python
 from stockstat import StockStatClient
@@ -136,7 +136,22 @@ client.ingest("PAXG/USDT", source="binance", start="2022-01-01", end="2024-12-31
 client.ingest("MSFT", start="2024-01-01", end="2024-06-30")
 ```
 
+**CLI：**
+
+```bash
+# 采集股票数据
+stockstat ingest AAPL --source yfinance --start 2024-01-01 --end 2024-12-31
+
+# 采集加密货币数据（自动检测 source）
+stockstat ingest BTC/USDT --start 2024-01-01 --end 2024-12-31
+
+# 指定时间粒度
+stockstat ingest BTC/USDT --source binance --start 2024-01-01 --tf 1h
+```
+
 ### 2. 查询 OHLCV 数据
+
+**Python：**
 
 ```python
 data = client.ohlcv("AAPL", start="2024-01-01", timeframe="1d")
@@ -146,7 +161,20 @@ data = client.ohlcv("AAPL", start="2024-01-01", timeframe="1d")
 # 2024-01-03  184.22  185.88  183.43  184.40  58414500
 ```
 
+**CLI：**
+
+```bash
+# 表格格式（默认）
+stockstat query BTC/USDT --limit 5
+
+# 指定时间范围与格式
+stockstat query AAPL --start 2024-01-01 --end 2024-06-30 --format csv
+stockstat query BTC/USDT --tf 1h --format json
+```
+
 ### 3. 计算指标
+
+**Python：**
 
 ```python
 sma = client.compute.ma(data.close, window=20)
@@ -155,6 +183,17 @@ upper, mid, lower = client.compute.bollinger(data.close, window=20, k=2.0)
 beta = client.compute.beta(asset_returns, benchmark_returns, window=60)
 sharpe = client.compute.sharpe(returns, risk_free=0.02, annualize=True)
 dd = client.compute.max_drawdown(data.close)
+```
+
+> 指标计算目前仅支持 Python 库。CLI 的 `stockstat indicators` 命令可列出所有已注册指标及其分类，方便查阅：
+
+```bash
+# 列出全部指标
+stockstat indicators
+
+# 按类别过滤
+stockstat indicators --category trend
+stockstat indicators --category nonlinear
 ```
 
 ### 4. DSL 查询
@@ -235,10 +274,22 @@ te = client.compute.transfer_entropy(weekend_returns, monday_returns)
 
 ## v2.0 插件系统
 
-v2.0 的所有可扩展点统一注册到 `PluginRegistry`，可通过 CLI 或代码查询：
+v2.0 的所有可扩展点（数据源、指标、成本模型、成交模型、执行模型、渲染器）统一注册到 `PluginRegistry`，可通过 CLI 或代码查询。
+
+**CLI 查询：**
 
 ```bash
-$ stockstat plugins
+# 列出全部已注册插件
+stockstat plugins
+
+# 按命名空间过滤
+stockstat plugins --namespace indicators
+stockstat plugins --namespace sources
+stockstat plugins --namespace cost_models
+```
+
+输出示例：
+```
 Namespace            Name                      Category
 --------------------------------------------------------------------
 sources              yfinance                  sources
@@ -258,8 +309,9 @@ renderers            matplotlib                renderers
 Total: 45 plugin(s)
 ```
 
+**Python 查询：**
+
 ```python
-# 代码中查询
 from stockstat._core.plugin import PluginRegistry
 from stockstat._domain.indicators import register_default_indicators, list_indicators
 
