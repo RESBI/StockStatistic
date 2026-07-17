@@ -505,7 +505,19 @@ def _get_adapter(source: str):
 | 部署模式 | `DATABASE_URL` | 特性 |
 |---------|----------------|------|
 | **默认（本地开发）** | `sqlite:///stockstat.db` | 零外部依赖，**关闭后重启自动读取先前数据** |
+| **指定路径** | `sqlite:////data/stockstat.db` | 自定义数据库文件位置（见下表） |
 | **Docker 生产** | `postgresql://...@db:5432/stockstat` | TimescaleDB + 数据卷持久化 |
+
+**`DATABASE_URL` 路径规则**：
+
+| `DATABASE_URL` 值 | 实际存储位置 |
+|---|---|
+| `sqlite:///stockstat.db`（默认） | 当前工作目录下的 `stockstat.db` |
+| `sqlite:////data/stockstat.db` | `/data/stockstat.db`（绝对路径，4 个斜杠） |
+| `sqlite:///../data/stockstat.db` | 上级目录的 `data/` 下（相对路径） |
+| `postgresql://user:pwd@host:5432/db` | 远程 PostgreSQL 数据库 |
+
+> SQLite 的 URL 格式为 `sqlite:///` + 路径。绝对路径以 `/` 开头，因此拼接后为 4 个斜杠 `sqlite:////abs/path`。
 
 会话管理：模块级单例 `_engine` + `_SessionLocal`，懒初始化；`get_session()` 上下文管理器自动 commit/rollback/close。
 
@@ -717,7 +729,12 @@ pip install -e "frontend/[signal_processing]" # PyWavelets
 ```bash
 # === 在 storage 服务器机器上（如 192.168.1.100）===
 cd backend && pip install -e .
-# 默认 SQLite，数据持久化到 stockstat.db 文件
+
+# 指定数据库存储位置（可选；默认为当前目录的 stockstat.db）
+export DATABASE_URL="sqlite:////data/stockstat/stockstat.db"
+#   SQLite 绝对路径：sqlite:/// + /abs/path = 4 个斜杠
+#   PostgreSQL：    postgresql://user:pwd@host:5432/dbname
+
 # 关闭后重启自动读取先前下载的数据
 python -m uvicorn stockstat_backend.app:app --host 0.0.0.0 --port 8000
 ```

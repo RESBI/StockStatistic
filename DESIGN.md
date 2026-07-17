@@ -461,7 +461,19 @@ def _get_adapter(source: str):
 | Deployment mode | `DATABASE_URL` | Characteristics |
 |-----------------|----------------|-----------------|
 | **Default (local dev)** | `sqlite:///stockstat.db` | Zero external dependency, **data persists across restarts** |
+| **Custom path** | `sqlite:////data/stockstat.db` | Custom database file location (see table below) |
 | **Docker production** | `postgresql://...@db:5432/stockstat` | TimescaleDB + volume persistence |
+
+**`DATABASE_URL` path rules**:
+
+| `DATABASE_URL` value | Actual storage location |
+|---|---|
+| `sqlite:///stockstat.db` (default) | `stockstat.db` in the current working directory |
+| `sqlite:////data/stockstat.db` | `/data/stockstat.db` (absolute path, 4 slashes) |
+| `sqlite:///../data/stockstat.db` | `data/` in the parent directory (relative path) |
+| `postgresql://user:pwd@host:5432/db` | Remote PostgreSQL database |
+
+> The SQLite URL format is `sqlite:///` + path. Absolute paths start with `/`, so the concatenation yields 4 slashes: `sqlite:////abs/path`.
 
 Session management: module-level singletons `_engine` + `_SessionLocal`, lazily initialized; `get_session()` context manager auto commit/rollback/close.
 
@@ -673,7 +685,12 @@ The backend can be deployed independently on any networked machine; other machin
 ```bash
 # === On the storage server (e.g. 192.168.1.100) ===
 cd backend && pip install -e .
-# Default SQLite; data persists to stockstat.db file
+
+# Specify database storage location (optional; default is stockstat.db in CWD)
+export DATABASE_URL="sqlite:////data/stockstat/stockstat.db"
+#   SQLite absolute path: sqlite:/// + /abs/path = 4 slashes
+#   PostgreSQL:           postgresql://user:pwd@host:5432/dbname
+
 # Restarts automatically read previously downloaded data
 python -m uvicorn stockstat_backend.app:app --host 0.0.0.0 --port 8000
 ```

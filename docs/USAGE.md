@@ -62,6 +62,33 @@ python -m uvicorn stockstat_backend.app:app --host 0.0.0.0 --port 8000
 stockstat serve --host 0.0.0.0 --port 8000
 ```
 
+### Specifying the database storage location (optional)
+
+By default, data is stored in `stockstat.db` in the backend's working directory. You can specify a custom location via the `DATABASE_URL` environment variable:
+
+```bash
+# SQLite — absolute path (note: sqlite:/// + /abs/path = 4 slashes)
+export DATABASE_URL="sqlite:////data/stockstat/stockstat.db"
+
+# SQLite — relative path (data/ in the parent directory)
+export DATABASE_URL="sqlite:///../data/stockstat.db"
+
+# PostgreSQL / TimescaleDB
+export DATABASE_URL="postgresql://stockstat:password@db-host:5432/stockstat"
+
+# Then start
+python -m uvicorn stockstat_backend.app:app --host 0.0.0.0 --port 8000
+```
+
+| `DATABASE_URL` value | Actual storage location |
+|---|---|
+| `sqlite:///stockstat.db` (default) | `stockstat.db` in the current working directory |
+| `sqlite:////data/stockstat.db` | `/data/stockstat.db` (absolute path) |
+| `sqlite:///../data/stockstat.db` | `data/` in the parent directory (relative path) |
+| `postgresql://user:pwd@host:5432/db` | Remote PostgreSQL database |
+
+> The SQLite URL format is `sqlite:///` + path. Absolute paths start with `/`, so the concatenation yields 4 slashes. Once data is written to the specified file, the service automatically reads previous data on restart.
+
 ### Frontend connection
 
 ```python

@@ -37,9 +37,24 @@ The backend can be deployed independently on any networked machine; other machin
 ```bash
 # === On the storage server (e.g. 192.168.1.100) ===
 cd backend && pip install -e .
+
+# Specify database storage location (optional; default is stockstat.db in CWD)
+export DATABASE_URL="sqlite:////data/stockstat/stockstat.db"
+#   SQLite absolute path: sqlite:/// + /abs/path = 4 slashes
+#   PostgreSQL:           postgresql://user:pwd@host:5432/dbname
+
 python -m uvicorn stockstat_backend.app:app --host 0.0.0.0 --port 8000
-# Data persists to stockstat.db file; restarts automatically read previously downloaded data
+# Data persists to the specified file; restarts automatically read previous data
 ```
+
+**`DATABASE_URL` path rules**:
+
+| `DATABASE_URL` value | Actual storage location |
+|---|---|
+| `sqlite:///stockstat.db` (default) | `stockstat.db` in the current working directory |
+| `sqlite:////data/stockstat.db` | `/data/stockstat.db` (absolute path, 4 slashes) |
+| `sqlite:///../data/stockstat.db` | `data/` in the parent directory (relative path) |
+| `postgresql://user:pwd@host:5432/db` | Remote PostgreSQL database |
 
 ```python
 # === On user machines ===

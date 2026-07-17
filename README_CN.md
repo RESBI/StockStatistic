@@ -37,9 +37,24 @@ pip install -e "frontend/[backtest_full]"       # 回测全套（matplotlib + op
 ```bash
 # === 在 storage 服务器上（如 192.168.1.100）===
 cd backend && pip install -e .
+
+# 指定数据库存储位置（可选；默认为当前目录的 stockstat.db）
+export DATABASE_URL="sqlite:////data/stockstat/stockstat.db"
+#   SQLite 绝对路径：sqlite:/// + /abs/path = 4 个斜杠
+#   PostgreSQL：    postgresql://user:pwd@host:5432/dbname
+
 python -m uvicorn stockstat_backend.app:app --host 0.0.0.0 --port 8000
-# 数据持久化到 stockstat.db 文件，关闭后重启自动读取
+# 数据持久化到指定文件，关闭后重启自动读取
 ```
+
+**`DATABASE_URL` 路径规则**：
+
+| `DATABASE_URL` 值 | 实际存储位置 |
+|---|---|
+| `sqlite:///stockstat.db`（默认） | 当前工作目录下的 `stockstat.db` |
+| `sqlite:////data/stockstat.db` | `/data/stockstat.db`（绝对路径，4 个斜杠） |
+| `sqlite:///../data/stockstat.db` | 上级目录的 `data/` 下（相对路径） |
+| `postgresql://user:pwd@host:5432/db` | 远程 PostgreSQL 数据库 |
 
 ```python
 # === 在用户机器上 ===

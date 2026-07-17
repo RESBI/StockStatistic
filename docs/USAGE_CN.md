@@ -62,6 +62,33 @@ python -m uvicorn stockstat_backend.app:app --host 0.0.0.0 --port 8000
 stockstat serve --host 0.0.0.0 --port 8000
 ```
 
+### 指定数据库存储位置（可选）
+
+默认数据存储在后端工作目录下的 `stockstat.db` 文件中。可通过 `DATABASE_URL` 环境变量指定自定义位置：
+
+```bash
+# SQLite — 指定绝对路径（注意：sqlite:/// + /abs/path = 4 个斜杠）
+export DATABASE_URL="sqlite:////data/stockstat/stockstat.db"
+
+# SQLite — 相对路径（上级目录的 data/ 下）
+export DATABASE_URL="sqlite:///../data/stockstat.db"
+
+# PostgreSQL / TimescaleDB
+export DATABASE_URL="postgresql://stockstat:password@db-host:5432/stockstat"
+
+# 然后启动
+python -m uvicorn stockstat_backend.app:app --host 0.0.0.0 --port 8000
+```
+
+| `DATABASE_URL` 值 | 实际存储位置 |
+|---|---|
+| `sqlite:///stockstat.db`（默认） | 当前工作目录下的 `stockstat.db` |
+| `sqlite:////data/stockstat.db` | `/data/stockstat.db`（绝对路径） |
+| `sqlite:///../data/stockstat.db` | 上级目录的 `data/` 下（相对路径） |
+| `postgresql://user:pwd@host:5432/db` | 远程 PostgreSQL 数据库 |
+
+> SQLite 的 URL 格式为 `sqlite:///` + 路径。绝对路径以 `/` 开头，因此拼接后为 4 个斜杠。数据写入指定文件后，服务关闭重启时自动读取先前数据。
+
 ### 前端连接
 
 ```python
