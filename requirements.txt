@@ -1,0 +1,55 @@
+# StockStat — Python Dependencies
+#
+# 安装方式（推荐 pip install -e .，会自动读取 pyproject.toml）：
+#   cd backend && pip install -e .            # 后端
+#   cd frontend && pip install -e .            # 前端核心
+#   pip install -e "frontend/[matplotlib]"     # 可视化
+#   pip install -e "frontend/[dsl]"            # DSL 解析器
+#   pip install -e "frontend/[signal_processing]"  # 小波变换
+#   pip install -e "frontend/[backtest_full]"  # 回测全套
+#   pip install rich                            # TUI 彩色表格
+#
+# 本文件用于记录完整依赖清单，方便一次性安装或 CI 环境使用：
+#   pip install -r requirements.txt
+#
+# Python >= 3.10
+
+# ── 后端核心依赖 (stockstat-backend) ──
+fastapi>=0.110
+uvicorn>=0.27
+sqlalchemy>=2.0
+yfinance>=0.2
+ccxt>=4.0
+pandas>=2.0
+pyarrow>=15.0
+
+# ── 前端核心依赖 (stockstat) ──
+# pandas / pyarrow 已在后端列出
+numpy>=1.24
+httpx>=0.27
+scipy>=1.11
+
+# ── 可选依赖（按需安装）──
+
+# 可视化（matplotlib 延迟导入，核心零依赖）
+matplotlib>=3.8
+
+# DSL 解析器（lark，EBNF 语法）
+lark>=1.1
+
+# 信号处理（PyWavelets，CWT 完整实现）
+PyWavelets>=1.1
+
+# 回测参数优化（optuna）
+optuna>=3.5
+
+# TUI 彩色表格（未安装时降级纯文本）
+rich>=13.0
+
+# ── 开发/测试依赖 ──
+pytest>=7.0
+
+# ── 生产部署可选 ──
+# psycopg2-binary>=2.9    # PostgreSQL 驱动
+# redis>=5.0              # Redis 缓存
+# plotly>=5.20            # Plotly 渲染器（规划中）
