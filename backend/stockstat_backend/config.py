@@ -61,6 +61,17 @@ class Settings:
             "STOCKSTAT_ADMIN_ENABLED", "true"
         ).lower() in ("1", "true", "yes", "on")
     )
+    dispatcher_enabled: bool = field(
+        default_factory=lambda: os.environ.get(
+            "STOCKSTAT_DISPATCHER_ENABLED", "false"
+        ).lower() in ("1", "true", "yes", "on")
+    )
+    dispatcher_queue_backend: str = field(
+        default_factory=lambda: os.environ.get("STOCKSTAT_DISPATCHER_QUEUE", "memory")
+    )
+    dispatcher_cache_size_mb: int = field(
+        default_factory=lambda: int(os.environ.get("STOCKSTAT_DISPATCHER_CACHE_MB", "512"))
+    )
 
     @classmethod
     def from_env(cls) -> "Settings":

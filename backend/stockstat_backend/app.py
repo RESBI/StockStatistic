@@ -19,6 +19,16 @@ def create_app() -> FastAPI:
         from .plugins.admin import AdminPlugin
         AdminPlugin.mount(app)
 
+    # V3: Conditionally mount Dispatcher plugin
+    if settings.dispatcher_enabled:
+        from .dispatcher import DispatcherPlugin
+        DispatcherPlugin.mount(
+            app,
+            queue_backend=settings.dispatcher_queue_backend,
+            redis_url=settings.redis_url or None,
+            cache_size_mb=settings.dispatcher_cache_size_mb,
+        )
+
     return app
 
 
