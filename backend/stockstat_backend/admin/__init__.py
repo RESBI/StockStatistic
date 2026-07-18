@@ -368,6 +368,61 @@ def create_admin_router() -> APIRouter:
             "symbols": page_items,
         }
 
+    @router.get("/sources/{source}/info")
+    async def admin_source_info(source: str, symbol: str = ""):
+        """Get available time range and timeframes for a source/symbol.
+
+        Returns the earliest available date and supported timeframes.
+        For ccxt exchanges, queries the exchange for historical depth.
+        For yfinance, returns a reasonable default (10 years).
+        """
+        timeframes_by_source = {
+            "binance": ["1m", "5m", "15m", "1h", "4h", "1d", "1w"],
+            "coinbase": ["1m", "5m", "15m", "1h", "6h", "1d"],
+            "yfinance": ["1m", "5m", "15m", "1h", "1d", "1wk", "1mo"],
+            "synthetic": ["1d", "1h", "1w"],
+        }
+
+        # Default earliest dates per source
+        earliest_by_source = {
+            "binance": "2017-08-17",   # Binance launch
+            "coinbase": "2015-01-01",  # Coinbase Pro launch
+            "yfinance": "2010-01-01",  # Yahoo Finance ~10+ years
+            "synthetic": "2020-01-01",
+        }
+
+        # If symbol is provided and already downloaded, show local range too
+        local_earliest = None
+        local_latest = None
+        if symbol:
+            try:
+                from stockstat_backend.storage.database import get_session
+                from stockstat_backend.models.ohlcv import OHLCV
+                from sqlalchemy import select, func
+                with get_session() as session:
+                    result = session.execute(
+                        select(func.min(OHLCV.ts), func.max(OHLCV.ts))
+                        .where(OHLCV.symbol == symbol)
+                    ).first()
+                    if result and result[0]:
+                        local_earliest = str(result[0])
+                        local_latest = str(result[1])
+            except Exception:
+                pass
+
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+        return {
+            "source": source,
+            "symbol": symbol or None,
+            "earliest_available": earliest_by_source.get(source, "2020-01-01"),
+            "latest_available": now,
+            "timeframes": timeframes_by_source.get(source, ["1d"]),
+            "local_earliest": local_earliest,
+            "local_latest": local_latest,
+        }
+
     # ── Ingest ────────────────────────────────────────────────
 
     @router.post("/ingest")
@@ -575,7 +630,7 @@ _ADMIN_HTML = r"""<!DOCTYPE html>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>StockStat Storage Admin</title>
-<script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
+<script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#0f1419;color:#e0e0e0;display:flex;height:100vh;overflow:hidden}
@@ -760,7 +815,7 @@ async function renderSource(){
       <div class="row" style="margin-top:8px">
         <label>开始</label><input type="date" id="batch-start" value="2024-01-01">
         <label>结束</label><input type="date" id="batch-end" value="2024-12-31">
-        <label>粒度</label><select id="batch-tf"><option>1d</option><option>1h</option><option>4h</option></select>
+        <label>粒度</label><select id="batch-tf"><option>1d</option><option>1h</option><option>4h</option><option>15m</option><option>5m</option><option>1m</option></select>
         <button class="btn success" onclick="doBatchIngest()">批量下载</button>
       </div>
       <div id="batch-progress"></div>
@@ -806,8 +861,20 @@ async function loadSourceSymbols(){
   }catch(e){body.innerHTML=`<tr><td colspan="5" class="msg err">Error: ${e}</td></tr>`}
 }
 async function quickIngest(sym,src){
-  if(!confirm(`下载 ${sym} 从 ${src}？`))return;
-  try{const r=await api(`/ingest?symbol=${encodeURIComponent(sym)}&source=${src}`, {method:'POST'});
+  // Fetch source info to get max time range
+  let info={earliest_available:'2020-01-01',latest_available:'',timeframes:['1d']};
+  try{info=await api(`/sources/${src}/info?symbol=${encodeURIComponent(sym)}`)}catch{}
+  const today=info.latest_available||new Date().toISOString().split('T')[0];
+  const defaultStart=info.local_latest?info.local_latest.split('T')[0]:info.earliest_available;
+  const localInfo=info.local_earliest?`\n本地已有: ${info.local_earliest.split('T')[0]} ~ ${info.local_latest.split('T')[0]}`:'\n本地无数据';
+  const startInput=prompt(`下载 ${sym} 从 ${src}\n数据源范围: ${info.earliest_available} ~ ${today}${localInfo}\n\n输入开始日期:`,defaultStart);
+  if(!startInput)return;
+  const endInput=prompt(`结束日期:`,today);
+  if(!endInput)return;
+  const tfOptions=info.timeframes||['1d'];
+  const tfInput=prompt(`时间粒度 (${tfOptions.join('/')}):`,'1d');
+  if(!tfInput||!tfOptions.includes(tfInput)){alert(`无效粒度: ${tfInput}\n可用: ${tfOptions.join(', ')}`);return}
+  try{const r=await api(`/ingest?symbol=${encodeURIComponent(sym)}&source=${src}&start=${startInput}&end=${endInput}&timeframe=${tfInput}`,{method:'POST'});
     alert(`完成: ${r.ingested} 行`);loadSourceSymbols();}
   catch(e){alert(`失败: ${e}`)}
 }
