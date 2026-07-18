@@ -1,0 +1,1 @@
+"""StockStat backend plugins package."""

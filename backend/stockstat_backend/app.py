@@ -13,9 +13,11 @@ def create_app() -> FastAPI:
     )
     app.include_router(router)
 
-    # Mount web admin interface at /admin/
-    from .admin import mount_admin
-    mount_admin(app)
+    # Conditionally mount admin plugin
+    from .config import settings
+    if settings.admin_enabled:
+        from .plugins.admin import AdminPlugin
+        AdminPlugin.mount(app)
 
     return app
 

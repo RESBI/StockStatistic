@@ -56,6 +56,11 @@ class Settings:
         default_factory=lambda: os.environ.get("STOCKSTAT_DEFAULT_SOURCE", "yfinance")
     )
     proxy: ProxyConfig = field(default_factory=ProxyConfig.from_env)
+    admin_enabled: bool = field(
+        default_factory=lambda: os.environ.get(
+            "STOCKSTAT_ADMIN_ENABLED", "true"
+        ).lower() in ("1", "true", "yes", "on")
+    )
 
     @classmethod
     def from_env(cls) -> "Settings":

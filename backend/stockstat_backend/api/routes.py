@@ -13,32 +13,9 @@ from ..normalizer.normalizer import normalize_ohlcv
 from ..storage.repository import ohlcv_repo, symbol_repo
 from ..storage.cache import cache
 from ..config import settings
+from .adapters import get_adapter as _get_adapter, auto_detect_source as _auto_detect_source
 
 router = APIRouter(prefix="/api/v1", tags=["ohlcv"])
-
-_adapters = {}
-
-
-def _get_adapter(source: str):
-    if source not in _adapters:
-        proxies = settings.proxy.proxies
-        if source == "yfinance":
-            _adapters[source] = YahooDirectAdapter(proxy=proxies)
-        elif source == "binance":
-            _adapters[source] = CcxtAdapter("binance", proxies=proxies)
-        elif source == "coinbase":
-            _adapters[source] = CcxtAdapter("coinbase", proxies=proxies)
-        elif source == "synthetic":
-            _adapters[source] = SyntheticAdapter()
-        else:
-            raise HTTPException(status_code=400, detail=f"Unknown source: {source}")
-    return _adapters[source]
-
-
-def _auto_detect_source(symbol: str) -> str:
-    if "/" in symbol:
-        return "binance"
-    return "yfinance"
 
 
 @router.get("/health")
