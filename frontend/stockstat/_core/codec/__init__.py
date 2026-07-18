@@ -117,12 +117,76 @@ class ParquetCodec:
         return table.to_pandas()
 
 
+class CloudpickleCodec:
+    """cloudpickle codec for Python closures (strategies, callables).
+
+    Satisfies the :class:`Codec` protocol. Requires ``cloudpickle``
+    (V3 optional extra: ``pip install stockstat[compute]``).
+
+    Used for serializing user-supplied strategy functions / objects
+    that may capture closures — JSON cannot represent these.
+    """
+
+    name = "cloudpickle"
+    media_type = "application/vnd.python.cloudpickle"
+
+    def encode(self, data: Any) -> bytes:
+        import cloudpickle  # type: ignore
+        return cloudpickle.dumps(data)
+
+    def decode(self, raw: bytes) -> Any:
+        import cloudpickle  # type: ignore
+        return cloudpickle.loads(raw)
+
+
+class MsgpackCodec:
+    """MessagePack codec for compact control-plane messages (V2 §13.5).
+
+    Satisfies the :class:`Codec` protocol. Requires ``msgpack``
+    (V3 optional extra: ``pip install msgpack``).
+
+    Used as an alternative to JSON for high-frequency small messages
+    (e.g. heartbeats). ~60% smaller than JSON for typical payloads.
+    """
+
+    name = "msgpack"
+    media_type = "application/msgpack"
+
+    def encode(self, data: Any) -> bytes:
+        import msgpack  # type: ignore
+        return msgpack.dumps(data, use_bin_type=True)
+
+    def decode(self, raw: bytes) -> Any:
+        import msgpack  # type: ignore
+        return msgpack.loads(raw, raw=False)
+
+
+class RawCodec:
+    """Pass-through codec for raw bytes (binary blobs, already-encoded data)."""
+
+    name = "raw"
+    media_type = "application/octet-stream"
+
+    def encode(self, data: Any) -> bytes:
+        if isinstance(data, (bytes, bytearray)):
+            return bytes(data)
+        if isinstance(data, str):
+            return data.encode("utf-8")
+        raise TypeError(f"RawCodec cannot encode {type(data)}")
+
+    def decode(self, raw: bytes) -> Any:
+        return raw
+
+
 # Registry of codecs
 _CODECS: dict[str, Any] = {
     "json": JsonCodec,
     "csv": CsvCodec,
     "arrow": ArrowCodec,
     "parquet": ParquetCodec,
+    "cloudpickle": CloudpickleCodec,
+    "msgpack": MsgpackCodec,
+    "raw": RawCodec,
 }
 
 
@@ -134,6 +198,42 @@ def get_codec(name: str) -> Any:
     return cls()
 
 
+def get_codec_for_content_type(content_type: str) -> Any:
+    """Get a codec instance by MIME content type.
+
+    Useful for decoding Envelope payloads where ``headers.content_type``
+    indicates the encoding but the caller hasn't picked a codec name.
+    """
+    ct = content_type.lower()
+    if ct == CT_JSON or ct == "application/vnd.stockstat.task+json":
+        return JsonCodec()
+    if ct.startswith("application/vnd.apache.arrow"):
+        return ArrowCodec()
+    if ct.startswith("application/vnd.apache.parquet"):
+        return ParquetCodec()
+    if ct.startswith("application/vnd.python.cloudpickle") or "cloudpickle" in ct:
+        return CloudpickleCodec()
+    if ct == "application/msgpack" or "msgpack" in ct:
+        return MsgpackCodec()
+    if ct == "application/octet-stream":
+        return RawCodec()
+    if ct.startswith("application/vnd.stockstat.result+"):
+        # result+arrow / result+cloudpickle / result+json
+        sub = ct.split("+", 1)[1]
+        return get_codec(sub)
+    # Fallback: try JSON
+    return JsonCodec()
+
+
 def available_codecs() -> list[str]:
     """List available codec names."""
     return list(_CODECS.keys())
+
+
+# Content-type constants (mirror protocol.messages for convenience)
+CT_JSON = "application/json"
+CT_ARROW = "application/vnd.apache.arrow.file"
+CT_PARQUET = "application/vnd.apache.parquet"
+CT_CLOUDPICKLE = "application/vnd.python.cloudpickle"
+CT_MSGPACK = "application/msgpack"
+CT_OCTET = "application/octet-stream"

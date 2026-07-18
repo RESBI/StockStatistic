@@ -137,3 +137,116 @@ class ComputeEngine:
 
     def list_indicators(self) -> list[dict]:
         return list_indicators()
+
+    # ── V3: remote compute offload entry points ──────────────
+
+    def remote(self, task_type: str, *, data_spec=None, compute_spec=None,
+               dispatch_spec=None, **kwargs):
+        """V3 explicit async submit — returns a :class:`TaskRef`.
+
+        Builds a :class:`TaskSpec` and submits it to the client's
+        :class:`ComputeBackend`. The caller gets back a ``TaskRef``
+        immediately and can ``wait()`` / ``result()`` / ``cancel()``.
+
+        Args:
+            task_type: ``"indicator"`` / ``"backtest"`` / ``"grid_search"``
+                / ``"batch_backtest"`` / ``"monte_carlo"`` / ``"custom"``
+            data_spec: optional :class:`DataSpec`; if None, build from
+                ``symbols`` / ``timeframe`` / ``start`` / ``end`` kwargs
+            compute_spec: optional :class:`ComputeSpec`; if None, build
+                from ``task_type`` and remaining kwargs
+            dispatch_spec: optional :class:`DispatchSpec`; defaults to
+                ``DispatchSpec()``
+
+        Returns:
+            :class:`TaskRef`
+
+        Example::
+
+            task = client.compute.remote(
+                "grid_search",
+                symbols=["BTC/USDT"], timeframe="1d", start="2024-01-01",
+                strategy_ref="cloudpickle:...",
+                param_grid={"short": [3, 5, 8], "long": [10, 20, 30]},
+                metric="sharpe",
+            )
+            result = task.wait(timeout=3600)
+        """
+        from .._core.contracts.task import (
+            TaskSpec, DataSpec, ComputeSpec, DispatchSpec, new_task_id,
+        )
+
+        # Resolve data_spec
+        if data_spec is None:
+            ds = DataSpec(
+                symbols=kwargs.pop("symbols", []),
+                timeframe=kwargs.pop("timeframe", "1d"),
+                start=kwargs.pop("start", None),
+                end=kwargs.pop("end", None),
+                source=kwargs.pop("source", None),
+            )
+        else:
+            ds = data_spec
+
+        # Resolve compute_spec
+        if compute_spec is None:
+            # Extract known ComputeSpec fields from kwargs
+            known_fields = {
+                "strategy_ref", "strategy_codec", "initial_cash",
+                "cost_model", "fill_model", "execution_model",
+                "benchmark", "trade_on", "allow_short", "periods_per_year",
+                "param_grid", "metric", "maximize",
+                "strategies", "fee_models",
+                "n_simulations", "seed",
+            }
+            cs_kwargs = {k: v for k, v in kwargs.items() if k in known_fields}
+            extra_params = {k: v for k, v in kwargs.items() if k not in known_fields}
+            # Combine: extra_params go into params, but indicator 'method'/'kwargs'
+            # also go into params
+            if "method" in extra_params:
+                cs_kwargs.setdefault("params", {})["method"] = extra_params.pop("method")
+            if "kwargs" in extra_params:
+                cs_kwargs.setdefault("params", {})["kwargs"] = extra_params.pop("kwargs")
+            # Merge remaining extras into params
+            if extra_params:
+                cs_kwargs.setdefault("params", {}).update(extra_params)
+            cs = ComputeSpec(task_type=task_type, **cs_kwargs)
+        else:
+            cs = compute_spec
+
+        # Resolve dispatch_spec
+        if dispatch_spec is None:
+            dispatch_spec = DispatchSpec()
+
+        spec = TaskSpec(
+            task_id=new_task_id(),
+            data_spec=ds,
+            compute_spec=cs,
+            dispatch_spec=dispatch_spec,
+        )
+
+        # Submit to the client's compute_backend
+        backend = self._get_compute_backend()
+        return backend.submit(spec)
+
+    def cluster_info(self, **kwargs) -> dict:
+        """V3: query the compute cluster topology.
+
+        Returns a dict with ``dispatcher`` / ``workers`` / ``stats``
+        sub-keys. For LocalComputeBackend, returns a single in-process
+        worker.
+        """
+        backend = self._get_compute_backend()
+        return backend.cluster_info(**kwargs)
+
+    def _get_compute_backend(self):
+        """Resolve the ComputeBackend from the bound client.
+
+        If no client is bound (e.g. ``ComputeEngine(client=None)`` in
+        a Worker), construct a default LocalComputeBackend on demand.
+        """
+        if self._client is not None and hasattr(self._client, "compute_backend"):
+            return self._client.compute_backend
+        # Fallback: create a LocalComputeBackend with no data access
+        from .._core.compute import LocalComputeBackend
+        return LocalComputeBackend(client=self._client)

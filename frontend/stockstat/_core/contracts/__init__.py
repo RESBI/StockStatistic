@@ -11,6 +11,9 @@ from .cache import CacheBackend
 from .codec import Codec
 from .renderer import Renderer
 from .events import Event, EventSubscriber, EventPublisher
+from .compute import ComputeBackend, TaskRef, TaskInfo, TaskState
+from .task import TaskSpec, DataSpec, ComputeSpec, DispatchSpec
+from .transport import Transport
 
 __all__ = [
     "Plugin", "PluginContext", "PluginMetadata",
@@ -19,4 +22,8 @@ __all__ = [
     "Codec",
     "Renderer",
     "Event", "EventSubscriber", "EventPublisher",
+    # V3 compute offload contracts
+    "ComputeBackend", "TaskRef", "TaskInfo", "TaskState",
+    "TaskSpec", "DataSpec", "ComputeSpec", "DispatchSpec",
+    "Transport",
 ]

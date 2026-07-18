@@ -28,6 +28,9 @@ backtest_full = ["stockstat[backtest]", "stockstat[optimize]",
                  "stockstat[matplotlib]", "matplotlib>=3.8"]
 signal_processing = ["PyWavelets>=1.1"]
 nonlinear = ["stockstat[signal_processing]"]
+# V3 distributed compute offload
+compute = ["cloudpickle>=3.0", "psutil>=5.9"]
+distributed = ["stockstat[compute]", "redis>=5.0", "msgpack>=1.0"]
 
 [tool.setuptools.packages.find]
 include = ["stockstat*"]

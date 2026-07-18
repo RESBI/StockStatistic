@@ -68,3 +68,69 @@ class LookaheadError(AppError):
 
 class PluginNotFoundError(AppError):
     code = "PLUGIN_NOT_FOUND"
+
+
+# ── V3 compute offload errors ─────────────────────────────────
+
+
+class TaskError(AppError):
+    """Task execution failed on the compute backend.
+
+    Raised by ``TaskRef.wait()`` / ``TaskRef.result()`` when the
+    underlying task entered the FAILED state. ``context`` includes
+    ``task_id``, ``worker_id``, ``traceback`` (if available).
+    """
+    code = "TASK_FAILED"
+
+
+class TaskNotReadyError(AppError):
+    """Task has not yet completed; result cannot be fetched.
+
+    Raised by ``TaskRef.result()`` (non-blocking) when the task is
+    still PENDING or RUNNING. Caller should ``wait()`` or poll.
+    """
+    code = "TASK_NOT_READY"
+    recoverable = True
+
+
+class TaskCancelledError(AppError):
+    """Task was cancelled (by client request or worker timeout)."""
+    code = "TASK_CANCELLED"
+
+
+class TaskTimeoutError(AppError):
+    """Task did not complete within the allotted timeout."""
+    code = "TASK_TIMEOUT"
+    recoverable = True
+
+
+class TaskNotFoundError(AppError):
+    """Task ID not recognized by the backend (unknown or expired)."""
+    code = "TASK_NOT_FOUND"
+
+
+class ProtocolMismatchError(AppError):
+    """Protocol version / codec negotiation failed between nodes.
+
+    Raised when a Client declares ``accepted_codecs`` / ``accepted_encodings``
+    that the Dispatcher cannot satisfy.
+    """
+    code = "PROTOCOL_MISMATCH"
+
+
+class TransportError(AppError):
+    """Underlying transport failure (network, connection, decode)."""
+    code = "TRANSPORT_ERROR"
+    recoverable = True
+
+
+class DispatcherUnavailableError(AppError):
+    """Dispatcher cannot be reached or has crashed."""
+    code = "DISPATCHER_UNAVAILABLE"
+    recoverable = True
+
+
+class WorkerCapabilityError(AppError):
+    """No available Worker supports the requested task_type."""
+    code = "WORKER_CAPABILITY_INSUFFICIENT"
+    recoverable = True

@@ -33,11 +33,14 @@ class V2Client:
     - Testing without network access
     """
 
-    def __init__(self, mode: str = "online", **kwargs: Any) -> None:
+    def __init__(self, mode: str = "online", *, compute_backend: Any = None, **kwargs: Any) -> None:
         self._mode = mode
         self._online_client: Optional[Any] = None
         self._storage: Optional[Any] = None
         self._registry: Optional[Any] = None
+        # V3: optional ComputeBackend (defaults to LocalComputeBackend, lazily created)
+        self._compute_backend_param = compute_backend
+        self._compute_backend: Optional[Any] = None
 
         if mode == "online":
             from ...client import StockStatClient
@@ -186,8 +189,38 @@ class V2Client:
 
     # ── Backtest ─────────────────────────────────────────────
 
+    @property
+    def compute_backend(self) -> Any:
+        """V3 ComputeBackend (LocalComputeBackend by default, lazily created)."""
+        if self._compute_backend is None:
+            from ..._core.compute import LocalComputeBackend
+            if self._compute_backend_param is not None:
+                self._compute_backend = self._compute_backend_param
+            elif self._mode == "online":
+                # Delegate to online client's backend (which is also LocalComputeBackend by default)
+                self._compute_backend = self._online_client.compute_backend
+            else:
+                # Offline: local backend with storage access
+                self._compute_backend = LocalComputeBackend(
+                    client=self, storage=self._storage, mode="offline",
+                )
+        return self._compute_backend
+
     def backtest(self, data: Any, strategy: Any, **kwargs: Any) -> Any:
         from ...backtest import BacktestEngine
+        async_submit = kwargs.pop("async_submit", False)
+
+        # If a non-local backend was injected, route through it
+        backend = self.compute_backend
+        if backend is not None and not _is_local_backend(backend):
+            from ...client import _build_backtest_task_spec
+            spec = _build_backtest_task_spec(data, strategy, kwargs)
+            task_ref = backend.submit(spec)
+            if async_submit:
+                return task_ref
+            return task_ref.wait(timeout=kwargs.get("timeout", 3600))
+
+        # Default path: identical to v2.1 (direct BacktestEngine call)
         if self._mode == "online":
             return self._online_client.backtest(data, strategy, **kwargs)
         else:
@@ -203,3 +236,12 @@ class V2Client:
         else:
             from ...client import PlotAPI
             return PlotAPI()
+
+
+def _is_local_backend(backend) -> bool:
+    """Check whether a backend is a LocalComputeBackend instance."""
+    try:
+        from ..._core.compute import LocalComputeBackend
+        return isinstance(backend, LocalComputeBackend)
+    except Exception:
+        return False

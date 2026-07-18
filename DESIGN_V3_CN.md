@@ -2457,37 +2457,50 @@ gpu = ["pynvml>=11.0"]
 
 **目标**：定义所有 Protocol 与数据结构，零行为变更。
 
+**状态**：✅ **已完成**（2026-07-19）
+
 **任务清单**：
-- [ ] 新增 `frontend/stockstat/_core/contracts/compute.py`（`ComputeBackend` / `TaskRef` / `TaskInfo` / `TaskState`）
-- [ ] 新增 `frontend/stockstat/_core/contracts/task.py`（`TaskSpec` / `DataSpec` / `ComputeSpec` / `DispatchSpec`）
-- [ ] 新增 `frontend/stockstat/_core/contracts/transport.py`（`Transport` Protocol）
-- [ ] 新增 `frontend/stockstat/_core/protocol/envelope.py`（`Envelope` / `Headers`）
-- [ ] 新增 `frontend/stockstat/_core/protocol/messages.py`（消息类型常量表）
-- [ ] 新增 `frontend/stockstat/_core/codec/cloudpickle.py`（`CloudpickleCodec`）
-- [ ] 新增 `frontend/stockstat/_core/errors.py` 中的 Task 相关异常
+- [x] 新增 `frontend/stockstat/_core/contracts/compute.py`（`ComputeBackend` / `TaskRef` / `TaskInfo` / `TaskState`）
+- [x] 新增 `frontend/stockstat/_core/contracts/task.py`（`TaskSpec` / `DataSpec` / `ComputeSpec` / `DispatchSpec`）
+- [x] 新增 `frontend/stockstat/_core/contracts/transport.py`（`Transport` Protocol）
+- [x] 新增 `frontend/stockstat/_core/protocol/envelope.py`（`Envelope` / `Headers`）
+- [x] 新增 `frontend/stockstat/_core/protocol/messages.py`（消息类型常量表）
+- [x] 新增 `frontend/stockstat/_core/codec/cloudpickle.py`（`CloudpickleCodec`）
+- [x] 新增 `frontend/stockstat/_core/errors.py` 中的 Task 相关异常
 
 **验收**：
-- 所有新模块可独立 import
-- 已有 506 项测试全部通过（零回归）
-- 新增单元测试覆盖 Envelope 编解码、TaskSpec 序列化
+- 所有新模块可独立 import ✅
+- 已有 506 项测试全部通过（零回归）✅
+- 新增单元测试覆盖 Envelope 编解码、TaskSpec 序列化 ✅（50 项）
+
+**详见**：[docs/v3/P0_CN.md](docs/v3/P0_CN.md)
 
 #### P1：本地后端 + 单进程模拟（1 周）
 
 **目标**：`LocalComputeBackend` + `InProcessTransport`，让 v1.7 / v2 客户端可透明使用 `compute_backend`。
 
+**状态**：✅ **已完成**（2026-07-19）
+
 **任务清单**：
-- [ ] 实现 `frontend/stockstat/_core/compute/local.py`
-- [ ] 实现 `frontend/stockstat/_core/transport/in_process.py`
-- [ ] 在 `StockStatClient.__init__` / `V2Client.__init__` 新增 `compute_backend` 参数
-- [ ] 实现 `ComputeAPI` 包装层（含 `remote()` / `cluster_info()`）
-- [ ] 实现 `build_backtest_task_spec()` 等辅助函数（业务对象 -> TaskSpec）
-- [ ] 实现 `_dispatch_to_handler()`（TaskSpec -> 调用 BacktestEngine 等）
+- [x] 实现 `frontend/stockstat/_core/compute/local.py`
+- [x] 实现 `frontend/stockstat/_core/transport/in_process.py`
+- [x] 在 `StockStatClient.__init__` / `V2Client.__init__` 新增 `compute_backend` 参数
+- [x] 实现 `ComputeAPI` 包装层（含 `remote()` / `cluster_info()`）
+- [x] 实现 `build_backtest_task_spec()` 等辅助函数（业务对象 -> TaskSpec）
+- [x] 实现 `_dispatch_to_handler()`（TaskSpec -> 调用 BacktestEngine 等）
 
 **验收**：
-- `StockStatClient()` 默认 `LocalComputeBackend`，277 项回测测试零修改通过
-- `V2Client(mode="offline")` 默认 `LocalComputeBackend`，离线测试通过
-- `client.compute.remote("backtest", ...)` 返回 `TaskRef`，`task.wait()` 返回 `BacktestResult`
-- `client.backtest(data, strategy)` 远程模式与本地模式结果一致（数值比对）
+- `StockStatClient()` 默认 `LocalComputeBackend`，277 项回测测试零修改通过 ✅
+- `V2Client(mode="offline")` 默认 `LocalComputeBackend`，离线测试通过 ✅
+- `client.compute.remote("backtest", ...)` 返回 `TaskRef`，`task.wait()` 返回 `BacktestResult` ✅
+- `client.backtest(data, strategy)` 远程模式与本地模式结果一致（数值比对）✅
+
+**额外验收**：
+- V3 兼容性测试矩阵（v1.7+v2 × Local+Remote 4 种组合）全部数值一致 ✅（23 项）
+- PAXG v5-redo 132 次回测结果与基线字节级一致 ✅
+- V3 TaskSpec 提交路径（cloudpickle -> TaskSpec -> dispatch -> BacktestEngine）端到端可用 ✅
+
+**详见**：[docs/v3/P1_CN.md](docs/v3/P1_CN.md)
 
 #### P2：Dispatcher + Worker 跨进程（2 周）
 
@@ -2601,17 +2614,17 @@ gpu = ["pynvml>=11.0"]
 
 ### 20.3 阶段交付物对照
 
-| 阶段 | 场景支持 | 测试数（新增） |
-|------|---------|---------------|
-| P0 | 无（仅协议骨架） | ~30 |
-| P1 | A 单机全栈（协议化） | ~40 |
-| P2 | D 同机 Dispatcher + Worker | ~60 |
-| P3 | E 跨机 Dispatcher + Worker | ~30 |
-| P4 | D/E + 大数据 + 流式 | ~25 |
-| P5 | E + 多 Worker 集群 | ~20 |
-| P6 | E + 抢占 + 弹性 | ~25 |
-| P7 | F 多级 + 监控 | ~20 |
-| **合计** | | **~250** |
+| 阶段 | 场景支持 | 测试数（新增） | 状态 |
+|------|---------|---------------|------|
+| P0 | 无（仅协议骨架） | 50 | ✅ 已完成 |
+| P1 | A 单机全栈（协议化） | 35 + 23 兼容性 = 58 | ✅ 已完成 |
+| P2 | D 同机 Dispatcher + Worker | ~60 | ⏳ 规划中 |
+| P3 | E 跨机 Dispatcher + Worker | ~30 | ⏳ 规划中 |
+| P4 | D/E + 大数据 + 流式 | ~25 | ⏳ 规划中 |
+| P5 | E + 多 Worker 集群 | ~20 | ⏳ 规划中 |
+| P6 | E + 抢占 + 弹性 | ~25 | ⏳ 规划中 |
+| P7 | F 多级 + 监控 | ~20 | ⏳ 规划中 |
+| **P0+P1 合计** | | **108** | **已完成** |
 
 ---
 
