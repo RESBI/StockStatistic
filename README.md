@@ -207,8 +207,8 @@ res.render("dashboard", path="dashboard.png")  # 9 chart types, auto-activated w
 
 Backtest visualization provides 9 chart types: equity curve, drawdown, trade annotations, returns distribution, monthly heatmap, yearly returns, parameter grid heatmap, underwater curve, dashboard (2×2). Without matplotlib, gracefully degrades to `NullBacktestChartRenderer` (warns, never crashes).
 
-<details>
-<summary>📊 Classic Statistical Charts (real data, click to expand)</summary>
+<details open>
+<summary>📊 Classic Statistical Charts (real data)</summary>
 
 #### Close + MA + Bollinger Bands
 ![BTC Bollinger Bands](docs/images/btc_bollinger.png)
@@ -233,8 +233,8 @@ Backtest visualization provides 9 chart types: equity curve, drawdown, trade ann
 
 </details>
 
-<details>
-<summary>📈 Backtest Visualization Charts (real data, click to expand)</summary>
+<details open>
+<summary>📈 Backtest Visualization Charts (real data)</summary>
 
 #### Dashboard (2×2: equity + drawdown + returns distribution + monthly heatmap)
 ![BTC Backtest Dashboard](docs/images/backtest_btc_dashboard.png)
@@ -285,8 +285,8 @@ renderer = client.plot.get_renderer()
 renderer.render(spec)
 ```
 
-<details>
-<summary>🔬 PAXG Weekend Return vs Monday Gain/Loss (real data 2022-2024, click to expand)</summary>
+<details open>
+<summary>🔬 PAXG Weekend Return vs Monday Gain/Loss (real data 2022-2024)</summary>
 
 PAXG (gold-pegged token) weekend return (Friday close → Sunday close) vs Monday's **max gain** and **max loss**, recorded **independently**.
 

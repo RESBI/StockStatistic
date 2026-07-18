@@ -207,8 +207,8 @@ res.render("dashboard", path="dashboard.png")  # 9 种图表，安装 matplotlib
 
 回测可视化提供 9 种图表类型：资金曲线、回撤、交易标注、收益分布、月度热力图、年度收益、参数网格热力图、水下曲线、综合仪表盘（2×2）。无 matplotlib 时自动降级为 `NullBacktestChartRenderer`（发告警、不崩溃）。
 
-<details>
-<summary>📊 经典统计图表（真实数据生成，点击展开）</summary>
+<details open>
+<summary>📊 经典统计图表（真实数据生成）</summary>
 
 #### 收盘价 + MA + 布林带
 ![BTC 布林带](docs/images/btc_bollinger.png)
@@ -233,8 +233,8 @@ res.render("dashboard", path="dashboard.png")  # 9 种图表，安装 matplotlib
 
 </details>
 
-<details>
-<summary>📈 回测可视化图表（真实数据生成，点击展开）</summary>
+<details open>
+<summary>📈 回测可视化图表（真实数据生成）</summary>
 
 #### 综合仪表盘（2×2：资金曲线 + 回撤 + 收益分布 + 月度热力）
 ![BTC 回测仪表盘](docs/images/backtest_btc_dashboard.png)
@@ -285,8 +285,8 @@ renderer = client.plot.get_renderer()
 renderer.render(spec)
 ```
 
-<details>
-<summary>🔬 PAXG 周末涨跌 vs 周一涨跌幅（真实数据 2022-2024，点击展开）</summary>
+<details open>
+<summary>🔬 PAXG 周末涨跌 vs 周一涨跌幅（真实数据 2022-2024）</summary>
 
 PAXG（黄金锚定代币）周末涨跌幅（周五收盘→周日收盘）与周一的**最大涨幅**和**最大跌幅**，**独立记录**。
 
