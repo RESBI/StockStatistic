@@ -1,20 +1,20 @@
 # StockStat — Programmable Financial Instrument Statistical Computing Platform Design Report
 
-> **Version**: v2.0
+> **Version**: v2.1
 > **Date**: 2026-07-18
-> **Status**: Implemented (five-layer architecture: Universal Core / Financial Domain / Visualization / Interface / Application; storage backend, computation frontend, DSL auto-reflection, signal processing & nonlinear dynamics module, backtest subsystem, pluggable execution model, CLI, offline mode)
+> **Status**: Implemented (five-layer architecture + standalone storage backend + DSL v2.0 integration + offline mode direct data download + distributed compute reservation)
 
 ---
 
 ## Table of Contents
 
 1. [Project Overview](#1-project-overview)
-2. [Overall Architecture (Five Layers)](#2-overall-architecture-five-layers)
-3. [Layer 0: Universal Core _core](#3-layer-0-universal-core-_core)
-4. [Layer 1: Financial Domain _domain](#4-layer-1-financial-domain-_domain)
-5. [Layer 2: Visualization _viz](#5-layer-2-visualization-_viz)
-6. [Layer 3: Interface _api](#6-layer-3-interface-_api)
-7. [Layer 4: Application app](#7-layer-4-application-app)
+2. [Overall Architecture](#2-overall-architecture)
+3. [Layer 0: Universal Core `_core`](#3-layer-0-universal-core-_core)
+4. [Layer 1: Financial Domain `_domain`](#4-layer-1-financial-domain-_domain)
+5. [Layer 2: Visualization `_viz`](#5-layer-2-visualization-_viz)
+6. [Layer 3: Interface `_api`](#6-layer-3-interface-_api)
+7. [Layer 4: Application `app`](#7-layer-4-application-app)
 8. [Storage Backend Design](#8-storage-backend-design)
 9. [Scripting Language Design](#9-scripting-language-design)
 10. [API Specification](#10-api-specification)
@@ -23,11 +23,12 @@
 13. [Test System](#13-test-system)
 14. [Technology Stack](#14-technology-stack)
 15. [Deployment](#15-deployment)
-16. [Project Structure](#16-project-structure)
-17. [Development Roadmap](#17-development-roadmap)
+16. [Distributed Compute Reservation](#16-distributed-compute-reservation)
+17. [Project Structure](#17-project-structure)
+18. [Development Roadmap](#18-development-roadmap)
 - [Appendix A: Data Source Compatibility Matrix](#appendix-a-data-source-compatibility-matrix)
 - [Appendix B: OHLCV Data Volume Estimation](#appendix-b-ohlcv-data-volume-estimation)
-- [Appendix C: v1.7 vs v2.0 Item-by-Item Comparison](#appendix-c-v17-vs-v20-item-by-item-comparison)
+- [Appendix C: v1.7 vs v2.0 Comparison](#appendix-c-v17-vs-v20-comparison)
 - [Appendix D: Backtest Phase Documentation Index](#appendix-d-backtest-phase-documentation-index)
 
 ---
@@ -36,13 +37,14 @@
 
 ### 1.1 Project Goals
 
-Build a **user-programmable** stock/cryptocurrency statistical computing platform with core capabilities:
+Build a **user-programmable** stock / cryptocurrency statistical computing platform with core capabilities:
 
 - **Unified data access**: Compatible with multiple data sources through a single unified interface
-- **Programmable computation**: Users write logic via Python library or custom DSL
-- **Frontend-backend separation**: Storage backend as an independently deployable service; computation frontend as a library with configurable connections
+- **Programmable computation**: Users write logic via the Python library or a custom DSL
+- **Compute-storage separation**: Storage backend (`stockstat_backend`) as an independently deployable service; computation frontend (`stockstat`) as a library with configurable connections; reserved for future distributed compute offload
 - **Plugin-based extensibility**: Data sources, indicators, cost models, fill models, execution models, and renderers are all plugins with auto-discovery
-- **Offline mode**: Frontend can run without a backend, using local storage directly
+- **Offline mode**: Frontend can run without a backend, using local storage directly; **v2.1: offline mode can directly download data from sources (via `PluginRegistry` adapters) and read existing SQLite database files**
+- **Visual management**: Built-in TUI and web admin interface — ingest, browse, and view K-lines without writing code
 
 ### 1.2 Design Principles
 
@@ -50,11 +52,11 @@ Build a **user-programmable** stock/cryptocurrency statistical computing platfor
 |-----------|-------------|
 | **Universal base** | The core layer (`_core`) is domain-agnostic and reusable for any time-series scenario |
 | **Domain layering** | Financial logic (`_domain`) builds on the universal base; never depends upward on the interface layer |
-| **Plugin-first** | All extension points go through a unified PluginRegistry with `entry_points` auto-discovery |
-| **Event-driven** | Unifies historical replay and real-time streaming under one event model |
-| **Protocol-first** | Layers communicate via Protocols; implementations are replaceable with no hardcoded if-else |
-| **Zero hard dependency in core** | Compute/backtest core depends only on pandas/numpy/scipy; matplotlib, optuna, PyWavelets, lark are optional extras |
-| **Backward compatibility** | v1.7 public API works with zero modifications; `_core`/`_domain`/`_viz`/`_api` are internal (underscore-prefixed) |
+| **Plugin-first** | All extension points go through a unified `PluginRegistry` with `entry_points` auto-discovery |
+| **Protocol-first** | Layers communicate via `Protocol`s; implementations are replaceable with no hardcoded `if-else` |
+| **Zero hard dependency in core** | Compute / backtest core depends only on pandas / numpy / scipy; matplotlib, optuna, PyWavelets, lark, rich are optional extras |
+| **Compute-storage separation** | Frontend library does not bind to a specific storage backend; accesses data via HTTP or local Storage protocol |
+| **Backward compatibility** | v1.7 public API works with zero modifications; `_core` / `_domain` / `_viz` / `_api` are internal (underscore-prefixed) |
 
 ### 1.3 Core Feature List
 
@@ -62,72 +64,95 @@ All features implemented:
 
 - Multi-source data access (yfinance direct / ccxt [Binance, Coinbase] / synthetic data)
 - OHLCV normalized storage (default SQLite, optional TimescaleDB via Docker)
-- Unified REST API querying (JSON / CSV)
-- Python computation library (pandas/numpy/scipy integration)
-- Expression DSL (SQL-like, based on lark; v2.0 auto-reflects functions from PluginRegistry)
-- Built-in technical indicator library (MA / EMA / MACD / RSI / KDJ / ATR / Bollinger / Beta / Sharpe / VaR ...)
+- Unified REST API querying (JSON / CSV; supports `order=asc/desc` bidirectional pagination)
+- Python computation library (pandas / numpy / scipy integration)
+- Expression DSL (SQL-like, based on lark; **v2.0 `DslEngine` integrated — auto-reflects from `PluginRegistry`**)
+- Built-in technical indicator library (MA / EMA / MACD / RSI / KDJ / ATR / Bollinger / Beta / Sharpe / VaR …, 23 in total)
 - Signal processing & nonlinear dynamics module (CWT / spectral entropy / grey relation / GM(1,1) / transfer entropy / Hurst / sample entropy / permutation entropy)
-- Custom indicator registration (v2.0 unified as IndicatorPlugin protocol)
+- Custom indicator registration (v2.0 unified as `IndicatorPlugin` protocol)
 - Computation result export (JSON / CSV / DataFrame)
-- Optional visualization layer (protocol-based, unified PlotSpec + ChartProfile; supports heatmap / log axes / subplots / themes)
+- Optional visualization layer (protocol-based, unified `PlotSpec` + `ChartProfile`; supports heatmap / log axes / subplots / themes)
 - Backtest subsystem (multi-instrument / multi-tf / pluggable execution model / visualization / analysis tools / batch backtesting)
-- **CLI** (serve / ingest / query / plugins / indicators)
-- **Offline mode** (V2Client with local Storage, no HTTP needed)
-- In-memory cache (TTL=300s; v2.0 supports Null/Memory/Redis switching)
+- **CLI** (serve / ingest / query / plugins / indicators / tui)
+- **TUI terminal management interface** (based on `rich`, falls back to plain text)
+- **Web admin interface** (Admin Plugin: 5-page SPA with lazy-loading K-line chart, download modal, source range probing)
+- **Offline mode** (`V2Client` with local Storage, no HTTP needed; v2.1 supports offline `ingest()` direct download from sources + `SQLStorage` reading existing SQLite files)
+
+### 1.4 Package Structure and Deployment
+
+The project contains **two independent pip packages** supporting flexible deployment topologies:
+
+| Package | Location | Responsibility | Independently deployable? |
+|---------|----------|---------------|--------------------------|
+| `stockstat-backend` | `backend/` | Storage backend service (FastAPI + SQLAlchemy + data source adapters) | ✅ Separate process |
+| `stockstat` | `frontend/` | Computation frontend library (ComputeEngine + backtest + DSL + viz + CLI/TUI) | ✅ User machine / compute node |
 
 ---
 
-## 2. Overall Architecture (Five Layers)
+## 2. Overall Architecture
 
-### 2.1 Five-Layer Architecture Overview
+### 2.1 Architecture Overview
+
+The project uses a **dual-package + five-layer** architecture: `stockstat_backend` (storage backend) and `stockstat` (frontend computation library, internally divided into five layers).
 
 ```mermaid
 graph TB
-    subgraph "Layer 4: Application app/"
-        APP_CLI[CLI<br/>serve/ingest/query/plugins]
-        APP_SERVER[API Server]
+    subgraph "Frontend Library stockstat (5-Layer Architecture)"
+        subgraph "Layer 4: Application app/"
+            APP_CLI["CLI<br/>serve / ingest / query / plugins / indicators / tui"]
+            APP_TUI["TUI Terminal<br/>rich-based"]
+        end
+
+        subgraph "Layer 3: Interface _api/"
+            API_DSL["DslEngine<br/>auto-reflects PluginRegistry (integrated)"]
+            API_CLIENT["V2Client<br/>online + offline mode<br/>(offline supports ingest download)"]
+        end
+
+        subgraph "Layer 2: Visualization _viz/"
+            VIZ_SPEC["Unified PlotSpec + ChartProfile"]
+            VIZ_RENDER["Renderer Plugins<br/>Null / Matplotlib"]
+            VIZ_THEME["Theme System<br/>default / dark / publication"]
+        end
+
+        subgraph "Layer 1: Financial Domain _domain/"
+            DOM_MODEL["Domain Models<br/>OHLCV / Symbol / Quote / Trade"]
+            DOM_SRC["Data Source Plugins<br/>backend-first + frontend-local fallback<br/>+ probe_range + offline ingest"]
+            DOM_IND["Indicator Plugins<br/>IndicatorPlugin (23 built-in)"]
+            DOM_BT["Backtest Component Plugins<br/>Cost / Fill / Execution"]
+            DOM_SCHED["Scheduler"]
+        end
+
+        subgraph "Layer 0: Universal Core _core/"
+            CORE_CONTRACT["Protocol Contracts<br/>6 Protocols"]
+            CORE_PLUGIN["PluginRegistry"]
+            CORE_CONFIG["Layered Config"]
+            CORE_EVENT["EventBus + EventReplay (reserved for streaming)"]
+            CORE_STORAGE["Storage Protocol Abstraction<br/>StorageBackend Protocol<br/>Memory / SQL implementations"]
+            CORE_CACHE["Cache Protocol Abstraction<br/>CacheBackend Protocol<br/>Null / Memory / Redis"]
+            CORE_CODEC["Codec<br/>JSON / CSV / Arrow / Parquet"]
+            CORE_LOG["Structured Logging"]
+            CORE_ERR["Error Classification"]
+        end
+
+        subgraph "v1.7 Compatibility Layer (public API unchanged)"
+            COMPAT["client.py / compute/ / indicators/<br/>backtest/ / plot/ / dsl/ / data_access/ / export/"]
+        end
     end
 
-    subgraph "Layer 3: Interface _api/"
-        API_DSL[DSL Engine<br/>auto-reflects registry]
-        API_CLIENT[V2Client<br/>online + offline mode]
+    subgraph "Storage Backend Service stockstat_backend (separate process)"
+        BE_API["REST API<br/>/api/v1/* + order param"]
+        BE_ADAPTERS["Data Source Adapters<br/>+ probe_range"]
+        BE_ADMIN["Admin Plugin<br/>5-page SPA + 15 endpoints"]
+        BE_ORM["SQLAlchemy ORM<br/>database / repository"]
+        BE_CACHE["InMemoryCache<br/>TTL=300s"]
     end
 
-    subgraph "Layer 2: Visualization _viz/"
-        VIZ_SPEC[Unified PlotSpec + ChartProfile]
-        VIZ_RENDER[Renderer Plugins<br/>Null / Matplotlib]
-        VIZ_THEME[Theme System<br/>default / dark / publication]
-    end
-
-    subgraph "Layer 1: Financial Domain _domain/"
-        DOM_MODEL[Domain Models<br/>OHLCV / Symbol / Quote / Trade]
-        DOM_SRC[Data Source Plugins<br/>yfinance / ccxt / synthetic]
-        DOM_IND[Indicator Plugins<br/>22 built-in indicators]
-        DOM_BT[Backtest Component Plugins<br/>Cost / Fill / Execution]
-        DOM_SCHED[Scheduler]
-    end
-
-    subgraph "Layer 0: Universal Core _core/"
-        CORE_CONTRACT[Protocol Contracts<br/>6 Protocols]
-        CORE_PLUGIN[PluginRegistry]
-        CORE_CONFIG[Layered Config]
-        CORE_EVENT[EventBus + EventReplay]
-        CORE_STORAGE[Storage Backend<br/>Memory / SQL]
-        CORE_CACHE[Cache Backend<br/>Null / Memory / Redis]
-        CORE_CODEC[Codec<br/>JSON / CSV / Arrow / Parquet]
-        CORE_LOG[Structured Logging]
-        CORE_ERR[Error Classification]
-    end
-
-    subgraph "v1.7 Compatibility Layer (public API unchanged)"
-        COMPAT[client.py / compute/ / indicators/<br/>backtest/ / plot/ / dsl/ / data_access/ / export/]
-    end
-
+    %% Frontend internal dependencies
     APP_CLI --> API_DSL
     APP_CLI --> API_CLIENT
-    APP_SERVER --> COMPAT
     API_DSL --> DOM_IND
     API_CLIENT --> DOM_MODEL
+    API_CLIENT -.->|"offline mode"| CORE_STORAGE
 
     DOM_MODEL --> VIZ_SPEC
     DOM_IND --> VIZ_SPEC
@@ -141,10 +166,35 @@ graph TB
 
     COMPAT -.->|re-export| DOM_IND
     COMPAT -.->|re-export| DOM_BT
-    COMPAT -.->|forward| CORE_STORAGE
+    COMPAT -.->|"run_dsl forwards"| API_DSL
+
+    %% Frontend → Backend (online mode)
+    APP_CLI -.->|"serve launches"| BE_API
+    APP_TUI -.->|HTTP| BE_API
+    COMPAT -.->|HTTP forward| BE_API
+
+    %% Backend internal
+    BE_API --> BE_ADAPTERS
+    BE_ADMIN --> BE_ADAPTERS
+    BE_ADAPTERS --> BE_ORM
+    BE_API --> BE_ORM
+    BE_ORM --> BE_CACHE
 ```
 
-### 2.2 Inter-Layer Dependency Rules
+### 2.2 v1.7 Compatibility Layer and v2.0 Integration
+
+| Compatibility module | v2.0 integration status | Description |
+|---------------------|------------------------|-------------|
+| `client.py` → `run_dsl()` | ✅ **Integrated** | Prefers `_api/dsl/DslEngine` (auto-reflects 23 functions from `PluginRegistry`), falls back to v1.7 `Evaluator` (15 hardcoded functions) |
+| `client.py` → `ohlcv()` | ✅ **Enhanced** | Added `order` parameter, forwards to `DataClient` → HTTP |
+| `client.py` → `compute` | ⚠️ v1.7 direct call | `ComputeEngine` directly calls `indicators/*` functions |
+| `client.py` → `backtest()` | ⚠️ v1.7 direct call | `BacktestEngine` imperative loop (stable, 277 tests) |
+| `client.py` → `plot` | ⚠️ v1.7 direct call | Uses v1.7 `plot/base.PlotSpec`; `_viz/specs.PlotSpec` exists as parallel capability |
+| `dsl/evaluator.py` | ⚠️ Retained as fallback | v1.7 `Evaluator` + `_BUILTIN_FUNCS`, used when v2.0 layer unavailable |
+
+**Design decision**: The backtest engine remains imperative (not event-driven) because the imperative implementation is stable with 277 test coverage, and event-driven refactoring is a massive effort. `EventBus` + `EventReplay` are implemented and reserved for future real-time streaming.
+
+### 2.3 Inter-Layer Dependency Rules
 
 ```mermaid
 graph LR
@@ -158,48 +208,62 @@ graph LR
 ```
 
 **Iron rules**:
-1. Upper layers depend on lower layers; lower layers are unaware of upper layers
-2. Layers communicate via Protocols; no concrete implementation imports
-3. Cross-layer forbidden: domain cannot call api directly
-4. v1.7 compatibility layer (`client.py` etc.) keeps public API unchanged; internals may forward to new architecture
 
-### 2.3 Data Flow
+1. Upper layers depend on lower layers; lower layers are unaware of upper layers
+2. Layers communicate via `Protocol`s; no concrete implementation imports
+3. Cross-layer forbidden: domain cannot call api directly
+4. v1.7 compatibility layer keeps public API unchanged; internally gradually forwards to v2.0 architecture
+5. **Compute-storage separation**: `stockstat` (frontend) and `stockstat_backend` (backend) are two independent packages
+   - **Online mode**: Frontend calls backend REST API via HTTP
+   - **Offline mode**: Frontend `V2Client` uses Layer 0's `MemoryStorage` / `SQLStorage`, no backend needed; v2.1 supports offline `ingest()` via `PluginRegistry` adapters to download directly from data sources
+   - Frontend `_domain/sources/` and `_core/_compat.py` use `try/except ImportError` for graceful degradation when backend is not installed
+
+### 2.4 Data Flow
 
 ```mermaid
 sequenceDiagram
     participant User as User
-    participant CLI as CLI / Python Client
-    participant API as Interface Layer
-    participant Domain as Domain Layer
-    participant Core as Core Layer
-    participant BE as Storage Backend
+    participant CLI as CLI / TUI / Browser (frontend)
+    participant BE_API as Backend REST API
+    participant Domain as Domain Layer (frontend, computation)
+    participant Adapter as Data Source Adapter (backend)
+    participant DB as Database + Cache (backend)
     participant Src as Data Source
 
-    Note over BE,Src: Stage 1: Data ingestion (on-demand)
-    User->>CLI: stockstat ingest BTC/USDT
-    CLI->>API: POST /api/v1/ingest
-    API->>BE: trigger adapter
-    BE->>Src: fetch_ohlcv(symbol, range)
-    Src-->>BE: raw data
-    BE->>BE: normalize → store → clear cache
+    Note over BE_API,Src: Stage 1: Data ingestion (on-demand, online mode)
+    User->>CLI: stockstat ingest BTC/USDT (or web / TUI)
+    CLI->>BE_API: POST /api/v1/ingest
+    BE_API->>Adapter: fetch_ohlcv(symbol, range, timeframe)
+    Adapter->>Src: Network API call
+    Src-->>Adapter: Raw bars
+    Adapter-->>BE_API: DataFrame
+    BE_API->>DB: normalize → upsert → clear cache
+    DB-->>BE_API: Row count
+    BE_API-->>CLI: {"ingested": N}
 
-    Note over User,Domain: Stage 2: Computation (online or offline)
+    Note over User,Domain: Stage 2: Query & computation (online or offline)
     User->>CLI: client.ohlcv() / client.compute.ma()
-    CLI->>API: GET /api/v1/ohlcv (online) or local Storage (offline)
-    API-->>CLI: normalized OHLCV
-    CLI->>Domain: call indicator plugin
-    Domain-->>User: result (DataFrame/JSON)
+    CLI->>BE_API: GET /api/v1/ohlcv (order=desc&limit=N)
+    Note right of CLI: Offline mode: use local MemoryStorage
+    BE_API-->>CLI: Normalized OHLCV (ascending by time)
+    CLI->>Domain: Call indicator plugin
+    Domain-->>User: Result (DataFrame / JSON)
+
+    Note over User,Src: Stage 3: Source range probing (before ingestion)
+    User->>CLI: Web download modal
+    CLI->>BE_API: GET /admin/api/sources/{src}/info?symbol=...&probe=true
+    BE_API->>Adapter: probe_range(symbol, timeframe)
+    Adapter->>Src: Fetch first / last bar
+    Src-->>Adapter: Timestamps
+    Adapter-->>BE_API: (earliest, latest)
+    BE_API-->>CLI: Probed range + pre-filled defaults
 ```
 
 ---
 
-## 3. Layer 0: Universal Core _core
+## 3. Layer 0: Universal Core `_core`
 
-> **Design principle**: Completely domain-agnostic. Handles time-series, storage, caching, serialization, plugins, events, and configuration primitives.
-
-### 3.1 Protocol Contracts contracts/
-
-Defines all cross-layer communication Protocols (`typing.Protocol`), no implementations:
+### 3.1 Protocol Contracts `contracts/`
 
 | Protocol | Responsibility |
 |----------|---------------|
@@ -208,46 +272,52 @@ Defines all cross-layer communication Protocols (`typing.Protocol`), no implemen
 | `CacheBackend` | Cache backend (get / set / delete / exists / clear / health_check) |
 | `Codec` | Serialization codec (encode / decode / media_type) |
 | `Renderer` | Renderer (render / show / savefig / available) |
-| `EventSubscriber` / `EventPublisher` | Event subscribe/publish |
+| `EventSubscriber` / `EventPublisher` | Event subscribe / publish |
 
-### 3.2 Plugin Registry plugin/
+### 3.2 Plugin Registry `plugin/`
 
-**Core capabilities**: namespace partitioning, `entry_points` auto-discovery, explicit registration, dependency declaration, lifecycle management, metadata queries.
+46 built-in plugins across 6 namespaces: sources (4) / indicators (23) / cost_models (8) / fill_models (7) / execution_models (2) / renderers (2).
 
-**vs v1.7**: v1.7 adapters used `if-elif` hardcoded routing (4 branches), indicators used a module-level `_REGISTRY` dict (no namespaces/metadata); v2.0 unifies everything into one registry.
+**Integration status**:
+- ✅ `DslEngine` auto-reflects indicator functions from `PluginRegistry` (integrated into `StockStatClient.run_dsl()`)
+- ✅ CLI `stockstat plugins` / `stockstat indicators` commands query the registry
+- ⚠️ `ComputeEngine`'s 40+ methods still directly call `indicators/*` functions (not via registry dispatch)
+- ⚠️ `entry_points` auto-discovery implemented but not enabled (`discover()` never called)
 
-### 3.3 Layered Configuration config/
+### 3.3 Layered Configuration `config/`
 
-Sources merged in priority (low → high): built-in defaults → config file (`stockstat.toml`) → environment variables (`STOCKSTAT_*`) → runtime kwargs. All v1.7 environment variables are 100% compatible.
+Configuration sources merged in priority: built-in defaults → config file (`stockstat.toml`) → environment variables → runtime kwargs. All v1.7 environment variables 100% compatible.
 
-### 3.4 Event Bus + Data Stream events/
+### 3.4 Event Bus + Data Stream `events/`
 
-| Component | Responsibility |
-|-----------|---------------|
-| `EventBus` | In-process pub/sub with topic-based routing; synchronous dispatch |
-| `Event` | Immutable event object (topic / payload / timestamp / source) |
-| `EventReplay` | Reads historical data from storage and replays as events (basis for backtesting) |
+| Component | Status |
+|-----------|--------|
+| `EventBus` | ✅ Implemented |
+| `Event` | ✅ Implemented |
+| `EventReplay` | ✅ Implemented |
 
-**Key design**: Backtest = `EventReplay` reads historical bars → publishes to EventBus → strategy subscribes. Strategy code does not distinguish historical vs real-time.
+**Integration status**: `EventBus` + `EventReplay` are implemented but **not used by the backtest engine**. The backtest engine uses an imperative `for` loop (stable, 277 tests). Event bus is reserved for future real-time streaming and event-driven backtest refactoring.
 
-### 3.5 Storage Backend storage/
+### 3.5 Storage Protocol Abstraction `storage/`
 
-| Implementation | Use case |
-|---------------|---------|
-| `MemoryStorage` | Testing / tiny datasets |
-| `SQLStorage` | Default (SQLite / PostgreSQL), bridges v1.7 SQLAlchemy ORM via `_compat.py` |
-| `TimescaleStorage` | Massive time-series (Docker, optional Hypertable) |
-| `ParquetStorage` | Offline analysis (read-only snapshots) |
+| Implementation | Use case | Status |
+|---------------|---------|--------|
+| `MemoryStorage` | Testing / tiny datasets / offline mode | ✅ Implemented |
+| `SQLStorage` | Default (SQLite / PostgreSQL), bridges backend SQLAlchemy ORM via `_compat.py` | ✅ Implemented |
+| `TimescaleStorage` | Massive time-series (Docker, Hypertable) | ❌ Planned |
+| `ParquetStorage` | Offline analysis (read-only snapshots) | ❌ Planned |
 
-### 3.6 Cache cache/
+> `SQLStorage` delegates to backend `ohlcv_repo` via `_compat.py`, which uses `try/except ImportError` for graceful degradation — when backend is not installed, it auto-creates tables with standalone SQLAlchemy.
+
+### 3.6 Cache Protocol Abstraction `cache/`
 
 | Implementation | Description |
 |---------------|-------------|
 | `NullCache` | No caching (testing) |
-| `MemoryCache` | In-process TTL cache (default) |
+| `MemoryCache` | In-process TTL cache (default, TTL=300s) |
 | `RedisCache` | Distributed cache (auto-selected by `config.cache.backend`) |
 
-### 3.7 Codec codec/
+### 3.7 Codec `codec/`
 
 | Codec | media_type |
 |-------|------------|
@@ -258,120 +328,80 @@ Sources merged in priority (low → high): built-in defaults → config file (`s
 
 ### 3.8 Logging & Errors
 
-| Component | Responsibility |
-|-----------|---------------|
-| `StructuredLogger` | JSON structured logging with context binding (`bind(symbol="BTC/USDT")`) |
-| `AppError` | Exception base class with error code, context, recoverable flag |
-| Error subclasses | `DataNotFoundError` / `SymbolNotFoundError` / `AdapterError` / `InvalidParamsError` / `RateLimitedError` / `LookaheadError` / `PluginNotFoundError` |
+`StructuredLogger` (JSON structured logging with context binding) / `AppError` (exception base with error code, context, recoverable flag) / 7 error subclasses.
 
 ---
 
-## 4. Layer 1: Financial Domain _domain
+## 4. Layer 1: Financial Domain `_domain`
 
-### 4.1 Domain Models models/
+### 4.1 Domain Models `models/`
 
-| Model | Description |
-|-------|-------------|
-| `OHLCV` | Single bar (symbol / ts / OHLCV / source / timeframe) |
-| `Symbol` | Registered symbol (unified_symbol / asset_type / base / quote / sources) |
-| `Quote` | Real-time quote (bid / ask / mid auto-calculated) |
-| `Trade` | Executed trade (price / qty / side) |
+`OHLCV` / `Symbol` / `Quote` / `Trade` — pure-Python dataclasses (not ORM-bound). Provides `df_to_ohlcv_list()` / `ohlcv_list_to_df()` bidirectional conversion.
 
-Provides `df_to_ohlcv_list()` / `ohlcv_list_to_df()` bidirectional conversion. Storage-decoupled (not ORM-bound).
+### 4.2 Data Source Plugins `sources/`
 
-### 4.2 Data Source Plugins sources/
+`DataSourcePlugin` wraps data source adapters, registered to `sources` namespace. Uses **backend-first + frontend-local fallback** strategy:
 
-`DataSourcePlugin` wraps v1.7 adapters, registered to the `sources` namespace.
+1. **Backend installed**: Uses full backend adapters (with `fetch_symbols` / `probe_range` / `health_check`)
+2. **Backend not installed**: Auto-registers frontend-local adapters (`_LazySourcePlugin` lazy instantiation):
+   - `synthetic`: `_local_synthetic.py` (pure Python, zero deps)
+   - `yfinance`: Frontend-local Yahoo API adapter (depends on `requests`, lazy import)
+   - `binance` / `coinbase`: Frontend-local ccxt adapter (depends on `ccxt`, lazy import)
 
-| Adapter | name | Network | Purpose |
-|---------|------|---------|---------|
-| `YahooDirectAdapter` | `yfinance` | Yes | Direct Yahoo Finance API (route default) |
-| `CcxtAdapter` | `binance` / `coinbase` | Yes | Via ccxt |
-| `SyntheticAdapter` | `synthetic` | No | Fixed-seed synthetic data (offline testing) |
+| Adapter | name | Symbol catalog | Timeframes |
+|---------|------|----------------|------------|
+| `YahooDirectAdapter` | `yfinance` | 85 curated + manual input | 12 |
+| `CcxtAdapter("binance")` | `binance` | 4,498 (full market) | 16 |
+| `CcxtAdapter("coinbase")` | `coinbase` | 1,183 (full market) | 7 |
+| `SyntheticAdapter` | `synthetic` | 5 examples | 9 |
 
-**Route aliases**: API accepts `source=binance`, internally maps to `CcxtAdapter("binance")`. Auto-detects when unspecified: `/` → binance, else → yfinance.
+**`probe_range()` protocol**: Each adapter implements `probe_range(symbol, timeframe) -> (earliest_iso, latest_iso)`.
 
-### 4.3 Indicator Plugins indicators/
+**`_LazySourcePlugin`**: Used when backend not installed. Adapter instance created on first `fetch_ohlcv()` call (lazy import of ccxt/requests). Missing optional deps don't cause errors at registration time.
 
-`IndicatorPlugin` protocol wraps v1.7 indicator functions, registered to `indicators` namespace. 22 built-in indicators auto-registered:
+**Offline `ingest()` capability** (v2.1 new): `V2Client(mode="offline")` `ingest()` no longer raises `RuntimeError`. Instead: `registry.get("sources", source)` → `adapter.fetch_ohlcv()` → normalize → `storage.upsert()`, downloading data directly to local storage.
 
-| Category | Indicators |
-|----------|-----------|
-| Trend | ma / ema / macd |
-| Oscillator | rsi / kdj |
-| Volatility | std / atr / bollinger |
-| Statistics | corr / beta / sharpe / max_drawdown / var / returns / log_returns |
-| Nonlinear | wavelet_decompose / spectral_entropy / grey_relation / gm11_predict / transfer_entropy / hurst_dfa / sample_entropy / permutation_entropy |
+### 4.3 Indicator Plugins `indicators/`
 
-**Key improvement**: v1.7 required 3 changes per new indicator (function → ComputeEngine method → DSL `_BUILTIN_FUNCS`); v2.0 requires only writing one `IndicatorPlugin` and registering it — ComputeEngine and DSL auto-discover.
+23 built-in indicators auto-registered: trend (ma/ema/macd) / oscillator (rsi/kdj) / volatility (std/atr/bollinger) / statistics (corr/beta/sharpe/max_drawdown/var) / transform (returns/log_returns) / nonlinear (8 functions).
 
-### 4.4 Backtest Component Plugins backtest/
+**Integration status**: ✅ `DslEngine` auto-reflects all 23 indicators as DSL functions. ⚠️ `ComputeEngine` still directly calls `indicators/*` module functions.
 
-`BacktestComponentPlugin` wraps v1.7 components, registered to respective namespaces:
+### 4.4 Backtest Component Plugins `backtest/`
 
-| Namespace | Count | List |
-|-----------|-------|------|
-| `cost_models` | 8 | Percent / Fixed / Tiered / Min / StampDuty / Zero / MakerTaker / Binance |
-| `fill_models` | 7 | NextOpen / NextClose / ThisClose / VWAP / WorstPrice / IntrabarLimit / IntrabarFillModel |
-| `execution_models` | 2 | NextBarExecution / IntrabarExecution |
+8 cost models / 7 fill models / 2 execution models, all registered to respective namespaces.
 
-### 4.5 Scheduler scheduler/
+### 4.5 Scheduler `scheduler/`
 
-v1.7 was an empty stub; v2.0 provides a functional implementation:
-
-- **on-demand**: `trigger_now(symbol, source, ...)` — immediate
-- **cron**: `schedule_cron(symbol, cron_expr, ...)` — recurring
-- **incremental**: `schedule_incremental(symbol, interval_hours=24)` — incremental update
+Functional implementation: on-demand / cron / incremental scheduling.
 
 ---
 
-## 5. Layer 2: Visualization _viz
+## 5. Layer 2: Visualization `_viz`
 
 ### 5.1 Unified Spec System
 
-v2.0 unifies v1.7's `PlotSpec` + `BacktestChartSpec` dual-track into a single `PlotSpec` + `ChartProfile` presets:
+`PlotSpec` + `ChartProfile` presets with 6 built-in profiles: equity_curve / drawdown / trades_overlay / returns_distribution / monthly_heatmap / dashboard.
 
-| Component | Responsibility |
-|-----------|---------------|
-| `PlotSpec` | Backend-agnostic plot spec (series / subplots / markers / log axes / heatmap / figsize / theme) |
-| `SeriesSpec` | Single data series (kind: line/bar/scatter/fill/histogram/heatmap) |
-| `SubplotSpec` | Subplot panel |
-| `ChartProfile` | Named preset that builds a PlotSpec from a BacktestResult |
-
-**6 built-in ChartProfiles**: equity_curve / drawdown / trades_overlay / returns_distribution / monthly_heatmap / dashboard
+**Integration status**: `_viz` is implemented but **not used by `StockStatClient` main path**. Currently `client.plot` uses v1.7 `plot/base.PlotSpec` (without `theme` field); backtest visualization uses `backtest/chart_spec.py`'s `BacktestChartSpec`. `_viz` exists as a parallel capability for future unification.
 
 ### 5.2 Renderer Plugins
 
-| Renderer | Status |
-|----------|--------|
-| `NullRenderer` | ✅ Zero-dependency fallback |
-| `MatplotlibRenderer` | ✅ Lazy import |
-| `PlotlyRenderer` | Planned (registry entry point reserved) |
+`NullRenderer` (zero-dependency fallback) / `MatplotlibRenderer` (lazy import) / `PlotlyRenderer` (planned).
 
 ### 5.3 Theme System
 
-| Theme | Style |
-|-------|-------|
-| `default` | White background, standard colors |
-| `dark` | Dark background |
-| `publication` | Academic publication style (small font) |
-
-Supports `register_theme()` for custom themes.
+3 built-in themes: `default` / `dark` / `publication`. Supports `register_theme()` for custom themes.
 
 ---
 
-## 6. Layer 3: Interface _api
+## 6. Layer 3: Interface `_api`
 
-### 6.1 DSL Auto-Reflection dsl/
+### 6.1 DSL Auto-Reflection `dsl/` (Integrated)
 
 `DslEngine` auto-loads all registered indicators from `PluginRegistry` as DSL functions, replacing v1.7's manually-maintained `_BUILTIN_FUNCS` dict.
 
-```python
-engine = DslEngine(registry, client=client)
-result = engine.eval('SELECT close, ma(close, 20) AS ma20 FROM ohlcv("BTC/USDT", "1d", ...)')
-```
-
-Call `engine.refresh()` after registering new indicators to make them DSL-available.
+**Integration path**: `StockStatClient.run_dsl()` → prefers `_dsl_v2` (`DslEngine`, 23 functions) → falls back to `_dsl` (v1.7 `Evaluator`, 15 functions).
 
 ### 6.2 V2Client (Online + Offline)
 
@@ -379,29 +409,57 @@ Call `engine.refresh()` after registering new indicators to make them DSL-availa
 # Online mode (connects to backend HTTP)
 client = V2Client(mode="online", host="192.168.1.100", port=8000)
 
-# Offline mode (local Storage, no backend needed)
+# Offline mode — in-memory storage
 client = V2Client(mode="offline", storage=MemoryStorage())
+
+# Offline mode — read existing SQLite database file
+client = V2Client(mode="offline", storage=SQLStorage(database_url="sqlite:///stockstat.db"))
 ```
 
-Offline mode supports `ohlcv()` / `compute` / `run_dsl()` / `backtest()` / `plot` — all run locally.
+In offline mode, all features run locally:
+
+| Feature | Online mode | Offline mode |
+|---------|-------------|--------------|
+| `ohlcv()` | HTTP → backend REST API | `storage.query()` local |
+| `ingest()` | HTTP → backend ingestion | **`registry` adapter → `fetch_ohlcv()` → `storage.upsert()` (v2.1 new)** |
+| `compute` | Backend-agnostic | Local `ComputeEngine` |
+| `run_dsl()` | `DslEngine` (HTTP data fetch) | `DslEngine` (local Storage data fetch) |
+| `backtest()` | Backend-agnostic | Local `BacktestEngine` |
+| `plot` | Backend-agnostic | Local `PlotAPI` |
+
+**Offline `ingest()` data flow**:
+```
+client.ingest("BTC/USDT", source="binance")
+  → registry.get("sources", "binance")     # Get adapter from PluginRegistry
+  → adapter.fetch_ohlcv(symbol, ...)       # Direct Binance API call
+  → normalize → storage.upsert("ohlcv", records)  # Write to local MemoryStorage / SQLStorage
+  → return {"ingested": N}
+```
+
+**`SQLStorage` reading existing database**: `SQLStorage(database_url="sqlite:///path/to/stockstat.db")` can directly read SQLite files created by the backend, via `_compat.py` delegating to `ohlcv_repo.query()`. When backend not installed, `_compat.py` auto-creates tables with standalone SQLAlchemy.
 
 ---
 
-## 7. Layer 4: Application app
+## 7. Layer 4: Application `app`
 
 ### 7.1 CLI
 
 ```bash
-stockstat serve --host 0.0.0.0 --port 8000     # Start API server
-stockstat ingest BTC/USDT --source binance      # Ingest from CLI
-stockstat query BTC/USDT --limit 5              # Query and output
-stockstat plugins --namespace indicators        # List registered plugins
-stockstat indicators --category nonlinear       # List indicators by category
+stockstat serve --host 0.0.0.0 --port 8000
+stockstat ingest BTC/USDT --source binance
+stockstat query BTC/USDT --limit 5
+stockstat plugins --namespace indicators
+stockstat indicators --category nonlinear
+stockstat tui --host 192.168.1.100
 ```
 
-### 7.2 Server Entry
+### 7.2 TUI Terminal Management Interface
 
-`stockstat serve` is equivalent to `python -m uvicorn stockstat_backend.app:app`.
+Based on `rich` (optional), falls back to plain text.
+
+### 7.3 Server Entry
+
+`stockstat serve` is equivalent to `python -m uvicorn stockstat_backend.app:app`, conditionally mounting Admin Plugin.
 
 ---
 
@@ -409,90 +467,37 @@ stockstat indicators --category nonlinear       # List indicators by category
 
 ### 8.1 Data Source Adapter Layer
 
-Adapters follow a plugin-based design, each subclassing `DataSourceAdapter`. Adapter management logic is extracted into a public module `api/adapters.py`, shared by the main router and the admin plugin.
-
-**Public adapter API** (`api/adapters.py`):
-
-```python
-# 3 public functions, shared by routes.py and plugins/admin/
-def get_adapter(source: str):
-    """Get or create a data source adapter (cached)."""
-    ...
-
-def auto_detect_source(symbol: str) -> str:
-    """Auto-detect data source from symbol format."""
-    ...
-
-def clear_adapters():
-    """Clear adapter cache (called after proxy config change)."""
-    ...
-```
-
-`routes.py` imports via `from .adapters import get_adapter as _get_adapter`, behavior identical to v1.7. The admin plugin uses the public `get_adapter()` / `auto_detect_source()` / `clear_adapters()` directly, without depending on private symbols.
+Adapters subclass `DataSourceAdapter` ABC with `fetch_ohlcv` / `fetch_symbols` / `supports` / `health_check` / `probe_range` methods.
 
 ### 8.2 Proxy Support
 
 | Env var | Default | Description |
 |---------|---------|-------------|
 | `STOCKSTAT_PROXY_ENABLED` | `false` | Enable proxy |
-| `STOCKSTAT_PROXY_TYPE` | `http` | Proxy type: `http` or `socks5` |
-| `STOCKSTAT_PROXY_URL` | (auto by type) | Proxy URL |
+| `STOCKSTAT_PROXY_TYPE` | `http` | `http` or `socks5` |
+| `STOCKSTAT_PROXY_URL` | (auto) | Proxy URL |
 
-### 8.3 Data Normalization Layer
+### 8.3 Data Normalization
 
-`normalize_ohlcv()` unifies heterogeneous raw data: timezone to UTC, field validation (OHLCV required), dropna cleaning.
-
-**Unified data model** (SQLAlchemy ORM `OHLCV` table):
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `id` | `Integer PK` | Auto-increment primary key |
-| `symbol` | `String(50)` | Unified symbol |
-| `ts` | `DateTime(tz=True)` | UTC timestamp |
-| `open/high/low/close` | `Float` | OHLC |
-| `volume` | `Float` | Volume |
-| `source` | `String(50)` | Data source |
-| `timeframe` | `String(10)` | Period |
-| `ingested_at` | `DateTime(tz=True)` | Ingestion timestamp |
-
-**Unique constraint**: `(symbol, ts, timeframe, source)` composite unique, ensuring upsert idempotency.
+`normalize_ohlcv()` unifies raw data: timezone to UTC, field validation, dropna cleaning. Unique constraint: `(symbol, ts, timeframe, source)`.
 
 ### 8.4 Storage Engine
 
 | Deployment mode | `DATABASE_URL` | Characteristics |
 |-----------------|----------------|-----------------|
-| **Default (local dev)** | `sqlite:///stockstat.db` | Zero external dependency, **data persists across restarts** |
-| **Custom path** | `sqlite:////data/stockstat.db` | Custom database file location (see table below) |
-| **Docker production** | `postgresql://...@db:5432/stockstat` | TimescaleDB + volume persistence |
+| Default (local dev) | `sqlite:///stockstat.db` | Zero dependency, persists across restarts |
+| Custom path | `sqlite:////data/stockstat.db` | Custom database file location |
+| Docker production | `postgresql://...@db:5432/stockstat` | TimescaleDB + volume persistence |
 
-**`DATABASE_URL` path rules**:
+### 8.5 Query & Cache Strategy
 
-| `DATABASE_URL` value | Actual storage location |
-|---|---|
-| `sqlite:///stockstat.db` (default) | `stockstat.db` in the current working directory |
-| `sqlite:////data/stockstat.db` | `/data/stockstat.db` (absolute path, 4 slashes) |
-| `sqlite:///../data/stockstat.db` | `data/` in the parent directory (relative path) |
-| `postgresql://user:pwd@host:5432/db` | Remote PostgreSQL database |
-
-> The SQLite URL format is `sqlite:///` + path. Absolute paths start with `/`, so the concatenation yields 4 slashes: `sqlite:////abs/path`.
-
-Session management: module-level singletons `_engine` + `_SessionLocal`, lazily initialized; `get_session()` context manager auto commit/rollback/close.
-
-### 8.5 Cache Strategy
-
-Default `InMemoryCache` (TTL=300s). `cache.clear()` after successful `POST /api/v1/ingest`. v2.0's `RedisCache` can be enabled via `config.cache.backend = "redis"`.
-
-### 8.6 Scheduler
-
-v2.0 provides a functional scheduler (on-demand / cron / incremental). Current ingestion mode remains on-demand — users explicitly request via `POST /api/v1/ingest` or `client.ingest(...)`.
+`order` parameter supports bidirectional pagination. Cache key includes `order` for independent caching.
 
 ---
 
 ## 9. Scripting Language Design
 
-A **dual-mode** programmable interface: Python library (full-featured) + DSL (lightweight declarative).
-
-### 9.1 DSL Grammar (actual implemented BNF summary)
+### 9.1 DSL Grammar
 
 ```
 query       : "SELECT" select_list "FROM" source ("WHERE" condition)? ("LIMIT" INT)?
@@ -501,20 +506,9 @@ source      : "ohlcv" "(" string ("," string)* ")"
 func_call   : NAME "(" (expr ("," expr)*)? ("," kwarg)* ")"
 ```
 
-> **Capability boundary**: Only supports `SELECT ... FROM ... WHERE ... LIMIT`. Does not support `GROUP BY` / `ORDER BY` / `CASE WHEN`.
+### 9.2 DSL Functions (v2.0 Auto-Reflection)
 
-### 9.2 DSL Built-in Functions (v2.0 auto-reflection)
-
-v2.0's `DslEngine` auto-loads all registered indicators from `PluginRegistry`. Currently available DSL functions:
-
-| Category | Functions |
-|----------|----------|
-| Trend | `ma` / `ema` / `macd` |
-| Oscillator | `rsi` |
-| Volatility | `std` / `atr` / `bollinger` |
-| Statistics | `corr` |
-| Transform | `returns` / `log_returns` |
-| Aggregation | `max` / `min` / `mean` / `sum` / `count` |
+`StockStatClient.run_dsl()` prefers v2.0 `DslEngine`, auto-reflecting all 23 registered indicators (8 more than v1.7's 15, including nonlinear functions). Falls back to v1.7 `Evaluator` when v2.0 layer unavailable.
 
 ---
 
@@ -526,13 +520,13 @@ v2.0's `DslEngine` auto-loads all registered indicators from `PluginRegistry`. C
 |----------|--------|-------------|
 | `/api/v1/health` | GET | Health check (includes proxy status) |
 | `/api/v1/proxy` | GET | Get proxy configuration |
-| `/api/v1/sources` | GET | List data sources (includes proxy status) |
+| `/api/v1/sources` | GET | List data sources |
 | `/api/v1/ingest` | POST | Trigger data ingestion |
-| `/api/v1/ohlcv` | GET | Query OHLCV data (json/csv) |
+| `/api/v1/ohlcv` | GET | Query OHLCV data (json/csv; supports `order`) |
 | `/api/v1/symbols` | GET | List registered symbols |
 | `/api/v1/symbols/{symbol}` | GET | Symbol detail |
 
-### 10.2 Core API — GET /api/v1/ohlcv
+### 10.2 Core API — `GET /api/v1/ohlcv`
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -541,78 +535,34 @@ v2.0's `DslEngine` auto-loads all registered indicators from `PluginRegistry`. C
 | `start` / `end` | string | no | Time range |
 | `timeframe` | string | no | Default `1d` |
 | `limit` | int | no | Max rows |
+| `order` | string | no | `asc` (default) / `desc` |
 | `format` | string | no | `json` (default) / `csv` |
 
-### 10.3 Core API — POST /api/v1/ingest
-
-Triggers backend ingestion and storage. Clears cache on success. Response: `{"symbol": "AAPL", "source": "yfinance", "ingested": 250}`
+Python library `StockStatClient.ohlcv()` also supports `order` parameter.
 
 ---
 
 ## 11. Backtest Subsystem Design
 
-> The backtest subsystem lives in `stockstat.backtest` (v1.7 compatibility layer); components are registered to `PluginRegistry` in v2.0.
-
 ### 11.1 Design Goals
 
-| Goal | Description |
-|------|-------------|
-| Configurable | Custom strategies, multi-instrument groups, multi-timeframe bars, reuse compute-library indicators |
-| Programmability first | `Strategy` base class + `@strategy` decorator + `IntrabarMixin` |
-| Zero hard dependency | Core depends only on pandas/numpy; optuna/matplotlib are extras |
-| Lookahead protection | `on_bar(t)` can only access `≤ t` data; default `t+1` open fill |
-| Pluggable execution | `ExecutionModel` ABC: `NextBarExecution` (default) / `IntrabarExecution` |
-| Backward compatible | All new params have defaults; existing code needs zero modification |
+Configurable / programmability first / zero hard dependency / lookahead protection / pluggable execution / backward compatible.
 
-### 11.2 Core Interface Signature
+### 11.2 Engine Model
 
-```python
-class BacktestEngine:
-    def __init__(self,
-                 data: dict,                            # {symbol: {tf: df}} or Universe
-                 strategy: Strategy,
-                 initial_cash: float = 1_000_000.0,
-                 cost_model: Optional[CostModel] = None,    # defaults to PercentCost()
-                 fill_model: Optional[FillModel] = None,    # defaults to NextOpenFill()
-                 benchmark: Optional[str] = None,
-                 trade_on: str = "open",
-                 allow_short: bool = False,
-                 lookahead_audit: bool = False,
-                 seed: int = 0,
-                 compute_engine: Optional[ComputeEngine] = None,
-                 periods_per_year: Optional[int] = None,
-                 execution_model: Optional[ExecutionModel] = None): ...
-    def run(self) -> BacktestResult: ...
-```
+The backtest engine uses an **imperative `for` loop** to iterate bars, not event-driven. This design decision is based on: (1) imperative implementation is stable with 277 test coverage, (2) event-driven refactoring is massive, (3) `EventBus` + `EventReplay` are reserved for future use.
 
 ### 11.3 Cost & Fill Models
 
-**Cost models** (8 types, registered to `cost_models` namespace): PercentCost / FixedCost / TieredCost / MinCost / StampDutyCost / ZeroCost / MakerTakerCost / BinanceCost (4 presets)
-
-**Fill models** (7 types, registered to `fill_models` namespace): NextOpenFill / NextCloseFill / ThisCloseFill / VWAPFill / WorstPriceFill / IntrabarLimitFill / IntrabarFillModel
+8 cost models / 7 fill models / 2 execution models.
 
 ### 11.4 Pluggable Execution Model
 
-`ExecutionModel` decides how orders fill within a bar. `IntrabarExecution` resolves 5 structural gaps:
-
-| Gap | Resolution |
-|-----|------------|
-| Gap-1 Fill-time tracking | `Fill.sub_bar_ts` + `Fill.sub_bar_index` |
-| Gap-2 Same-bar entry+exit | Full lifecycle within parent bar |
-| Gap-3 Post-fill exit scan | `define_exits()` + `_scan_exits()` |
-| Gap-4 Both-fill→double-cancel | `register_oco_mutual()` |
-| Gap-5 SL before TP | `Order.priority` field |
+`IntrabarExecution` resolves 5 structural gaps: same-bar entry+exit, fill-time tracking, SL before TP, etc.
 
 ### 11.5 Backtest Visualization
 
-9 chart types: `equity_curve` / `drawdown` / `trades_overlay` / `returns_distribution` / `monthly_heatmap` / `yearly_returns` / `parameter_heatmap` / `underwater_curve` / `dashboard`.
-
-### 11.6 Analysis Tools
-
-- `BacktestAnalyzer`: subperiod / regime / rolling / trade_analysis_by_exit
-- `StrategyBatchRunner`: multi-strategy × multi-fee batch backtesting
-- `fee_sweep()` / `maker_taker_sweep()`
-- `dca_equity()` DCA benchmark
+9 chart types: equity_curve / drawdown / trades_overlay / returns_distribution / monthly_heatmap / yearly_returns / parameter_heatmap / underwater_curve / dashboard.
 
 ---
 
@@ -620,117 +570,11 @@ class BacktestEngine:
 
 ### 12.1 TUI Terminal Management Interface
 
-`stockstat tui` provides an interactive terminal interface for browsing and managing data on the Storage Server. No Python scripting needed for routine management.
-
-**Menu functions**:
-
-| Menu item | Function |
-|-----------|----------|
-| Browse symbols | List all registered symbols (table: symbol/type/sources) |
-| Query OHLCV | Query last N rows for a symbol |
-| Ingest new data | Interactive data ingestion (symbol/source/date range) |
-| Data statistics | Data overview statistics |
-| List data sources | List available data sources |
-| View proxy config | View proxy configuration |
-
-**Design**:
-- Based on `rich` library (optional: `pip install rich`), provides colored tables and panels
-- Falls back to plain-text menu when `rich` is not installed
-- Connects to Storage Server via HTTP, shares the same backend as CLI `stockstat ingest/query`
-
-```mermaid
-graph LR
-    TUI["stockstat tui<br/>--host 192.168.1.100"] -->|"HTTP REST"| SRV["Storage Server<br/>:8000"]
-    TUI -->|"rich table rendering"| USER["Terminal"]
-```
+`stockstat tui` — interactive terminal interface based on `rich` (optional), falls back to plain text.
 
 ### 12.2 Web Admin Interface (Admin Plugin)
 
-The web admin interface is a **pluggable, independent plugin** (`plugins/admin/`), mounted onto the FastAPI app via `AdminPlugin.mount(app)`. Controlled by the environment variable `STOCKSTAT_ADMIN_ENABLED` (default: `true`).
-
-**Plugin package structure**:
-
-```
-backend/stockstat_backend/plugins/admin/
-├── __init__.py    # exports AdminPlugin
-├── plugin.py      # AdminPlugin.mount(app) / unmount(app)
-├── router.py      # 15 API endpoints
-├── web.py         # 27KB SPA HTML (5 pages)
-├── models.py      # IngestLog ORM (independent DeclarativeBase)
-├── utils.py       # mask_db_url / get_disk_usage (cross-platform)
-└── lock.py        # _ingest_lock / _batch_tasks (thread-safe state)
-```
-
-**Mount mechanism** (`app.py`):
-
-```python
-from .config import settings
-if settings.admin_enabled:
-    from .plugins.admin import AdminPlugin
-    AdminPlugin.mount(app)
-```
-
-**Management scope** (15 API endpoints):
-
-| Function | Endpoint | Description |
-|----------|----------|-------------|
-| **Overview dashboard** | `/admin/` | Symbol count, rows, source distribution, health |
-| **Health monitor** | `GET /admin/api/health` | DB connection / cache status / proxy status |
-| **Config view** | `GET /admin/api/config` | DB URL / proxy / cache config (password masked) |
-| **Proxy update** | `PUT /admin/api/proxy` | Live proxy update (clears adapter cache) |
-| **Cache info** | `GET /admin/api/cache` | Cache key count / TTL |
-| **Cache clear** | `DELETE /admin/api/cache` | Clear all cache |
-| **Disk monitor** | `GET /admin/api/disk` | Disk space / DB file size (cross-platform) |
-| **Symbol browse** | `GET /admin/api/symbols` | All symbols + row count + date range |
-| **Data delete** | `DELETE /admin/api/symbols/{symbol}` | Delete all data for a symbol |
-| **Source list** | `GET /admin/api/sources` | Available data sources |
-| **Source directory** | `GET /admin/api/sources/{source}/symbols` | Paginated browse + search + downloaded badges |
-| **Source info** | `GET /admin/api/sources/{source}/info` | Time range / supported timeframes |
-| **Data ingest** | `POST /admin/api/ingest` | Trigger ingestion (threading.Lock serialized) |
-| **Batch ingest** | `POST /admin/api/ingest/batch` | Batch ingestion (background thread + progress) |
-| **Batch progress** | `GET /admin/api/ingest/progress/{batch_id}` | Batch task progress |
-| **Data stats** | `GET /admin/api/stats` | Total symbols / rows / per-source distribution |
-| **Ingest logs** | `GET /admin/api/logs` | Ingest history (paginated + filtered) |
-
-**Design points**:
-- Management logic runs in-process (directly accesses Storage/Cache), no HTTP forwarding
-- Web frontend is pure static HTML+JS (no Node build chain), CDN-loaded lightweight-charts
-- IngestLog uses an independent `DeclarativeBase`, does not modify backend `models/ohlcv.py`
-- `threading.Lock` serializes all ingest/delete operations (SQLite write safety)
-- Proxy update calls `clear_adapters()` to atomically clear the adapter cache
-
-```mermaid
-graph TB
-    subgraph "User Browser"
-        WEB["Web UI<br/>http://host:8000/admin/"]
-    end
-
-    subgraph "Storage Server Process"
-        APP["app.py<br/>if settings.admin_enabled"]
-        PLUGIN["AdminPlugin.mount(app)<br/>plugins/admin/"]
-        API["FastAPI REST<br/>(data query/ingest)"]
-        ROUTER["Admin Router<br/>/admin/api/* (15 endpoints)"]
-        STATIC["SPA HTML+JS<br/>/admin/ (5 pages)"]
-        DB["Storage/Cache"]
-        ADAPTERS["api/adapters.py<br/>get_adapter/clear_adapters"]
-    end
-
-    WEB -->|"HTTP"| STATIC
-    WEB -->|"fetch API"| ROUTER
-    APP -->|"conditional mount"| PLUGIN
-    PLUGIN --> ROUTER
-    PLUGIN --> STATIC
-    ROUTER -->|"in-process call"| DB
-    ROUTER -->|"public interface"| ADAPTERS
-    API -->|"in-process call"| DB
-    API --> ADAPTERS
-```
-
-**Why a Plugin, not hardcoded mount**:
-- Configurable: `STOCKSTAT_ADMIN_ENABLED=false` disables the admin UI (production security)
-- Physical isolation: admin code in `plugins/admin/` subpackage, does not侵入 main router
-- Public interface: accesses adapters via `api/adapters.py` public functions, no private symbols
-- Independent ORM: IngestLog uses its own `DeclarativeBase`, no backend model changes
+Pluggable independent plugin (`plugins/admin/`), mounted via `AdminPlugin.mount(app)`. 42KB SPA HTML with 5 pages. Features: lazy-loading K-line chart, download modal with `probe_range`, manual symbol input.
 
 ---
 
@@ -738,17 +582,17 @@ graph TB
 
 | Test file | Coverage | Count |
 |-----------|----------|-------|
-| `test_v2_core.py` | Core layer (contracts/plugin/config/events/storage/cache/codec/errors/logging) | 49 |
-| `test_v2_domain.py` | Domain layer (models/sources/indicators/backtest/scheduler) | 27 |
-| `test_v2_viz.py` | Visualization layer (Spec/ChartProfile/renderers/themes) | 23 |
-| `test_v2_api.py` | Interface layer (DSL reflection/V2Client offline/CLI) | 17 |
-| `test_frontend.py` | v1.7 indicators / DSL / viz protocol / serialization | 31 |
-| `test_nonlinear.py` | 8 nonlinear functions + 3 PlotSpec factories | 37 |
-| `test_backtest_*.py` (16 files) | Full backtest suite | 261 |
-| `test_backend.py` | Backend API / adapters / storage / cache / proxy | 15 |
-| `test_integration.py` | Classic stats + PAXG weekend correlation (real data) | 17 |
-| `test_matplotlib_charts.py` | matplotlib chart generation | 12 |
-| **Total** | | **489** |
+| `test_v2_core.py` | Core layer | 49 |
+| `test_v2_domain.py` | Domain layer | 27 |
+| `test_v2_viz.py` | Visualization layer | 23 |
+| `test_v2_api.py` | Interface layer | 17 |
+| `test_frontend.py` | v1.7 indicators / DSL / viz | 31 |
+| `test_nonlinear.py` | Nonlinear functions | 38 |
+| `test_backtest_*.py` (17 files) | Full backtest suite | 277 |
+| `test_backend.py` | Backend API / adapters / storage | 15 |
+| `test_integration.py` | Classic stats + PAXG correlation | 19 |
+| `test_matplotlib_charts.py` | matplotlib chart generation | 10 |
+| **Total** | | **506** |
 
 ---
 
@@ -756,221 +600,182 @@ graph TB
 
 | Layer | Technology | Rationale |
 |-------|------------|-----------|
-| Backend framework | FastAPI | Native async, OpenAPI docs, high performance |
-| ORM | SQLAlchemy 2.0 | Multi-backend switching, declarative models |
-| Default database | SQLite | Zero external dependency, auto-reads on restart |
-| Production database | TimescaleDB (PostgreSQL 16) | Docker deployment, time-series optimization |
-| Cache | InMemoryCache (default) / Redis (optional) | Zero-dependency default; Redis attachable |
+| Backend framework | FastAPI | Native async, OpenAPI docs |
+| ORM | SQLAlchemy 2.0 | Multi-backend switching |
+| Default database | SQLite | Zero dependency |
+| Production database | TimescaleDB (PostgreSQL 16) | Time-series optimization |
+| Cache | InMemoryCache / Redis | Zero-dependency default |
 | Compute core | pandas + numpy | De-facto standard |
-| Statistics extension | scipy | Spectral entropy, hypothesis testing (core dep) |
+| Statistics extension | scipy | Spectral entropy, hypothesis testing |
 | DSL parser | lark | EBNF-friendly (optional extra) |
-| Data transfer | JSON / CSV / Arrow / Parquet | v2.0 Codec protocol unified |
-| Visualization | matplotlib (optional extra) | Protocol-based adapter, lazy import |
-| Deployment | Docker Compose | One-command backend stack deployment |
+| Data transfer | JSON / CSV / Arrow / Parquet | Codec protocol unified |
+| Visualization | matplotlib (optional) | Protocol-based adapter |
+| K-line chart | lightweight-charts 4.2 | CDN, lazy loading |
+| TUI rendering | rich (optional) | Colored tables, plain text fallback |
+| Deployment | Docker Compose | One-command stack |
 
 ---
 
 ## 15. Deployment
 
-### 14.1 Local Development (default SQLite, zero external deps)
+### 15.1 Local Development
 
 ```bash
-# 1. Install backend
 cd backend && pip install -e .
-
-# 2. (Optional) Enable proxy
-export STOCKSTAT_PROXY_ENABLED=true
-export STOCKSTAT_PROXY_TYPE=http
-export STOCKSTAT_PROXY_URL=http://127.0.0.1:8889
-
-# 3. Start API service
-python -m uvicorn stockstat_backend.app:app --host 0.0.0.0 --port 8000
-# Or using v2.0 CLI:
-stockstat serve --host 0.0.0.0 --port 8000
-
-# 4. Install frontend library (another terminal)
 cd frontend && pip install -e .
-
-# 5. (Optional) Install extras
-pip install -e "frontend/[matplotlib]"       # Visualization
-pip install -e "frontend/[dsl]"              # DSL parser
-pip install -e "frontend/[signal_processing]" # PyWavelets
+stockstat serve --host 0.0.0.0 --port 8000
 ```
 
-### 14.2 Network Remote Deployment (storage service on a separate machine)
+### 15.2 Compute-Storage Separation
 
-The backend can be deployed independently on any networked machine; other machines access via HTTP:
-
-```bash
-# === On the storage server (e.g. 192.168.1.100) ===
-cd backend && pip install -e .
-
-# Specify database storage location (optional; default is stockstat.db in CWD)
-export DATABASE_URL="sqlite:////data/stockstat/stockstat.db"
-#   SQLite absolute path: sqlite:/// + /abs/path = 4 slashes
-#   PostgreSQL:           postgresql://user:pwd@host:5432/dbname
-
-# Restarts automatically read previously downloaded data
-python -m uvicorn stockstat_backend.app:app --host 0.0.0.0 --port 8000
-```
+Backend deployed independently; frontend accesses via HTTP:
 
 ```python
-# === On user machines ===
 from stockstat import StockStatClient
 client = StockStatClient(host="192.168.1.100", port=8000)
-
-# Manage data via API
-client.ingest("BTC/USDT", source="binance", start="2024-01-01")  # Download
-data = client.ohlcv("BTC/USDT")                                   # Query
-symbols = client.symbols()                                        # List downloaded symbols
 ```
 
-```bash
-# Or via CLI
-stockstat ingest BTC/USDT --source binance --start 2024-01-01
-stockstat query BTC/USDT --limit 5
-```
-
-**Data persistence guarantee**:
-- SQLite mode: data written to `stockstat.db` file; file persists across service restarts; `Base.metadata.create_all()` auto-connects to the existing database
-- Docker mode: data written to `db_data` volume; survives container deletion
-- In-process cache (TTL=300s) clears on restart but only affects performance, not data
-
-### 14.3 Docker Production Deployment (TimescaleDB + Redis)
-
-```yaml
-# docker-compose.yml core structure
-services:
-  db:
-    image: timescale/timescaledb:latest-pg16
-    volumes: [db_data:/var/lib/postgresql/data]
-    healthcheck: { test: ["CMD-SHELL", "pg_isready -U stockstat"] }
-  redis:
-    image: redis:7-alpine
-    volumes: [redis_data:/data]
-  api:
-    build: ./backend
-    ports: ["8000:8000"]
-    environment:
-      DATABASE_URL: postgresql://stockstat:${DB_PASSWORD}@db:5432/stockstat
-      REDIS_URL: redis://redis:6379/0
-    depends_on:
-      db: { condition: service_healthy }
-      redis: { condition: service_started }
-  scheduler:
-    build: ./backend
-    command: python -c "import time; print('Scheduler stub'); time.sleep(3600)"
-volumes:
-  db_data:
-  redis_data:
-```
-
-> **Note**: The `api` service code currently uses `InMemoryCache`; even with `REDIS_URL` configured, Redis is not auto-wired (requires extending `storage/cache.py`). The `scheduler` is a placeholder process.
-
-### 14.4 Offline Mode (no backend needed)
-
-v2.0's `V2Client` supports offline mode, using local Storage directly:
+### 15.3 Offline Mode (no backend needed)
 
 ```python
 from stockstat._api.client import V2Client
-from stockstat._core.storage import MemoryStorage
+from stockstat._core.storage import MemoryStorage, SQLStorage
 
+# Option 1: Download to memory
 client = V2Client(mode="offline", storage=MemoryStorage())
-# ohlcv / compute / run_dsl / backtest / plot all run locally
+client.ingest("BTC/USDT", source="binance", start="2024-01-01")  # Direct Binance download
+df = client.ohlcv("BTC/USDT")
+
+# Option 2: Read existing SQLite database file
+client = V2Client(mode="offline", storage=SQLStorage(database_url="sqlite:///stockstat.db"))
+df = client.ohlcv("BTC/USDT")
+
+# Option 3: Download + persist to SQLite
+client = V2Client(mode="offline", storage=SQLStorage(database_url="sqlite:///my_data.db"))
+client.ingest("AAPL", source="yfinance", start="2024-01-01")
+```
+
+All features (`ingest` / `ohlcv` / `compute` / `run_dsl` / `backtest` / `plot`) run locally without HTTP.
+
+### 15.4 Docker Production
+
+```bash
+docker compose up -d
 ```
 
 ---
 
-## 16. Project Structure
+## 16. Distributed Compute Reservation
+
+> See [reports/COMPUTE_OFFLOAD_PLAN_CN.md](reports/COMPUTE_OFFLOAD_PLAN_CN.md) and [reports/COMPUTE_OFFLOAD_PLAN_V2_CN.md](reports/COMPUTE_OFFLOAD_PLAN_V2_CN.md)
+
+### 16.1 Design Goals
+
+Offload heavy computation (grid search, Monte Carlo, large-scale backtests) to network compute nodes: async submission / parallel acceleration / resource isolation / fault isolation.
+
+### 16.2 Three-Role Separation Architecture
+
+```mermaid
+graph TB
+    subgraph "Client"
+        CLI["stockstat CLI / Python"]
+    end
+
+    subgraph "Storage Server"
+        API_S["FastAPI REST"]
+        DB["SQLite / PostgreSQL"]
+    end
+
+    subgraph "Dispatcher (future)"
+        DISP["Task Scheduler"]
+        QUEUE["Task Queue (Redis)"]
+        DISP_CACHE["Data Cache (prefetch from Storage)"]
+    end
+
+    subgraph "Compute Cluster (future)"
+        W1["Worker 1"]
+        W2["Worker 2"]
+        WN["Worker N"]
+    end
+
+    CLI -->|"submit task"| DISP
+    CLI -.->|"query data"| API_S
+    API_S --> DB
+
+    DISP --> QUEUE
+    DISP_CACHE -->|"prefetch data (1x)"| API_S
+
+    QUEUE -->|"dispatch task+data"| W1
+    QUEUE -->|"dispatch task+data"| W2
+    QUEUE -->|"dispatch task+data"| WN
+
+    W1 -->|"push results"| DISP
+    W2 -->|"push results"| DISP
+    WN -->|"push results"| DISP
+
+    DISP -->|"return results"| CLI
+```
+
+### 16.3 Current Architecture and Distributed Compute
+
+The current architecture reserves for distributed compute:
+- **Compute-storage separation**: Frontend queries backend via HTTP; Workers can do the same
+- **`StockStatClient` reusable in Workers**: Workers install `stockstat` package for full compute capability
+- **`V2Client` offline mode**: Workers can use local `MemoryStorage` for Dispatcher-distributed data
+- **Codec protocol**: Arrow/Parquet serialization for efficient data transfer
+- **Plugin-based**: Workers auto-discover indicator/backtest component plugins
+
+### 16.4 Deployment Scenario Evolution
+
+| Scenario | Description | Current support |
+|----------|-------------|-----------------|
+| A. Single-machine full stack | Storage + Client + compute in same process | ✅ |
+| B. Compute-storage separation | Client queries Storage remotely, computes locally | ✅ |
+| C. Offline mode | Client uses local Storage, no backend | ✅ |
+| D. Three-role separation + single compute node | Client → Dispatcher → Worker → Storage | ⏳ Planned |
+| E. Compute cluster | Client → Dispatcher → [Workers] → Storage | ⏳ Planned |
+
+---
+
+## 17. Project Structure
 
 ```
 StockStatistic/
 ├── backend/                              # Storage backend service (independently deployable)
 │   ├── stockstat_backend/
-│   │   ├── app.py                        # FastAPI entry (conditional admin plugin mount)
-│   │   ├── config.py                     # Settings + ProxyConfig + admin_enabled
-│   │   ├── api/
-│   │   │   ├── routes.py                 # REST routes (/api/v1/*)
-│   │   │   └── adapters.py              # Public adapter API (get_adapter/clear_adapters)
-│   │   ├── adapters/                     # Data source adapters
+│   │   ├── app.py                        # FastAPI entry
+│   │   ├── config.py                     # Settings + ProxyConfig
+│   │   ├── api/                          # REST routes + adapter management
+│   │   ├── adapters/                     # Data source adapters (+ probe_range)
 │   │   ├── models/ohlcv.py               # ORM
 │   │   ├── storage/                      # database / repository / cache
 │   │   ├── normalizer/                   # Data normalization
-│   │   ├── plugins/                      # Backend plugins
-│   │   │   └── admin/                    # Web admin interface plugin
-│   │   │       ├── plugin.py             # AdminPlugin.mount(app)
-│   │   │       ├── router.py             # 15 API endpoints
-│   │   │       ├── web.py               # 27KB SPA HTML
-│   │   │       ├── models.py            # IngestLog (independent Base)
-│   │   │       ├── utils.py             # Cross-platform disk/URL utils
-│   │   │       └── lock.py              # Thread lock + batch task state
+│   │   ├── plugins/admin/                # Web admin interface plugin
 │   │   └── scheduler/                    # Scheduler (stub)
-│   ├── tests/
+│   ├── tests/                            # 15 tests
 │   └── pyproject.toml
 │
 ├── frontend/                             # Computation frontend library
 │   ├── stockstat/
-│   │   ├── __init__.py                   # Public API: StockStatClient
-│   │   ├── client.py                     # v1.7 compatibility layer facade
-│   │   ├── config.py                     # Config dataclass
+│   │   ├── client.py                     # v1.7 facade (run_dsl integrated to v2.0)
 │   │   ├── compute/                      # ComputeEngine
 │   │   ├── indicators/                   # Indicator implementations
-│   │   ├── backtest/                     # Backtest engine (27 files)
-│   │   ├── plot/                         # Visualization (PlotSpec + matplotlib)
-│   │   ├── dsl/                          # DSL parser
-│   │   ├── data_access/                  # DataClient
-│   │   ├── export/                       # Serialization
-│   │   │
-│   │   ├── _core/                        # Layer 0: Universal Core (v2.0)
-│   │   │   ├── contracts/                #   6 Protocols
-│   │   │   ├── plugin/                   #   PluginRegistry
-│   │   │   ├── config/                   #   Layered config
-│   │   │   ├── events/                   #   EventBus + EventReplay
-│   │   │   ├── storage/                  #   Memory + SQL storage
-│   │   │   ├── cache/                    #   Null + Memory + Redis
-│   │   │   ├── codec/                    #   JSON + CSV + Arrow + Parquet
-│   │   │   ├── logging.py                #   Structured logging
-│   │   │   ├── errors.py                 #   Error classification
-│   │   │   └── _compat.py                #   v1.7 SQLAlchemy bridge
-│   │   │
-│   │   ├── _domain/                      # Layer 1: Financial Domain (v2.0)
-│   │   │   ├── models/                   #   OHLCV / Symbol / Quote / Trade
-│   │   │   ├── sources/                  #   Data source plugins
-│   │   │   ├── indicators/               #   IndicatorPlugin protocol
-│   │   │   ├── backtest/                 #   Backtest component plugins
-│   │   │   └── scheduler/                #   Scheduler
-│   │   │
-│   │   ├── _viz/                         # Layer 2: Visualization (v2.0)
-│   │   │   ├── specs/                    #   Unified PlotSpec + ChartProfile
-│   │   │   ├── renderers/                #   Renderer plugins
-│   │   │   └── themes/                   #   Theme system
-│   │   │
-│   │   ├── _api/                         # Layer 3: Interface (v2.0)
-│   │   │   ├── dsl/                      #   DSL auto-reflection engine
-│   │   │   └── client/                   #   V2Client (online + offline)
-│   │   │
-│   │   └── app/                          # Layer 4: Application (v2.0)
-│   │       └── cli.py                    #   CLI entry point
-│   │
-│   ├── tests/                            # 489 tests
-│   │   ├── test_v2_core.py               #   49 core layer tests
-│   │   ├── test_v2_domain.py             #   27 domain layer tests
-│   │   ├── test_v2_viz.py                #   23 visualization tests
-│   │   ├── test_v2_api.py                #   17 interface layer tests
-│   │   ├── test_frontend.py              #   31 v1.7 frontend tests
-│   │   ├── test_nonlinear.py             #   37 nonlinear tests
-│   │   ├── test_backtest_*.py            #   261 backtest tests
-│   │   ├── test_integration.py           #   17 integration tests
-│   │   └── test_matplotlib_charts.py     #   12 chart tests
+│   │   ├── backtest/                     # Backtest engine (28 files, imperative)
+│   │   ├── plot/                         # Visualization (v1.7 PlotSpec)
+│   │   ├── dsl/                          # DSL parser (v1.7 Evaluator, fallback)
+│   │   ├── data_access/                  # DataClient (httpx → REST, + order)
+│   │   ├── _core/                        # Layer 0: Universal Core
+│   │   ├── _domain/                      # Layer 1: Financial Domain
+│   │   ├── _viz/                         # Layer 2: Visualization (parallel capability)
+│   │   ├── _api/                         # Layer 3: Interface (DslEngine integrated)
+│   │   └── app/                          # Layer 4: Application (CLI + TUI)
+│   ├── tests/                            # 491 tests
 │   └── pyproject.toml
 │
 ├── docker-compose.yml
-├── docs/
-│   ├── USAGE.md / USAGE_CN.md
-│   ├── backtest/                         # Backtest phase docs
-│   └── images/                           # Chart output
-├── reports/                              # Test reports + v2.0 implementation reports
-├── working/                              # PAXG research working directory
+├── docs/                                 # Usage docs + backtest phase docs + images
+├── reports/                              # Test reports + compute offload plans
+├── working/                              # PAXG research (v1~v7)
 ├── DESIGN.md / DESIGN_CN.md
 ├── README.md / README_CN.md
 └── LICENSE                               # GPLv3
@@ -978,36 +783,35 @@ StockStatistic/
 
 ---
 
-## 17. Development Roadmap
+## 18. Development Roadmap
 
 | Phase | Content | Status |
 |-------|---------|--------|
-| **P0** | Storage backend MVP (SQLAlchemy + yfinance/ccxt/synthetic + REST API) | ✅ |
-| **P1** | Computation frontend MVP (StockStatClient + 5 core indicators) | ✅ |
-| **P2** | DSL parser (lark + 15 built-in functions) | ✅ |
-| **P3** | Full indicator library (trend/oscillator/volatility/statistics) | ✅ |
-| **P4** | Visualization layer (PlotSpec + PlotRenderer + matplotlib) | ✅ |
-| **NL** | Signal processing & nonlinear dynamics (8 functions + 3 PlotSpec factories) | ✅ |
-| **BT-0~14** | Backtest subsystem (interface→MVP→portfolio→multi-tf→cost→metrics→optimizer→intrabar) | ✅ |
-| **BT-V0~V3** | Backtest visualization (9 charts + dashboard) | ✅ |
-| **v2.0 Phase 1** | Universal core layer `_core` (contracts/plugin/config/events/storage/cache/codec) | ✅ |
-| **v2.0 Phase 2** | Financial domain layer `_domain` (models/sources/indicators/backtest/scheduler) | ✅ |
-| **v2.0 Phase 3** | Visualization layer `_viz` (unified Spec + ChartProfile + renderers + themes) | ✅ |
-| **v2.0 Phase 4** | Interface layer `_api` (DSL auto-reflection + V2Client offline + CLI) | ✅ |
-| **Future** | Event-driven backtest rewrite / real-time data streaming / Plotly renderer / entry_points discovery | ⏳ |
+| **P0~P4** | Storage backend + computation frontend + DSL + indicators + visualization | ✅ |
+| **NL** | Signal processing & nonlinear dynamics | ✅ |
+| **BT-0~14** | Backtest subsystem | ✅ |
+| **BT-V0~V3** | Backtest visualization | ✅ |
+| **v2.0 Phase 1~4** | Five-layer architecture implementation | ✅ |
+| **DSL integration** | `StockStatClient.run_dsl()` → `DslEngine` auto-reflection | ✅ |
+| **order parameter** | Bidirectional pagination (REST API + Python library) | ✅ |
+| **Offline ingest** | `V2Client` offline mode direct download from sources + `SQLStorage` read existing DB | ✅ |
+| **Admin Plugin** | Web admin + lazy K-line + probe_range | ✅ |
+| **ComputeEngine integration** | `ComputeEngine` methods forward to `PluginRegistry` | ⏳ |
+| **Visualization unification** | `client.plot` switch to `_viz/specs.PlotSpec` | ⏳ |
+| **Event-driven backtest** | `BacktestEngine` refactored to `EventBus` + `EventReplay` | ⏳ |
+| **entry_points enable** | Third-party plugin auto-discovery | ⏳ |
+| **Distributed compute** | Dispatcher + Worker cluster | ⏳ Planned |
 
 ---
 
 ## Appendix A: Data Source Compatibility Matrix
 
-| Data source | Asset type | Network | Status | History depth | Notes |
-|-------------|------------|---------|--------|---------------|-------|
-| yfinance direct | US stocks/ETF/index | Yes | ✅ | 10+ years | Route default |
-| ccxt - Binance | Crypto | Yes | ✅ | Full history | `source=binance` |
-| ccxt - Coinbase | Crypto | Yes | ✅ | Full history | `source=coinbase` |
-| SyntheticAdapter | Mixed | No | ✅ | On-demand | Fixed seed |
-| Alpha Vantage | Global stocks | Yes | ❌ Planned | — | — |
-| Tushare | A-shares | Yes | ❌ Planned | — | — |
+| Data source | Asset type | Network | Symbol catalog | Timeframes | Range probing |
+|-------------|------------|---------|----------------|------------|---------------|
+| yfinance direct | Stocks / ETF / index / commodity / FX | Yes | 85 curated + manual input | 12 | ✅ Yahoo API probed |
+| ccxt - Binance | Crypto | Yes | 4,498 (1,479 USDT pairs) | 16 | ✅ First/last bar probed |
+| ccxt - Coinbase | Crypto | Yes | 1,183 (528 USD pairs) | 7 | ✅ First/last bar probed |
+| SyntheticAdapter | Mixed | No | 5 examples | 9 | ✅ Fixed range |
 
 ## Appendix B: OHLCV Data Volume Estimation
 
@@ -1015,26 +819,23 @@ StockStatistic/
 |-------|-----------|---------------|------------------|
 | 1 symbol | daily | ~250 | ~2 KB |
 | 1 symbol | 1-minute | ~525,000 | ~15 MB |
-| Binance USDT pairs (1,479) | daily | ~370,000 | ~3 MB |
+| 1 symbol | 1-second (Binance) | ~31,536,000 | ~900 MB |
 | Binance USDT pairs (1,479) | 1-minute | ~776M | ~22 GB |
 
-> SQLite is suitable for small single-machine workloads; for GB-scale, switch to TimescaleDB + Hypertable compression (reduces to 10%~20%).
-
-## Appendix C: v1.7 vs v2.0 Item-by-Item Comparison
+## Appendix C: v1.7 vs v2.0 Comparison
 
 | Dimension | v1.7 | v2.0 |
 |-----------|------|------|
-| **Layering** | 2 layers (backend / frontend) | 5 layers (core / domain / viz / api / app) |
-| **Plugin mechanism** | Adapter if-elif / indicator dict / renderer if-elif | Unified PluginRegistry + entry_points |
-| **Storage** | Direct SQLAlchemy ORM | StorageBackend Protocol (Memory/SQL/Timescale/Parquet) |
-| **Cache** | InMemoryCache only | CacheBackend Protocol (Null/Memory/Redis) |
-| **Serialization** | JSON/CSV scattered in 3 places | Codec protocol unified (+Arrow/Parquet) |
-| **DSL functions** | Manually maintained `_BUILTIN_FUNCS` 15 | Auto-reflected from PluginRegistry |
-| **Spec system** | PlotSpec + BacktestChartSpec dual-track | Unified PlotSpec + ChartProfile |
-| **Config** | Env vars scattered across 3 dataclasses | Layered merge (defaults→file→env→kwargs) |
-| **CLI** | None | serve/ingest/query/plugins/indicators |
-| **Offline mode** | Must connect to HTTP | V2Client local Storage |
-| **New indicator effort** | 3 changes | 1 change (register to registry) |
+| **Layering** | 2 layers (backend / frontend) | Dual-package + five-layer |
+| **DSL** | `_BUILTIN_FUNCS` hardcoded 15 | `DslEngine` auto-reflects 23 from `PluginRegistry` (integrated) |
+| **Query** | asc only | `order=asc/desc` bidirectional pagination (REST + Python) |
+| **Plugin mechanism** | Adapter if-elif / indicator dict | Unified PluginRegistry (46 built-in) |
+| **Storage** | Direct SQLAlchemy ORM | StorageBackend Protocol (Memory / SQL) |
+| **Cache** | InMemoryCache only | CacheBackend Protocol (Null / Memory / Redis) |
+| **CLI** | None | serve / ingest / query / plugins / indicators / tui |
+| **Management interface** | None | TUI + Web Admin Plugin |
+| **Offline mode** | Must connect to HTTP | V2Client local Storage + offline ingest direct download + SQLStorage read existing DB |
+| **Distributed reservation** | None | Compute-storage separation + Codec + plugins |
 | **Backward compatibility** | — | v1.7 public API zero modification |
 
 ## Appendix D: Backtest Phase Documentation Index
@@ -1042,7 +843,7 @@ StockStatistic/
 | Phase | Doc | Test |
 |-------|-----|------|
 | BT-0~7 | [docs/backtest/BT0_CN.md](docs/backtest/BT0_CN.md) ~ [BT7_CN.md](docs/backtest/BT7_CN.md) | test_backtest_iface ~ strategies |
-| BT-8~10 | [docs/backtest/BT8_CN.md](docs/backtest/BT8_CN.md) ~ [BT10_CN.md](docs/backtest/BT10_CN.md) | test_backtest_p0/p1/p2 |
+| BT-8~10 | [docs/backtest/BT8_CN.md](docs/backtest/BT8_CN.md) ~ [BT10_CN.md](docs/backtest/BT10_CN.md) | test_backtest_p0 / p1 / p2 |
 | BT-11~14 | [docs/backtest/BT11_BT14_CN.md](docs/backtest/BT11_BT14_CN.md) | test_backtest_intrabar |
 | BT-V0~V3 | [docs/backtest/BTV0_CN.md](docs/backtest/BTV0_CN.md) ~ [BTV3_CN.md](docs/backtest/BTV3_CN.md) | test_backtest_viz_* |
 | BT-V Online | [docs/backtest/BT_VIZ_ONLINE_REPORT_CN.md](docs/backtest/BT_VIZ_ONLINE_REPORT_CN.md) | test_backtest_viz_online |

@@ -1,50 +1,33 @@
-"""
-Synthetic data adapter for testing without network access.
-Generates realistic-looking OHLCV data using geometric Brownian motion.
+"""Frontend-local synthetic data adapter (no backend dependency).
+
+A lightweight copy of stockstat_backend.adapters.synthetic that generates
+reproducible OHLCV data using geometric Brownian motion. Used when the
+backend package is not installed.
 """
 from __future__ import annotations
 
 from typing import Optional
-from datetime import datetime, timedelta, timezone
 
 import numpy as np
 import pandas as pd
 
-from .base import DataSourceAdapter
-
-
-# Base prices for realistic-looking data
 _BASE_PRICES = {
-    "AAPL": 150.0,
-    "^GSPC": 4500.0,
-    "BTC/USDT": 40000.0,
-    "ETH/USDT": 2200.0,
-    "PAXG/USDT": 1800.0,
+    "AAPL": 150.0, "^GSPC": 4500.0,
+    "BTC/USDT": 40000.0, "ETH/USDT": 2200.0, "PAXG/USDT": 1800.0,
 }
-
 _VOLATILITY = {
-    "AAPL": 0.015,
-    "^GSPC": 0.008,
-    "BTC/USDT": 0.035,
-    "ETH/USDT": 0.040,
-    "PAXG/USDT": 0.010,
+    "AAPL": 0.015, "^GSPC": 0.008,
+    "BTC/USDT": 0.035, "ETH/USDT": 0.040, "PAXG/USDT": 0.010,
 }
-
-# Fixed seed for reproducible test data
 _RNG_SEED = 42
 
 
-class SyntheticAdapter(DataSourceAdapter):
+class LocalSyntheticAdapter:
     name = "synthetic"
     source_type = "mixed"
 
-    def fetch_ohlcv(
-        self,
-        symbol: str,
-        start: Optional[str] = None,
-        end: Optional[str] = None,
-        timeframe: str = "1d",
-    ) -> pd.DataFrame:
+    def fetch_ohlcv(self, symbol: str, start: Optional[str] = None,
+                    end: Optional[str] = None, timeframe: str = "1d") -> pd.DataFrame:
         base_price = _BASE_PRICES.get(symbol, 100.0)
         vol = _VOLATILITY.get(symbol, 0.02)
 
@@ -52,49 +35,27 @@ class SyntheticAdapter(DataSourceAdapter):
             start_dt = pd.Timestamp(start, tz="UTC")
         else:
             start_dt = pd.Timestamp("2023-01-01", tz="UTC")
-
         if end:
             end_dt = pd.Timestamp(end, tz="UTC")
         else:
             end_dt = pd.Timestamp.now(tz="UTC")
 
-        if timeframe == "1d":
-            freq = "D"
-        elif timeframe == "1h":
-            freq = "1h"
-        elif timeframe == "1w":
-            freq = "W"
-        elif timeframe == "1m":
-            freq = "1min"
-        elif timeframe == "5m":
-            freq = "5min"
-        elif timeframe == "15m":
-            freq = "15min"
-        elif timeframe == "30m":
-            freq = "30min"
-        elif timeframe == "4h":
-            freq = "4h"
-        elif timeframe == "1mo":
-            freq = "MS"
-        else:
-            freq = "D"
-
-        # For daily crypto data, all 7 days; for stocks, weekdays only
+        freq_map = {"1d": "D", "1h": "1h", "1w": "W", "1m": "1min",
+                    "5m": "5min", "15m": "15min", "30m": "30min",
+                    "4h": "4h", "1mo": "MS"}
+        freq = freq_map.get(timeframe, "D")
         dates = pd.date_range(start=start_dt, end=end_dt, freq=freq)
         if "/" not in symbol:
-            dates = dates[dates.weekday < 5]  # Mon-Fri only for stocks
+            dates = dates[dates.weekday < 5]
 
         if len(dates) == 0:
             return pd.DataFrame()
 
-        # Seeded RNG for reproducibility per symbol
         seed = _RNG_SEED + hash(symbol) % 10000
         rng = np.random.RandomState(seed)
-
         n = len(dates)
         daily_returns = rng.normal(0.0003, vol, n)
         close_prices = base_price * np.exp(np.cumsum(daily_returns))
-
         intraday_vol = vol * 0.6
         open_prices = close_prices * (1 + rng.normal(0, intraday_vol * 0.3, n))
         high_prices = np.maximum(open_prices, close_prices) * (1 + np.abs(rng.normal(0, intraday_vol, n)))
@@ -102,11 +63,8 @@ class SyntheticAdapter(DataSourceAdapter):
         volumes = rng.uniform(1e6, 5e7, n)
 
         df = pd.DataFrame({
-            "open": open_prices,
-            "high": high_prices,
-            "low": low_prices,
-            "close": close_prices,
-            "volume": volumes,
+            "open": open_prices, "high": high_prices,
+            "low": low_prices, "close": close_prices, "volume": volumes,
         }, index=dates)
         df.index.name = "ts"
         return df
@@ -118,5 +76,5 @@ class SyntheticAdapter(DataSourceAdapter):
         return True
 
     def probe_range(self, symbol: str, timeframe: str = "1d") -> tuple[str | None, str | None]:
-        """Synthetic data is available from 2020-01-01 to now."""
+        from datetime import datetime, timezone
         return "2020-01-01T00:00:00+00:00", datetime.now(timezone.utc).isoformat()

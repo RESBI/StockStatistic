@@ -250,12 +250,16 @@ def create_admin_router() -> APIRouter:
         }
 
     @router.get("/sources/{source}/info")
-    async def admin_source_info(source: str, symbol: str = ""):
+    async def admin_source_info(source: str, symbol: str = "",
+                                 probe: bool = False, timeframe: str = "1d"):
         timeframes_by_source = {
-            "binance": ["1m", "5m", "15m", "1h", "4h", "1d", "1w"],
-            "coinbase": ["1m", "5m", "15m", "1h", "6h", "1d"],
-            "yfinance": ["1m", "5m", "15m", "1h", "1d", "1wk", "1mo"],
-            "synthetic": ["1d", "1h", "1w"],
+            "binance": ["1s", "1m", "3m", "5m", "15m", "30m",
+                        "1h", "2h", "4h", "6h", "8h", "12h",
+                        "1d", "3d", "1w", "1M"],
+            "coinbase": ["1m", "5m", "15m", "30m", "1h", "6h", "1d"],
+            "yfinance": ["1m", "2m", "5m", "15m", "30m", "60m", "90m",
+                         "1d", "5d", "1wk", "1mo", "3mo"],
+            "synthetic": ["1m", "5m", "15m", "30m", "1h", "4h", "1d", "1w", "1mo"],
         }
         earliest_by_source = {
             "binance": "2017-08-17",
@@ -282,14 +286,34 @@ def create_admin_router() -> APIRouter:
             except Exception:
                 pass
 
+        # Probe the source for the actual per-symbol time range
+        probed_earliest = None
+        probed_latest = None
+        probe_error = None
+        if probe and symbol:
+            try:
+                from stockstat_backend.api.adapters import get_adapter
+                adapter = get_adapter(source)
+                probed_earliest, probed_latest = adapter.probe_range(symbol, timeframe=timeframe)
+            except Exception as e:
+                probe_error = str(e)
+
         from datetime import datetime, timezone
         now = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+        # Use probed range if available, otherwise fall back to source-level defaults
+        effective_earliest = probed_earliest or earliest_by_source.get(source, "2020-01-01")
+        effective_latest = probed_latest or now
 
         return {
             "source": source,
             "symbol": symbol or None,
-            "earliest_available": earliest_by_source.get(source, "2020-01-01"),
-            "latest_available": now,
+            "earliest_available": effective_earliest,
+            "latest_available": effective_latest,
+            "source_earliest_available": earliest_by_source.get(source, "2020-01-01"),
+            "source_latest_available": now,
+            "probed": probed_earliest is not None or probed_latest is not None,
+            "probe_error": probe_error,
             "timeframes": timeframes_by_source.get(source, ["1d"]),
             "local_earliest": local_earliest,
             "local_latest": local_latest,

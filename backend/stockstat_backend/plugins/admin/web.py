@@ -75,6 +75,15 @@ input,select{padding:6px 10px;background:#0f1419;color:#e0e0e0;border:1px solid 
 .switch.on::after{left:22px}
 .checkbox{width:16px;height:16px;accent-color:#4fc3f7}
 .batch-bar{position:sticky;bottom:0;background:#1a2332;border:1px solid #2a3f5f;border-radius:8px;padding:12px;margin-top:12px}
+.modal-overlay{position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.6);display:flex;justify-content:center;align-items:center;z-index:1000}
+.modal{background:#1a2332;border:1px solid #2a3f5f;border-radius:8px;padding:24px;min-width:480px;max-width:680px;max-height:80vh;overflow-y:auto}
+.modal h3{color:#4fc3f7;margin-bottom:16px;font-size:16px}
+.modal .row{margin-bottom:12px}
+.modal .info-box{background:#0f1419;border:1px solid #2a3f5f;border-radius:4px;padding:10px;margin:8px 0;font-size:12px;color:#aaa}
+.modal .info-box strong{color:#4fc3f7}
+.modal .actions{display:flex;gap:8px;justify-content:flex-end;margin-top:16px}
+.chart-loading{position:absolute;top:8px;right:8px;background:#1a2332;border:1px solid #2a3f5f;border-radius:4px;padding:4px 10px;font-size:12px;color:#ffa726;display:none}
+.chart-loading.show{display:block}
 </style>
 </head>
 <body>
@@ -177,15 +186,24 @@ async function renderDashboard(){
 
 // ── Source Browser ─────────────────────────────────────────
 let srcState={source:'binance',page:1,search:'',selected:new Set()};
+let srcTimeframesCache={}; // cache timeframes per source
 async function renderSource(){
   const c=document.getElementById('content');
   c.innerHTML=`
     <div class="row">
-      <label>数据源</label><select id="src-select" onchange="srcState.source=this.value;srcState.page=1;loadSourceSymbols()">
+      <label>数据源</label><select id="src-select" onchange="srcState.source=this.value;srcState.page=1;updateBatchTimeframes();loadSourceSymbols()">
         <option value="binance">Binance</option><option value="coinbase">Coinbase</option>
         <option value="yfinance">yfinance</option><option value="synthetic">Synthetic</option>
       </select>
-      <label>搜索</label><input id="src-search" placeholder="BTC, ETH..." oninput="srcState.search=this.value;srcState.page=1;loadSourceSymbols()">
+      <label>搜索</label><input id="src-search" placeholder="BTC, ETH, AAPL..." oninput="srcState.search=this.value;srcState.page=1;loadSourceSymbols()">
+    </div>
+    <div class="section" style="padding:12px 16px">
+      <div class="row" style="margin:0;align-items:center">
+        <label style="min-width:auto;margin-right:8px">手动输入标的</label>
+        <input id="manual-symbol" placeholder="如: MSFT, TSLA, 600519.SS, JPY=X..." style="flex:1;max-width:300px">
+        <button class="btn success" onclick="manualIngest()">下载此标的</button>
+        <span style="color:#888;font-size:11px;margin-left:8px">用于列表中不存在的任意 ticker</span>
+      </div>
     </div>
     <div class="section">
       <table><thead><tr><th><input type="checkbox" class="checkbox" onchange="document.querySelectorAll('.src-check').forEach(c=>{c.checked=this.checked;toggleSelect(c.value,this.checked)})"></th><th>标的</th><th>类型</th><th>已下载</th><th>操作</th></tr></thead>
@@ -195,16 +213,41 @@ async function renderSource(){
     <div class="batch-bar" id="batch-bar" style="display:none">
       <span id="batch-info"></span>
       <div class="row" style="margin-top:8px">
-        <label>开始</label><input type="date" id="batch-start" value="2024-01-01">
-        <label>结束</label><input type="date" id="batch-end" value="2024-12-31">
-        <label>粒度</label><select id="batch-tf"><option>1d</option><option>1h</option><option>4h</option><option>15m</option><option>5m</option><option>1m</option></select>
+        <label>开始</label><input type="date" id="batch-start">
+        <label>结束</label><input type="date" id="batch-end">
+        <label>粒度</label><select id="batch-tf"></select>
         <button class="btn success" onclick="doBatchIngest()">批量下载</button>
       </div>
       <div id="batch-progress"></div>
     </div>`;
   document.getElementById('src-select').value=srcState.source;
   document.getElementById('src-search').value=srcState.search;
+  // Initialize batch dates with source max range
+  await updateBatchTimeframes();
   loadSourceSymbols();
+}
+async function updateBatchTimeframes(){
+  const src=srcState.source;
+  let tfs=srcTimeframesCache[src];
+  if(!tfs){
+    try{
+      const info=await api(`/sources/${src}/info`);
+      tfs=info.timeframes||['1d'];
+      srcTimeframesCache[src]=tfs;
+    }catch{tfs=['1d']}
+  }
+  const sel=document.getElementById('batch-tf');
+  if(sel){
+    sel.innerHTML=tfs.map(t=>`<option value="${t}">${t}</option>`).join('');
+  }
+  // Set default dates to source max range
+  try{
+    const info=await api(`/sources/${src}/info`);
+    const startInput=document.getElementById('batch-start');
+    const endInput=document.getElementById('batch-end');
+    if(startInput&&info.source_earliest_available)startInput.value=info.source_earliest_available;
+    if(endInput&&info.source_latest_available)endInput.value=info.source_latest_available;
+  }catch{}
 }
 function toggleSelect(sym,checked){
   if(checked)srcState.selected.add(sym);else srcState.selected.delete(sym);
@@ -228,7 +271,7 @@ async function loadSourceSymbols(){
       <td><input type="checkbox" class="checkbox src-check" value="${s.unified_symbol}" ${srcState.selected.has(s.unified_symbol)?'checked':''} onchange="toggleSelect(this.value,this.checked)"></td>
       <td>${esc(s.unified_symbol)}</td><td>${s.asset_type||''}</td>
       <td>${s.downloaded?'<span class="badge downloaded">✅ 已下载</span>':'<span class="badge missing">—</span>'}</td>
-      <td>${s.downloaded?`<button class="btn small" onclick="quickIngest('${s.unified_symbol}','${srcState.source}')">补全</button> <button class="btn small" onclick="navigate('local',{symbol:'${s.unified_symbol}'})">查看</button>`:`<button class="btn small success" onclick="quickIngest('${s.unified_symbol}','${srcState.source}')">下载</button>`}</td>
+      <td>${s.downloaded?`<button class="btn small" onclick="openIngestModal('${s.unified_symbol}','${srcState.source}')">补全</button> <button class="btn small" onclick="navigate('local',{symbol:'${s.unified_symbol}'})">查看</button>`:`<button class="btn small success" onclick="openIngestModal('${s.unified_symbol}','${srcState.source}')">下载</button>`}</td>
     </tr>`).join('');
     const pager=document.getElementById('src-pager');
     if(data.total_pages>1){
@@ -241,22 +284,95 @@ async function loadSourceSymbols(){
     }else pager.innerHTML='';
   }catch(e){body.innerHTML=`<tr><td colspan="5" class="msg err">Error: ${e}</td></tr>`}
 }
-async function quickIngest(sym,src){
-  let info={earliest_available:'2020-01-01',latest_available:'',timeframes:['1d']};
-  try{info=await api(`/sources/${src}/info?symbol=${encodeURIComponent(sym)}`)}catch{}
-  const today=info.latest_available||new Date().toISOString().split('T')[0];
-  const defaultStart=info.local_latest?info.local_latest.split('T')[0]:info.earliest_available;
-  const localInfo=info.local_earliest?`\n本地已有: ${info.local_earliest.split('T')[0]} ~ ${info.local_latest.split('T')[0]}`:'\n本地无数据';
-  const startInput=prompt(`下载 ${sym} 从 ${src}\n数据源范围: ${info.earliest_available} ~ ${today}${localInfo}\n\n输入开始日期:`,defaultStart);
-  if(!startInput)return;
-  const endInput=prompt(`结束日期:`,today);
-  if(!endInput)return;
-  const tfOptions=info.timeframes||['1d'];
-  const tfInput=prompt(`时间粒度 (${tfOptions.join('/')}):`,'1d');
-  if(!tfInput||!tfOptions.includes(tfInput)){alert(`无效粒度: ${tfInput}\n可用: ${tfOptions.join(', ')}`);return}
-  try{const r=await api(`/ingest?symbol=${encodeURIComponent(sym)}&source=${src}&start=${startInput}&end=${endInput}&timeframe=${tfInput}`,{method:'POST'});
-    alert(`完成: ${r.ingested} 行`);loadSourceSymbols();}
-  catch(e){alert(`失败: ${e}`)}
+
+// Manual symbol input: download any ticker not in the catalog
+async function manualIngest(){
+  const symInput=document.getElementById('manual-symbol');
+  const sym=symInput.value.trim();
+  if(!sym){alert('请输入标的代码');symInput.focus();return}
+  // Validate against source constraints
+  const src=srcState.source;
+  if(src==='binance'||src==='coinbase'){
+    if(!sym.includes('/')){alert(`${src} 需要交易对格式 (如 BTC/USDT)`);return}
+  }else if(src==='yfinance'){
+    if(sym.includes('/')){alert(`yfinance 标的不能含 '/' (如 AAPL, ^GSPC, 600519.SS)`);return}
+  }
+  // Reuse the ingest modal flow
+  openIngestModal(sym,src);
+}
+
+// ── Ingest Modal (Feature 2: show source max range, pre-fill) ──
+let ingestModalState=null;
+async function openIngestModal(sym,src){
+  // Show modal immediately with loading state
+  showModal(`
+    <h3>下载 ${esc(sym)}</h3>
+    <div id="ingest-modal-body"><div class="info-box">正在查询数据源可用范围...</div></div>
+    <div class="actions">
+      <button class="btn" onclick="closeModal()">取消</button>
+      <button class="btn success" id="ingest-confirm-btn" onclick="doIngestFromModal()" disabled>下载</button>
+    </div>`);
+  ingestModalState={sym,src};
+  try{
+    // Probe the source for actual per-symbol time range
+    const info=await api(`/sources/${src}/info?symbol=${encodeURIComponent(sym)}&probe=true`);
+    const earliest=info.earliest_available||info.source_earliest_available||'2020-01-01';
+    const latest=info.latest_available||new Date().toISOString().split('T')[0];
+    const earliestShort=earliest.split('T')[0];
+    const latestShort=latest.split('T')[0];
+    const tfs=info.timeframes||['1d'];
+    let localInfo='';
+    if(info.local_earliest){
+      localInfo=`<div class="info-box"><strong>本地已有数据:</strong> ${info.local_earliest.split('T')[0]} ~ ${info.local_latest.split('T')[0]}</div>`;
+    }
+    const probedTag=info.probed?'<span class="badge downloaded">实测</span>':'<span class="badge missing">估算</span>';
+    document.getElementById('ingest-modal-body').innerHTML=`
+      <div class="info-box"><strong>数据源范围 ${probedTag}:</strong> ${earliestShort} ~ ${latestShort}${info.probe_error?` <span style="color:#ef5350">(探测失败: ${esc(info.probe_error)})</span>`:''}</div>
+      ${localInfo}
+      <div class="row"><label>开始日期</label><input type="date" id="ingest-start" value="${earliestShort}" min="${earliestShort}" max="${latestShort}"></div>
+      <div class="row"><label>结束日期</label><input type="date" id="ingest-end" value="${latestShort}" min="${earliestShort}" max="${latestShort}"></div>
+      <div class="row"><label>时间粒度</label><select id="ingest-tf">${tfs.map(t=>`<option value="${t}" ${t==='1d'?'selected':''}>${t}</option>`).join('')}</select></div>
+      <div class="row" style="font-size:11px;color:#888">提示: 1分钟粒度1年约15MB，谨慎选择范围</div>`;
+    document.getElementById('ingest-confirm-btn').disabled=false;
+  }catch(e){
+    document.getElementById('ingest-modal-body').innerHTML=`<div class="msg err">查询失败: ${e}</div>`;
+  }
+}
+async function doIngestFromModal(){
+  if(!ingestModalState)return;
+  const{sym,src}=ingestModalState;
+  const start=document.getElementById('ingest-start').value;
+  const end=document.getElementById('ingest-end').value;
+  const tf=document.getElementById('ingest-tf').value;
+  if(!start||!end){alert('请填写日期范围');return}
+  document.getElementById('ingest-confirm-btn').disabled=true;
+  document.getElementById('ingest-confirm-btn').textContent='下载中...';
+  try{
+    const r=await api(`/ingest?symbol=${encodeURIComponent(sym)}&source=${src}&start=${start}&end=${end}&timeframe=${tf}`,{method:'POST'});
+    closeModal();
+    alert(`完成: ${r.ingested} 行 (${sym} ${start} ~ ${end} ${tf})`);
+    if(typeof loadSourceSymbols==='function')loadSourceSymbols();
+  }catch(e){
+    document.getElementById('ingest-confirm-btn').disabled=false;
+    document.getElementById('ingest-confirm-btn').textContent='下载';
+    alert(`失败: ${e}`);
+  }
+}
+function showModal(html){
+  let overlay=document.getElementById('modal-overlay');
+  if(!overlay){
+    overlay=document.createElement('div');
+    overlay.id='modal-overlay';
+    overlay.className='modal-overlay';
+    overlay.onclick=e=>{if(e.target===overlay)closeModal()};
+    document.body.appendChild(overlay);
+  }
+  overlay.innerHTML=`<div class="modal">${html}</div>`;
+  overlay.style.display='flex';
+}
+function closeModal(){
+  const overlay=document.getElementById('modal-overlay');
+  if(overlay)overlay.style.display='none';
 }
 async function doBatchIngest(){
   const syms=[...srcState.selected].join(',');
@@ -280,7 +396,10 @@ async function doBatchIngest(){
   }catch(e){prog.innerHTML=`<div class="msg err">Error: ${e}</div>`}
 }
 
-// ── Local Symbols ──────────────────────────────────────────
+// ── Local Symbols (Feature 1: lazy loading K-line chart) ────
+let chartLoadState=null; // tracks loaded range for lazy loading
+let chartLoadTimer=null;
+
 async function renderLocal(params={}){
   if(params.symbol){currentSymbol=params.symbol}
   const c=document.getElementById('content');
@@ -311,15 +430,27 @@ async function selectSymbol(sym){
   renderLocalList(window._localSymbols);
   const detail=document.getElementById('local-detail');
   detail.innerHTML='<div style="padding:20px;color:#888">加载中...</div>';
+  // Cancel any pending lazy-load from previous symbol
+  if(chartLoadTimer){clearTimeout(chartLoadTimer);chartLoadTimer=null}
   try{
     const symInfo=window._localSymbols.find(s=>s.unified_symbol===sym)||{};
-    const ohlcv=await fetch(`/api/v1/ohlcv?symbol=${encodeURIComponent(sym)}&limit=200`).then(r=>r.json());
-    const rows=ohlcv.data||[];
+    // Determine the symbol's timeframe from stored data; default to 1d
+    const tf=symInfo.timeframe||'1d';
+    // Fetch initial batch: last 500 bars (descending then reversed to ascending)
+    const initResp=await fetch(`/api/v1/ohlcv?symbol=${encodeURIComponent(sym)}&timeframe=${tf}&limit=500&order=desc`).then(r=>r.ok?r.json():null).catch(()=>null);
+    const rows=initResp?(initResp.data||[]):[];
+    // Full range of this symbol (from /admin/api/symbols metadata)
+    const fullEarliest=symInfo.earliest||null;
+    const fullLatest=symInfo.latest||null;
     detail.innerHTML=`
       <div style="padding:0 0 12px"><strong style="font-size:18px;color:#4fc3f7">${esc(sym)}</strong>
       <span style="color:#888;margin-left:12px">${symInfo.asset_type||''} · ${symInfo.sources?.join(', ')||''} · ${fmt(symInfo.row_count)}行</span>
       <span style="color:#888;margin-left:12px">${shortDate(symInfo.earliest)} ~ ${shortDate(symInfo.latest)}</span></div>
-      <div class="chart-container"><div id="chart" style="height:400px"></div></div>
+      <div class="chart-container" style="position:relative">
+        <div class="chart-loading" id="chart-loading">加载更多数据...</div>
+        <div id="chart" style="height:400px"></div>
+      </div>
+      <div class="row" style="margin-top:8px;font-size:12px;color:#888" id="chart-loaded-info"></div>
       <div class="row"><span style="color:#888">截选范围:</span><input type="date" id="range-start"><span>~</span><input type="date" id="range-end">
         <button class="btn small" onclick="rangeIngest('${esc(sym)}')">补全此范围</button>
         <button class="btn small" onclick="rangeExport('${esc(sym)}')">导出CSV</button>
@@ -338,15 +469,124 @@ async function selectSymbol(sym){
         rightPriceScale:{borderColor:'#2a3f5f'},
       });
       const candle=chart.addCandlestickSeries({upColor:'#26a69a',downColor:'#ef5350',borderUpColor:'#26a69a',borderDownColor:'#ef5350',wickUpColor:'#26a69a',wickDownColor:'#ef5350'});
-      candle.setData(rows.map(r=>({time:r.ts.split('T')[0],open:r.open,high:r.high,low:r.low,close:r.close})));
+      const chartRows=rows.map(r=>({time:r.ts.split('T')[0],open:r.open,high:r.high,low:r.low,close:r.close}));
+      candle.setData(chartRows);
       const vol=chart.addHistogramSeries({priceFormat:{type:'volume'},priceScaleId:'',scaleMargins:{top:0.8,bottom:0}});
       vol.setData(rows.map(r=>({time:r.ts.split('T')[0],value:r.volume,color:r.close>=r.open?'#26a69a80':'#ef535080'})));
       chart.timeScale().fitContent();
       chartInstance=chart;
-      document.getElementById('range-start').value=rows[0].ts.split('T')[0];
-      document.getElementById('range-end').value=rows[rows.length-1].ts.split('T')[0];
+
+      // Track loaded range for lazy loading
+      const loadedEarliest=rows[0].ts;
+      const loadedLatest=rows[rows.length-1].ts;
+      chartLoadState={
+        symbol:sym,timeframe:tf,
+        loadedEarliest,loadedLatest,
+        fullEarliest,fullLatest,
+        loadedKeys:new Set(chartRows.map(r=>r.time)),
+        candleSeries:candle,volSeries:vol,
+        fetching:false,
+      };
+      updateChartLoadedInfo();
+
+      // Subscribe to visible range changes for lazy loading
+      chart.timeScale().subscribeVisibleLogicalRangeChange(onVisibleRangeChange);
+
+      document.getElementById('range-start').value=loadedEarliest.split('T')[0];
+      document.getElementById('range-end').value=loadedLatest.split('T')[0];
+    }else{
+      document.getElementById('chart-loading').textContent='无数据或图表库未加载';
     }
   }catch(e){detail.innerHTML=`<div class="msg err">Error: ${e}</div>`}
+}
+function updateChartLoadedInfo(){
+  const el=document.getElementById('chart-loaded-info');
+  if(!el||!chartLoadState)return;
+  const s=chartLoadState;
+  const fullFrom=s.fullEarliest?s.fullEarliest.split('T')[0]:'?';
+  const fullTo=s.fullLatest?s.fullLatest.split('T')[0]:'?';
+  const loadedFrom=s.loadedEarliest.split('T')[0];
+  const loadedTo=s.loadedLatest.split('T')[0];
+  const pct=s.fullEarliest&&s.fullLatest?
+    Math.round((new Date(s.loadedEarliest)-new Date(s.fullEarliest))/(new Date(s.fullLatest)-new Date(s.fullEarliest))*100):0;
+  el.innerHTML=`已加载: ${loadedFrom} ~ ${loadedTo} (${s.loadedKeys.size} bars) | 全部: ${fullFrom} ~ ${fullTo} ${pct>0?`(${pct}%)`:''}`;
+}
+function onVisibleRangeChange(range){
+  if(!chartLoadState||!range||chartLoadState.fetching)return;
+  // Debounce
+  if(chartLoadTimer){clearTimeout(chartLoadTimer);chartLoadTimer=null}
+  chartLoadTimer=setTimeout(()=>tryLazyLoad(range),300);
+}
+async function tryLazyLoad(range){
+  if(!chartLoadState||chartLoadState.fetching)return;
+  const s=chartLoadState;
+  const chart=s.candleSeries.chart();
+  const visibleRange=chart.timeScale().getVisibleRange();
+  if(!visibleRange)return;
+  const visFrom=new Date(visibleRange.from*1000);
+  const visTo=new Date(visibleRange.to*1000);
+  // Buffer: 20% of visible range on each side
+  const visSpan=visTo-visFrom;
+  const buffer=visSpan*0.2;
+
+  // Check if we need to load EARLIER data (user scrolled left)
+  const loadedEarliestMs=new Date(s.loadedEarliest).getTime();
+  const fullEarliestMs=s.fullEarliest?new Date(s.fullEarliest).getTime():null;
+  if(visFrom.getTime()<(loadedEarliestMs-buffer)&&(fullEarliestMs===null||loadedEarliestMs>fullEarliestMs+86400000)){
+    // Fetch earlier data: get bars before loadedEarliest
+    const fetchEnd=s.loadedEarliest.split('T')[0];
+    s.fetching=true;
+    showChartLoading(true);
+    try{
+      const resp=await fetch(`/api/v1/ohlcv?symbol=${encodeURIComponent(s.symbol)}&timeframe=${s.timeframe}&end=${fetchEnd}&limit=1000&order=desc`).then(r=>r.ok?r.json():null).catch(()=>null);
+      if(resp&&resp.data&&resp.data.length>0){
+        const newBars=resp.data.filter(r=>!s.loadedKeys.has(r.ts.split('T')[0]));
+        for(const r of newBars){
+          const day=r.ts.split('T')[0];
+          s.candleSeries.update({time:day,open:r.open,high:r.high,low:r.low,close:r.close});
+          s.volSeries.update({time:day,value:r.volume,color:r.close>=r.open?'#26a69a80':'#ef535080'});
+          s.loadedKeys.add(day);
+        }
+        if(newBars.length>0){
+          s.loadedEarliest=newBars[0].ts;
+          updateChartLoadedInfo();
+        }
+      }
+    }catch(e){console.warn('Lazy load earlier failed:',e)}
+    s.fetching=false;
+    showChartLoading(false);
+  }
+
+  // Check if we need to load LATER data (user scrolled right)
+  const loadedLatestMs=new Date(s.loadedLatest).getTime();
+  const fullLatestMs=s.fullLatest?new Date(s.fullLatest).getTime():null;
+  if(visTo.getTime()>(loadedLatestMs+buffer)&&(fullLatestMs===null||loadedLatestMs<fullLatestMs-86400000)){
+    const fetchStart=s.loadedLatest.split('T')[0];
+    s.fetching=true;
+    showChartLoading(true);
+    try{
+      const resp=await fetch(`/api/v1/ohlcv?symbol=${encodeURIComponent(s.symbol)}&timeframe=${s.timeframe}&start=${fetchStart}&limit=1000&order=asc`).then(r=>r.ok?r.json():null).catch(()=>null);
+      if(resp&&resp.data&&resp.data.length>0){
+        const newBars=resp.data.filter(r=>!s.loadedKeys.has(r.ts.split('T')[0]));
+        for(const r of newBars){
+          const day=r.ts.split('T')[0];
+          s.candleSeries.update({time:day,open:r.open,high:r.high,low:r.low,close:r.close});
+          s.volSeries.update({time:day,value:r.volume,color:r.close>=r.open?'#26a69a80':'#ef535080'});
+          s.loadedKeys.add(day);
+        }
+        if(newBars.length>0){
+          s.loadedLatest=newBars[newBars.length-1].ts;
+          updateChartLoadedInfo();
+        }
+      }
+    }catch(e){console.warn('Lazy load later failed:',e)}
+    s.fetching=false;
+    showChartLoading(false);
+  }
+}
+function showChartLoading(show){
+  const el=document.getElementById('chart-loading');
+  if(el)el.classList.toggle('show',show);
 }
 async function rangeIngest(sym){
   const start=document.getElementById('range-start').value;

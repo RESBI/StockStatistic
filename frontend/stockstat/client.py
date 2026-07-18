@@ -11,6 +11,25 @@ from .plot.base import PlotSpec, get_renderer
 from .dsl.evaluator import Evaluator as DSLEvaluator
 
 
+def _build_dsl_engine(client: "StockStatClient"):
+    """Build a v2.0 DslEngine backed by the PluginRegistry.
+
+    Returns None if the v2.0 layer is unavailable (e.g. backend not
+    installed), in which case the caller falls back to the v1.7
+    Evaluator.
+    """
+    try:
+        from ._core.plugin import PluginRegistry
+        from ._domain.indicators import register_default_indicators
+        from ._api.dsl import DslEngine
+
+        reg = PluginRegistry()
+        register_default_indicators(reg)
+        return DslEngine(reg, client=client._data_client)
+    except Exception:
+        return None
+
+
 class PlotAPI:
     def spec(self, title: str = "", **kwargs) -> PlotSpec:
         s = PlotSpec(title=title, x_label=kwargs.get("x_label", ""),
@@ -51,6 +70,8 @@ class StockStatClient:
         self._compute = ComputeEngine(self)
         self._plot = PlotAPI()
         self._dsl = DSLEvaluator(client=self._data_client)
+        # v2.0 DSL engine (auto-reflection from PluginRegistry); falls back to v1.7
+        self._dsl_v2 = _build_dsl_engine(self)
 
     @classmethod
     def from_env(cls) -> "StockStatClient":
@@ -68,10 +89,11 @@ class StockStatClient:
         end: Optional[str] = None,
         timeframe: str = "1d",
         limit: Optional[int] = None,
+        order: Optional[str] = None,
     ) -> pd.DataFrame:
         return self._data_client.ohlcv(
             symbol=symbol, source=source, start=start, end=end,
-            timeframe=timeframe, limit=limit,
+            timeframe=timeframe, limit=limit, order=order,
         )
 
     def ohlcv_batch(
@@ -130,4 +152,8 @@ class StockStatClient:
         return engine.run()
 
     def run_dsl(self, dsl_string: str) -> pd.DataFrame:
+        # Prefer v2.0 DslEngine (auto-reflection from PluginRegistry);
+        # fall back to v1.7 Evaluator if v2.0 layer unavailable.
+        if self._dsl_v2 is not None:
+            return self._dsl_v2.eval(dsl_string)
         return self._dsl.eval(dsl_string)

@@ -87,9 +87,10 @@ def get_ohlcv(
     end: Optional[str] = Query(None),
     timeframe: str = Query("1d"),
     limit: Optional[int] = Query(None),
+    order: str = Query("asc"),
     format: str = Query("json"),
 ):
-    cached = cache.get(symbol, source, start, end, timeframe, limit)
+    cached = cache.get(symbol, source, start, end, timeframe, limit, order)
     if cached is not None:
         return cached
 
@@ -100,6 +101,7 @@ def get_ohlcv(
         end=end,
         timeframe=timeframe,
         limit=limit,
+        order=order,
     )
 
     if df.empty:
@@ -128,10 +130,11 @@ def get_ohlcv(
         "symbol": symbol,
         "source": source,
         "timeframe": timeframe,
+        "order": order,
         "count": len(data),
         "data": data,
     }
-    cache.set(result, symbol, source, start, end, timeframe, limit)
+    cache.set(result, symbol, source, start, end, timeframe, limit, order)
     return result
 
 

@@ -28,3 +28,11 @@ class DataSourceAdapter(ABC):
 
     def health_check(self) -> bool:
         return True
+
+    def probe_range(self, symbol: str, timeframe: str = "1d") -> tuple[str | None, str | None]:
+        """Probe the source for the actual earliest and latest available bar timestamps.
+
+        Returns (earliest_iso, latest_iso); either may be None if unknown.
+        Default implementation returns (None, None); subclasses should override.
+        """
+        return None, None

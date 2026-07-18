@@ -51,6 +51,7 @@ class DataClient:
         end: Optional[str] = None,
         timeframe: str = "1d",
         limit: Optional[int] = None,
+        order: Optional[str] = None,
     ) -> pd.DataFrame:
         params = {"symbol": symbol, "timeframe": timeframe}
         if source:
@@ -61,6 +62,8 @@ class DataClient:
             params["end"] = end
         if limit:
             params["limit"] = limit
+        if order:
+            params["order"] = order
 
         result = self._get("/api/v1/ohlcv", params)
         df = pd.DataFrame(result["data"])

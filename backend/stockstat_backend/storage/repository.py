@@ -43,6 +43,7 @@ class OHLCVRepository:
         end: Optional[str] = None,
         timeframe: str = "1d",
         limit: Optional[int] = None,
+        order: str = "asc",
     ) -> pd.DataFrame:
         with get_session() as session:
             stmt = select(OHLCV).where(
@@ -55,7 +56,10 @@ class OHLCVRepository:
                 stmt = stmt.where(OHLCV.ts >= start)
             if end:
                 stmt = stmt.where(OHLCV.ts <= end)
-            stmt = stmt.order_by(OHLCV.ts.asc())
+            if order == "desc":
+                stmt = stmt.order_by(OHLCV.ts.desc())
+            else:
+                stmt = stmt.order_by(OHLCV.ts.asc())
             if limit:
                 stmt = stmt.limit(limit)
 
@@ -78,6 +82,9 @@ class OHLCVRepository:
             if not df.empty:
                 df["ts"] = pd.to_datetime(df["ts"], utc=True)
                 df = df.set_index("ts")
+                # When order=desc, reverse to ascending for downstream consumers
+                if order == "desc":
+                    df = df.iloc[::-1]
             return df
 
     def count(self, symbol: Optional[str] = None) -> int:

@@ -153,11 +153,22 @@ class TestV2ClientOffline:
         df = client.ohlcv("BTC")
         assert len(df) == 2
 
-    def test_offline_ingest_raises(self):
+    def test_offline_ingest_synthetic(self):
+        """Offline ingest should work with synthetic source (no network needed)."""
         from stockstat._api.client import V2Client
-        client = V2Client(mode="offline")
-        with pytest.raises(RuntimeError):
-            client.ingest("BTC/USDT")
+        from stockstat._core.storage import MemoryStorage
+
+        client = V2Client(mode="offline", storage=MemoryStorage())
+        result = client.ingest("BTC/USDT", source="synthetic",
+                               start="2024-01-01", end="2024-01-10")
+        assert result["ingested"] > 0
+        assert result["symbol"] == "BTC/USDT"
+        assert result["source"] == "synthetic"
+
+        # Verify data was stored
+        df = client.ohlcv("BTC/USDT")
+        assert len(df) > 0
+        assert "close" in df.columns
 
     def test_offline_compute_available(self):
         from stockstat._api.client import V2Client

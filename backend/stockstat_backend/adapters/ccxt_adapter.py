@@ -12,14 +12,24 @@ class CcxtAdapter(DataSourceAdapter):
     name = "ccxt"
     source_type = "crypto"
 
+    # All timeframes supported by Binance (and most ccxt exchanges)
     _TIMEFRAME_MAP = {
+        "1s": "1s",
         "1m": "1m",
+        "3m": "3m",
         "5m": "5m",
         "15m": "15m",
+        "30m": "30m",
         "1h": "1h",
+        "2h": "2h",
         "4h": "4h",
+        "6h": "6h",
+        "8h": "8h",
+        "12h": "12h",
         "1d": "1d",
+        "3d": "3d",
         "1w": "1w",
+        "1M": "1M",
     }
 
     def __init__(self, exchange_id: str = "binance", proxies: dict | None = None):
@@ -94,3 +104,28 @@ class CcxtAdapter(DataSourceAdapter):
             return True
         except Exception:
             return False
+
+    def probe_range(self, symbol: str, timeframe: str = "1d") -> tuple[str | None, str | None]:
+        """Probe the source for the actual earliest and latest available bar timestamps.
+
+        Returns (earliest_iso, latest_iso); either may be None on failure.
+        """
+        tf = self._TIMEFRAME_MAP.get(timeframe, "1d")
+        earliest = None
+        latest = None
+        try:
+            # Earliest: fetch the first bar since epoch
+            data = self.exchange.fetch_ohlcv(symbol, timeframe=tf, since=0, limit=1)
+            if data:
+                earliest = pd.Timestamp(data[0][0], unit="ms", tz="UTC").isoformat()
+        except Exception:
+            pass
+        try:
+            # Latest: fetch the most recent bar
+            now_ms = self.exchange.milliseconds()
+            data = self.exchange.fetch_ohlcv(symbol, timeframe=tf, since=now_ms - 86400000, limit=1)
+            if data:
+                latest = pd.Timestamp(data[-1][0], unit="ms", tz="UTC").isoformat()
+        except Exception:
+            pass
+        return earliest, latest
