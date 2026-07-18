@@ -352,7 +352,20 @@ frontend/stockstat/
 
 frontend/pyproject.toml            [修改, +compute / distributed extras]
 frontend/tests/
-└── test_v3_compute_backend.py    [新增, 35 项测试]
+├── test_v3_protocol.py           [新增, 50 项]
+├── test_v3_compute_backend.py    [新增, 35 项]
+└── test_v3_compat.py             [新增, 23 项]
+
+tests/                             [P1+ 部署场景测试]
+├── deployments/                   [新增目录]
+│   ├── README.md                  [部署测试指南]
+│   ├── _common.py                 [共享辅助模块]
+│   ├── test_case_a_single_machine.py + .bat + .sh   [Case A: 单机全栈]
+│   ├── test_case_b_storage_separated.py + .bat + .sh [Case B: 存储-计算分离]
+│   ├── test_case_c_offline.py + .bat + .sh           [Case C: 离线模式]
+│   └── test_case_d_local_compute_backend.py + .bat + .sh [Case D: V3 API 全覆盖]
+├── test_connection.py             [重写, V3 适配 + 步骤 8/9/10]
+└── test_perf.py                   [重写, V3 适配 + 步骤 9-12]
 ```
 
 ---
