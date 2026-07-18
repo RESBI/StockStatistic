@@ -12,18 +12,22 @@ _SessionLocal = None
 
 
 def get_engine():
-    global _engine
+    global _engine, _SessionLocal
     if _engine is None:
         connect_args = {}
         if settings.database_url.startswith("sqlite"):
             connect_args["check_same_thread"] = False
-        _engine = create_engine(
+        engine = create_engine(
             settings.database_url,
             connect_args=connect_args,
             echo=False,
             future=True,
         )
-        Base.metadata.create_all(_engine)
+        # Create tables before caching engine, so that if create_all
+        # fails (e.g. connection error), the next call retries.
+        Base.metadata.create_all(engine)
+        _engine = engine
+        _SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
     return _engine
 
 
