@@ -95,6 +95,33 @@ def _mask_db_url(url: str) -> str:
     return url
 
 
+def _get_disk_usage(path: str) -> tuple[int, int, int]:
+    """Get (total, free, used) bytes for the given path. Cross-platform."""
+    if hasattr(os, "statvfs"):
+        # Unix/Linux/macOS
+        stat = os.statvfs(path)
+        total = stat.f_blocks * stat.f_frsize
+        free = stat.f_bavail * stat.f_frsize
+        used = total - free
+        return total, free, used
+    else:
+        # Windows
+        import ctypes
+        import ctypes.wintypes as wt
+        free_bytes = ctypes.c_ulonglong(0)
+        total_bytes = ctypes.c_ulonglong(0)
+        ctypes.windll.kernel32.GetDiskFreeSpaceExW(
+            ctypes.c_wchar_p(path),
+            ctypes.pointer(free_bytes),
+            ctypes.pointer(total_bytes),
+            None,
+        )
+        total = total_bytes.value
+        free = free_bytes.value
+        used = total - free
+        return total, free, used
+
+
 # ═══════════════════════════════════════════════════════════════
 # API Router
 # ═══════════════════════════════════════════════════════════════
@@ -202,10 +229,7 @@ def create_admin_router() -> APIRouter:
             db_path = os.getcwd()
 
         try:
-            stat = os.statvfs(os.path.dirname(db_path) or ".")
-            total = stat.f_blocks * stat.f_frsize
-            free = stat.f_bavail * stat.f_frsize
-            used = total - free
+            total, free, used = _get_disk_usage(os.path.dirname(db_path) or ".")
             db_size = os.path.getsize(db_path) if os.path.exists(db_path) else 0
             return {
                 "total_gb": round(total / 1e9, 2),
@@ -216,7 +240,11 @@ def create_admin_router() -> APIRouter:
                 "db_path": db_path,
             }
         except Exception as e:
-            return {"error": str(e)}
+            return {
+                "total_gb": 0, "used_gb": 0, "free_gb": 0,
+                "used_percent": 0, "db_file_size_mb": 0,
+                "db_path": db_path, "error": str(e),
+            }
 
     # ── Symbols (local) ───────────────────────────────────────
 
@@ -670,7 +698,11 @@ async function renderDashboard(){
   c.innerHTML='<div class="stats" id="d-stats"></div><div class="section"><h3>数据覆盖时间轴</h3><div id="d-gantt"></div></div><div class="section"><h3>最近采集记录</h3><div id="d-logs"></div></div>';
   try{
     const[stats,symbols,logs,health,disk]=await Promise.all([
-      api('/stats'),api('/symbols'),api('/logs?size=5'),api('/health'),api('/disk')
+      api('/stats').catch(e=>({total_symbols:0,total_rows:0,symbols_by_source:{},_err:e})),
+      api('/symbols').catch(e=>({symbols:[],_err:e})),
+      api('/logs?size=5').catch(e=>({logs:[],_err:e})),
+      api('/health').catch(e=>({status:'error',_err:e})),
+      api('/disk').catch(e=>({total_gb:0,used_gb:0,used_percent:0,db_file_size_mb:0,_err:e}))
     ]);
     // Stat cards
     document.getElementById('d-stats').innerHTML=`
@@ -904,7 +936,11 @@ async function renderConfig(){
   const c=document.getElementById('content');
   c.innerHTML='<div id="cfg-content">加载中...</div>';
   try{
-    const[config,cache,disk]=await Promise.all([api('/config'),api('/cache'),api('/disk')]);
+    const[config,cache,disk]=await Promise.all([
+      api('/config').catch(e=>({database_url:'(error)',proxy:{enabled:false,type:'http',url:''},_err:e})),
+      api('/cache').catch(e=>({ttl:300,keys:0,_err:e})),
+      api('/disk').catch(e=>({total_gb:0,used_gb:0,used_percent:0,db_file_size_mb:0,_err:e}))
+    ]);
     document.getElementById('cfg-content').innerHTML=`
       <div class="section"><h3>数据库</h3>
         <div class="row"><label>当前路径</label><code>${esc(config.database_url)}</code></div>
