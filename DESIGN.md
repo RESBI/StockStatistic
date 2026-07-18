@@ -409,26 +409,26 @@ stockstat indicators --category nonlinear       # List indicators by category
 
 ### 8.1 Data Source Adapter Layer
 
-Adapters follow a plugin-based design, each subclassing `DataSourceAdapter`.
+Adapters follow a plugin-based design, each subclassing `DataSourceAdapter`. Adapter management logic is extracted into a public module `api/adapters.py`, shared by the main router and the admin plugin.
 
-**Adapter instantiation** (`api/routes.py`):
+**Public adapter API** (`api/adapters.py`):
 
 ```python
-def _get_adapter(source: str):
-    if source not in _adapters:
-        proxies = settings.proxy.proxies
-        if source == "yfinance":
-            _adapters[source] = YahooDirectAdapter(proxy=proxies)
-        elif source == "binance":
-            _adapters[source] = CcxtAdapter("binance", proxies=proxies)
-        elif source == "coinbase":
-            _adapters[source] = CcxtAdapter("coinbase", proxies=proxies)
-        elif source == "synthetic":
-            _adapters[source] = SyntheticAdapter()
-        else:
-            raise HTTPException(status_code=400, detail=f"Unknown source: {source}")
-    return _adapters[source]
+# 3 public functions, shared by routes.py and plugins/admin/
+def get_adapter(source: str):
+    """Get or create a data source adapter (cached)."""
+    ...
+
+def auto_detect_source(symbol: str) -> str:
+    """Auto-detect data source from symbol format."""
+    ...
+
+def clear_adapters():
+    """Clear adapter cache (called after proxy config change)."""
+    ...
 ```
+
+`routes.py` imports via `from .adapters import get_adapter as _get_adapter`, behavior identical to v1.7. The admin plugin uses the public `get_adapter()` / `auto_detect_source()` / `clear_adapters()` directly, without depending on private symbols.
 
 ### 8.2 Proxy Support
 
@@ -644,27 +644,60 @@ graph LR
     TUI -->|"rich table rendering"| USER["Terminal"]
 ```
 
-### 12.2 Web Admin Interface
+### 12.2 Web Admin Interface (Admin Plugin)
 
-The Storage Server has a built-in web admin interface. Access via browser at `http://storage-server:8000/admin/`.
+The web admin interface is a **pluggable, independent plugin** (`plugins/admin/`), mounted onto the FastAPI app via `AdminPlugin.mount(app)`. Controlled by the environment variable `STOCKSTAT_ADMIN_ENABLED` (default: `true`).
 
-**Management scope**:
+**Plugin package structure**:
+
+```
+backend/stockstat_backend/plugins/admin/
+├── __init__.py    # exports AdminPlugin
+├── plugin.py      # AdminPlugin.mount(app) / unmount(app)
+├── router.py      # 15 API endpoints
+├── web.py         # 27KB SPA HTML (5 pages)
+├── models.py      # IngestLog ORM (independent DeclarativeBase)
+├── utils.py       # mask_db_url / get_disk_usage (cross-platform)
+└── lock.py        # _ingest_lock / _batch_tasks (thread-safe state)
+```
+
+**Mount mechanism** (`app.py`):
+
+```python
+from .config import settings
+if settings.admin_enabled:
+    from .plugins.admin import AdminPlugin
+    AdminPlugin.mount(app)
+```
+
+**Management scope** (15 API endpoints):
 
 | Function | Endpoint | Description |
 |----------|----------|-------------|
-| **Overview dashboard** | `/admin/` | Symbol count, row count, per-source distribution, health status |
-| **Symbol browse** | `/admin/api/symbols` | List all symbols + row count + date range |
+| **Overview dashboard** | `/admin/` | Symbol count, rows, source distribution, health |
+| **Health monitor** | `GET /admin/api/health` | DB connection / cache status / proxy status |
+| **Config view** | `GET /admin/api/config` | DB URL / proxy / cache config (password masked) |
+| **Proxy update** | `PUT /admin/api/proxy` | Live proxy update (clears adapter cache) |
+| **Cache info** | `GET /admin/api/cache` | Cache key count / TTL |
+| **Cache clear** | `DELETE /admin/api/cache` | Clear all cache |
+| **Disk monitor** | `GET /admin/api/disk` | Disk space / DB file size (cross-platform) |
+| **Symbol browse** | `GET /admin/api/symbols` | All symbols + row count + date range |
 | **Data delete** | `DELETE /admin/api/symbols/{symbol}` | Delete all data for a symbol |
-| **Data ingest** | `POST /admin/api/ingest` | Trigger ingestion from the web UI |
-| **Config view** | `/admin/api/config` | View DB URL / proxy / cache config (password masked) |
-| **Health monitor** | `/admin/api/health` | DB connection / cache status / proxy status |
-| **Data stats** | `/admin/api/stats` | Total symbols / total rows / per-source distribution |
-| **Source list** | `/admin/api/sources` | Available data sources |
+| **Source list** | `GET /admin/api/sources` | Available data sources |
+| **Source directory** | `GET /admin/api/sources/{source}/symbols` | Paginated browse + search + downloaded badges |
+| **Source info** | `GET /admin/api/sources/{source}/info` | Time range / supported timeframes |
+| **Data ingest** | `POST /admin/api/ingest` | Trigger ingestion (threading.Lock serialized) |
+| **Batch ingest** | `POST /admin/api/ingest/batch` | Batch ingestion (background thread + progress) |
+| **Batch progress** | `GET /admin/api/ingest/progress/{batch_id}` | Batch task progress |
+| **Data stats** | `GET /admin/api/stats` | Total symbols / rows / per-source distribution |
+| **Ingest logs** | `GET /admin/api/logs` | Ingest history (paginated + filtered) |
 
 **Design points**:
-- Management logic runs in-process on the backend (directly accesses Storage/Cache), no HTTP forwarding
-- Web frontend is pure static HTML+JS (no Node build chain), served by FastAPI
-- Database URL passwords are automatically masked
+- Management logic runs in-process (directly accesses Storage/Cache), no HTTP forwarding
+- Web frontend is pure static HTML+JS (no Node build chain), CDN-loaded lightweight-charts
+- IngestLog uses an independent `DeclarativeBase`, does not modify backend `models/ohlcv.py`
+- `threading.Lock` serializes all ingest/delete operations (SQLite write safety)
+- Proxy update calls `clear_adapters()` to atomically clear the adapter cache
 
 ```mermaid
 graph TB
@@ -673,19 +706,31 @@ graph TB
     end
 
     subgraph "Storage Server Process"
+        APP["app.py<br/>if settings.admin_enabled"]
+        PLUGIN["AdminPlugin.mount(app)<br/>plugins/admin/"]
         API["FastAPI REST<br/>(data query/ingest)"]
-        ADMIN["Admin Route Plugin<br/>/admin/api/*"]
-        STATIC["Static HTML+JS<br/>/admin/"]
+        ROUTER["Admin Router<br/>/admin/api/* (15 endpoints)"]
+        STATIC["SPA HTML+JS<br/>/admin/ (5 pages)"]
         DB["Storage/Cache"]
+        ADAPTERS["api/adapters.py<br/>get_adapter/clear_adapters"]
     end
 
     WEB -->|"HTTP"| STATIC
-    WEB -->|"fetch API"| ADMIN
-    ADMIN -->|"in-process call"| DB
+    WEB -->|"fetch API"| ROUTER
+    APP -->|"conditional mount"| PLUGIN
+    PLUGIN --> ROUTER
+    PLUGIN --> STATIC
+    ROUTER -->|"in-process call"| DB
+    ROUTER -->|"public interface"| ADAPTERS
     API -->|"in-process call"| DB
+    API --> ADAPTERS
 ```
 
-**Why an API plugin, not a Client**: Management operations (config viewing / cache status / data deletion) must execute within the Storage Server process. A Client cannot access process-level state over the network. Admin routes call `settings` / `ohlcv_repo` / `cache` directly, with zero network overhead.
+**Why a Plugin, not hardcoded mount**:
+- Configurable: `STOCKSTAT_ADMIN_ENABLED=false` disables the admin UI (production security)
+- Physical isolation: admin code in `plugins/admin/` subpackage, does not侵入 main router
+- Public interface: accesses adapters via `api/adapters.py` public functions, no private symbols
+- Independent ORM: IngestLog uses its own `DeclarativeBase`, no backend model changes
 
 ---
 
@@ -842,14 +887,24 @@ client = V2Client(mode="offline", storage=MemoryStorage())
 StockStatistic/
 ├── backend/                              # Storage backend service (independently deployable)
 │   ├── stockstat_backend/
-│   │   ├── app.py                        # FastAPI application entry
-│   │   ├── config.py                     # Settings + ProxyConfig
-│   │   ├── api/routes.py                 # REST routes
+│   │   ├── app.py                        # FastAPI entry (conditional admin plugin mount)
+│   │   ├── config.py                     # Settings + ProxyConfig + admin_enabled
+│   │   ├── api/
+│   │   │   ├── routes.py                 # REST routes (/api/v1/*)
+│   │   │   └── adapters.py              # Public adapter API (get_adapter/clear_adapters)
 │   │   ├── adapters/                     # Data source adapters
 │   │   ├── models/ohlcv.py               # ORM
 │   │   ├── storage/                      # database / repository / cache
 │   │   ├── normalizer/                   # Data normalization
-│   │   └── scheduler/                    # Scheduler (v1.7 stub)
+│   │   ├── plugins/                      # Backend plugins
+│   │   │   └── admin/                    # Web admin interface plugin
+│   │   │       ├── plugin.py             # AdminPlugin.mount(app)
+│   │   │       ├── router.py             # 15 API endpoints
+│   │   │       ├── web.py               # 27KB SPA HTML
+│   │   │       ├── models.py            # IngestLog (independent Base)
+│   │   │       ├── utils.py             # Cross-platform disk/URL utils
+│   │   │       └── lock.py              # Thread lock + batch task state
+│   │   └── scheduler/                    # Scheduler (stub)
 │   ├── tests/
 │   └── pyproject.toml
 │

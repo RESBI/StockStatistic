@@ -1233,9 +1233,9 @@ Done! {'symbol': 'PAXG/USDT', 'source': 'binance', 'ingested': 1095}
 
 > Install `pip install rich` for colored tables. Falls back to plain text when not installed.
 
-### 20.2 Web Admin Interface
+### 20.2 Web Admin Interface (Admin Plugin)
 
-The Storage Server has a built-in web admin interface, accessible via browser.
+The Storage Server has a built-in web admin interface (pluggable plugin, controlled by `STOCKSTAT_ADMIN_ENABLED`, enabled by default), accessible via browser.
 
 #### Example 20.4: Access the web admin
 
@@ -1298,6 +1298,7 @@ curl -X DELETE http://localhost:8000/admin/api/symbols/BTC/USDT
 | `STOCKSTAT_PROXY_ENABLED` | `false` | Enable proxy |
 | `STOCKSTAT_PROXY_TYPE` | `http` | `http` or `socks5` |
 | `STOCKSTAT_PROXY_URL` | auto | Proxy URL |
+| `STOCKSTAT_ADMIN_ENABLED` | `true` | Enable web admin interface |
 
 ### Frontend
 

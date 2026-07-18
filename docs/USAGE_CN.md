@@ -1232,9 +1232,9 @@ Done! {'symbol': 'PAXG/USDT', 'source': 'binance', 'ingested': 1095}
 
 > 推荐安装 `pip install rich` 以获得彩色表格体验。未安装时自动降级为纯文本菜单。
 
-### 20.2 网页管理界面
+### 20.2 网页管理界面（Admin Plugin）
 
-Storage Server 内置网页管理界面，浏览器访问即可管理。
+Storage Server 内置网页管理界面（可插拔 plugin，由 `STOCKSTAT_ADMIN_ENABLED` 控制，默认开启），浏览器访问即可管理。
 
 #### 示例 20.4：访问网页管理界面
 
@@ -1297,6 +1297,7 @@ curl -X DELETE http://localhost:8000/admin/api/symbols/BTC/USDT
 | `STOCKSTAT_PROXY_ENABLED` | `false` | 启用代理 |
 | `STOCKSTAT_PROXY_TYPE` | `http` | `http` 或 `socks5` |
 | `STOCKSTAT_PROXY_URL` | 自动 | 代理地址 |
+| `STOCKSTAT_ADMIN_ENABLED` | `true` | 是否启用网页管理界面 |
 
 ### 前端
 

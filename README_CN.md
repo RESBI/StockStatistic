@@ -624,6 +624,7 @@ cd frontend && python -m pytest tests/test_matplotlib_charts.py -v
 | `STOCKSTAT_PROXY_ENABLED` | `false` | 启用代理 |
 | `STOCKSTAT_PROXY_TYPE` | `http` | `http` 或 `socks5` |
 | `STOCKSTAT_PROXY_URL` | 自动 | 代理地址 |
+| `STOCKSTAT_ADMIN_ENABLED` | `true` | 是否启用网页管理界面（`/admin/`） |
 
 ### 前端环境变量
 

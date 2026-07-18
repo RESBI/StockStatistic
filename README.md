@@ -624,6 +624,7 @@ cd frontend && python -m pytest tests/test_matplotlib_charts.py -v
 | `STOCKSTAT_PROXY_ENABLED` | `false` | Enable proxy |
 | `STOCKSTAT_PROXY_TYPE` | `http` | `http` or `socks5` |
 | `STOCKSTAT_PROXY_URL` | auto | Proxy URL |
+| `STOCKSTAT_ADMIN_ENABLED` | `true` | Enable web admin interface (`/admin/`) |
 
 ### Frontend environment variables
 

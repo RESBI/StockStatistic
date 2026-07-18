@@ -453,26 +453,26 @@ stockstat indicators --category nonlinear       # 列出指标
 
 ### 8.1 数据源适配器层
 
-数据源适配器采用**插件化**设计，每个适配器继承 `DataSourceAdapter` 抽象基类。
+数据源适配器采用**插件化**设计，每个适配器继承 `DataSourceAdapter` 抽象基类。适配器管理逻辑提取到公开模块 `api/adapters.py`，供主路由和 admin plugin 共用。
 
-**适配器实例化**（`api/routes.py`）：
+**适配器公开接口**（`api/adapters.py`）：
 
 ```python
-def _get_adapter(source: str):
-    if source not in _adapters:
-        proxies = settings.proxy.proxies
-        if source == "yfinance":
-            _adapters[source] = YahooDirectAdapter(proxy=proxies)
-        elif source == "binance":
-            _adapters[source] = CcxtAdapter("binance", proxies=proxies)
-        elif source == "coinbase":
-            _adapters[source] = CcxtAdapter("coinbase", proxies=proxies)
-        elif source == "synthetic":
-            _adapters[source] = SyntheticAdapter()
-        else:
-            raise HTTPException(status_code=400, detail=f"Unknown source: {source}")
-    return _adapters[source]
+# 3 个公开函数，供 routes.py 和 plugins/admin/ 共用
+def get_adapter(source: str):
+    """获取或创建数据源适配器（带缓存）。"""
+    ...
+
+def auto_detect_source(symbol: str) -> str:
+    """按符号格式自动检测数据源。"""
+    ...
+
+def clear_adapters():
+    """清空适配器缓存（代理配置变更后调用）。"""
+    ...
 ```
+
+`routes.py` 通过 `from .adapters import get_adapter as _get_adapter` 导入，行为与 v1.7 完全一致。Admin plugin 直接使用公开的 `get_adapter()` / `auto_detect_source()` / `clear_adapters()`，不依赖私有符号。
 
 ### 8.2 代理支持
 
@@ -688,27 +688,60 @@ graph LR
     TUI -->|"rich 表格渲染"| USER["终端"]
 ```
 
-### 12.2 网页管理界面
+### 12.2 网页管理界面（Admin Plugin）
 
-Storage Server 内置网页管理界面，通过浏览器访问 `http://storage-server:8000/admin/` 即可管理。
+网页管理界面是一个**可插拔的独立 plugin**（`plugins/admin/`），通过 `AdminPlugin.mount(app)` 挂载到 FastAPI 应用。由环境变量 `STOCKSTAT_ADMIN_ENABLED`（默认 `true`）控制是否加载。
 
-**管理范围**：
+**Plugin 包结构**：
+
+```
+backend/stockstat_backend/plugins/admin/
+├── __init__.py    # 导出 AdminPlugin
+├── plugin.py      # AdminPlugin.mount(app) / unmount(app)
+├── router.py      # 15 个 API 端点
+├── web.py         # 27KB SPA HTML（5 页面）
+├── models.py      # IngestLog ORM（独立 DeclarativeBase）
+├── utils.py       # mask_db_url / get_disk_usage（跨平台）
+└── lock.py        # _ingest_lock / _batch_tasks（线程安全状态）
+```
+
+**挂载方式**（`app.py`）：
+
+```python
+from .config import settings
+if settings.admin_enabled:
+    from .plugins.admin import AdminPlugin
+    AdminPlugin.mount(app)
+```
+
+**管理范围**（15 个 API 端点）：
 
 | 功能 | 端点 | 说明 |
 |------|------|------|
 | **概览仪表盘** | `/admin/` | 标的数、行数、按来源分布、健康状态 |
-| **标的浏览** | `/admin/api/symbols` | 列出所有标的 + 行数 + 时间范围 |
+| **健康监控** | `GET /admin/api/health` | 数据库连接/缓存状态/代理状态 |
+| **配置查看** | `GET /admin/api/config` | DB URL/代理/缓存配置（密码脱敏） |
+| **代理修改** | `PUT /admin/api/proxy` | 在线修改代理（立即生效，清空适配器缓存） |
+| **缓存查看** | `GET /admin/api/cache` | 缓存键数/TTL |
+| **缓存清空** | `DELETE /admin/api/cache` | 清空全部缓存 |
+| **磁盘监控** | `GET /admin/api/disk` | 磁盘空间/数据库文件大小（跨平台） |
+| **标的浏览** | `GET /admin/api/symbols` | 列出所有标的 + 行数 + 时间范围 |
 | **数据删除** | `DELETE /admin/api/symbols/{symbol}` | 删除指定标的的全部数据 |
-| **数据采集** | `POST /admin/api/ingest` | 从网页触发采集 |
-| **配置查看** | `/admin/api/config` | 查看 DB URL/代理/缓存等配置（密码脱敏） |
-| **健康监控** | `/admin/api/health` | 数据库连接/缓存状态/代理状态 |
-| **数据统计** | `/admin/api/stats` | 总标的数/总行数/按来源分布 |
-| **数据源列表** | `/admin/api/sources` | 可用数据源及类型 |
+| **数据源列表** | `GET /admin/api/sources` | 可用数据源及类型 |
+| **数据源目录** | `GET /admin/api/sources/{source}/symbols` | 分页浏览 + 搜索 + 已下载标注 |
+| **数据源信息** | `GET /admin/api/sources/{source}/info` | 时间范围/支持的时间粒度 |
+| **数据采集** | `POST /admin/api/ingest` | 触发采集（threading.Lock 串行化） |
+| **批量采集** | `POST /admin/api/ingest/batch` | 批量采集（后台线程 + 进度轮询） |
+| **批量进度** | `GET /admin/api/ingest/progress/{batch_id}` | 批量任务进度 |
+| **数据统计** | `GET /admin/api/stats` | 总标的数/总行数/按来源分布 |
+| **采集日志** | `GET /admin/api/logs` | 采集历史（分页 + 过滤） |
 
 **设计要点**：
 - 管理逻辑在后端进程内运行（直接操作 Storage/Cache），不走 HTTP 转发
-- 网页前端为纯静态 HTML+JS（无 Node 构建链），由 FastAPI `StaticFiles` 挂载
-- 数据库 URL 中的密码自动脱敏显示
+- 网页前端为纯静态 HTML+JS（无 Node 构建链），CDN 引入 lightweight-charts K 线图
+- IngestLog 使用独立 `DeclarativeBase`，不侵入后端 `models/ohlcv.py`
+- `threading.Lock` 串行化所有 ingest/delete 操作（SQLite 写安全）
+- 代理更新时调用 `clear_adapters()` 原子清空适配器缓存
 
 ```mermaid
 graph TB
@@ -717,19 +750,31 @@ graph TB
     end
 
     subgraph "Storage Server 进程内"
+        APP["app.py<br/>if settings.admin_enabled"]
+        PLUGIN["AdminPlugin.mount(app)<br/>plugins/admin/"]
         API["FastAPI REST<br/>(数据查询/采集)"]
-        ADMIN["Admin 路由插件<br/>/admin/api/*"]
-        STATIC["静态 HTML+JS<br/>/admin/"]
+        ROUTER["Admin Router<br/>/admin/api/* (15端点)"]
+        STATIC["SPA HTML+JS<br/>/admin/ (5页面)"]
         DB["Storage/Cache"]
+        ADAPTERS["api/adapters.py<br/>get_adapter/clear_adapters"]
     end
 
     WEB -->|"HTTP"| STATIC
-    WEB -->|"fetch API"| ADMIN
-    ADMIN -->|"进程内调用"| DB
+    WEB -->|"fetch API"| ROUTER
+    APP -->|"条件挂载"| PLUGIN
+    PLUGIN --> ROUTER
+    PLUGIN --> STATIC
+    ROUTER -->|"进程内调用"| DB
+    ROUTER -->|"公开接口"| ADAPTERS
     API -->|"进程内调用"| DB
+    API --> ADAPTERS
 ```
 
-**为什么是 API 插件而非 Client**：管理操作（配置查看/缓存状态/数据删除）必须在 Storage Server 进程内执行，Client 无法通过网络获取进程级状态。Admin 路由直接调用 `settings`/`ohlcv_repo`/`cache`，零网络开销。
+**为什么是 Plugin 而非硬编码挂载**：
+- 可配置开关：`STOCKSTAT_ADMIN_ENABLED=false` 可关闭管理界面（生产环境安全）
+- 物理隔离：admin 代码在 `plugins/admin/` 独立子包，不侵入主路由
+- 公开接口：通过 `api/adapters.py` 的公开函数访问适配器，不依赖私有符号
+- 独立 ORM：IngestLog 用独立 `DeclarativeBase`，不修改后端模型
 
 ---
 
@@ -886,14 +931,24 @@ client = V2Client(mode="offline", storage=MemoryStorage())
 StockStatistic/
 ├── backend/                              # 存储后端服务（独立部署）
 │   ├── stockstat_backend/
-│   │   ├── app.py                        # FastAPI 应用入口
-│   │   ├── config.py                     # Settings + ProxyConfig
-│   │   ├── api/routes.py                 # REST 路由
+│   │   ├── app.py                        # FastAPI 应用入口（条件挂载 admin plugin）
+│   │   ├── config.py                     # Settings + ProxyConfig + admin_enabled
+│   │   ├── api/
+│   │   │   ├── routes.py                 # REST 路由（/api/v1/*）
+│   │   │   └── adapters.py              # 公开适配器管理（get_adapter/clear_adapters）
 │   │   ├── adapters/                     # 数据源适配器
 │   │   ├── models/ohlcv.py               # ORM
 │   │   ├── storage/                      # database / repository / cache
 │   │   ├── normalizer/                   # 数据标准化
-│   │   └── scheduler/                    # 调度器（v1.7 stub）
+│   │   ├── plugins/                      # 后端插件包
+│   │   │   └── admin/                    # 网页管理界面 plugin
+│   │   │       ├── plugin.py             # AdminPlugin.mount(app)
+│   │   │       ├── router.py             # 15 个 API 端点
+│   │   │       ├── web.py               # 27KB SPA HTML
+│   │   │       ├── models.py            # IngestLog（独立 Base）
+│   │   │       ├── utils.py             # 跨平台磁盘/URL 工具
+│   │   │       └── lock.py              # 线程锁 + 批量任务状态
+│   │   └── scheduler/                    # 调度器（stub）
 │   ├── tests/
 │   └── pyproject.toml
 │
