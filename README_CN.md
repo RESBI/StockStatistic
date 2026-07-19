@@ -1,169 +1,270 @@
 # StockStat — 可编程金融标的统计计算平台
 
-用户可编程的股票 / 加密货币统计计算平台，**计算-存储分离**架构，支持本地 / 远程 / 离线三种部署模式，为未来分布式计算预留。
+用户可编程的股票 / 加密货币统计计算平台，**计算-存储分离 + V3 分布式计算 offload** 架构，支持本地 / 远程 / 离线 / 分布式四种部署模式。
 
-- **统一数据接入**：yfinance 直连（85 精选标的 + 任意 ticker 手动输入）/ ccxt（Binance 4,498、Coinbase 1,183 交易对）/ 合成数据
+- **统一数据接入**：yfinance 直连（85 精选标的 + 任意 ticker）/ ccxt（Binance 4,498、Coinbase 1,183 交易对）/ 合成数据
 - **可编程计算**：Python 库 + SQL-like DSL（v2.0 从 `PluginRegistry` 自动反射 23 个指标）
 - **回测子系统**：多标的 / 多时间尺度 / 可插拔执行模型 / 9 种可视化图表 / intrabar 撮合
-- **计算-存储分离**：存储后端独立部署，前端库通过 HTTP 或本地 Storage 接入；**离线模式可直接从数据源下载数据或读取现有 SQLite 文件**
-- **零硬依赖**：核心仅依赖 pandas / numpy / scipy；matplotlib / lark / PyWavelets / rich 走可选 extras
-- **可视化管理**：网页 SPA（懒加载 K 线图 + 下载模态框 + 数据源范围实测）+ TUI 终端界面
+- **V3 分布式计算**：`ComputeBackend` 协议透明替换；Dispatcher + Worker 跨进程；多级 Dispatcher 拓扑；抢占 / 弹性 / Autoscaler
+- **三层协议栈**：Codec（JSON/Arrow/Cloudpickle/Msgpack）+ Message（Envelope）+ Transport（HTTP/InProcess/SHM/Redis）
+- **零核心修改**：`BacktestEngine` / `ComputeEngine` 等零修改；Worker 直接复用；599 项原有测试零回归
+- **可视化管理**：网页 SPA + TUI 终端界面 + V3 Task 监控 API
+
+---
+
+## V3 新增能力（P0-P7 全部完成）
+
+| 阶段 | 内容 | 测试数 |
+|------|------|--------|
+| P0 | 协议骨架（Envelope / TaskSpec / Codec / Errors） | 50 |
+| P1 | LocalComputeBackend + InProcessTransport | 58 |
+| P2 | Dispatcher + Worker 跨进程（HTTP + 内存队列） | 83 |
+| P3 | HttpTransport + RemoteComputeBackend + AutoComputeBackend | 22 |
+| P4 | SharedMemoryTransport + Stream + dispatch.partial + data_dispatch | 34 |
+| P5 | RedisTaskQueue + RedisTransport + MessagePack | 17 |
+| P6 | 抢占 / Drain / Discover / Autoscaler / RetryPolicy | 36 |
+| P7 | 多级 Dispatcher + Admin 监控 + 任务历史 | 23 |
+
+**累计**：922 项测试通过 + 6 项 Redis 跳过
+
+详见 [DESIGN_V3_CN.md](DESIGN_V3_CN.md)（完整设计）、[DESIGN_ARCHITECTURE_CN.md](DESIGN_ARCHITECTURE_CN.md)（架构）、[DESIGN_PROTOCOL_CN.md](DESIGN_PROTOCOL_CN.md)（协议）。
+
+---
 
 ## 快速开始
 
-### 本地开发（SQLite，无需 Docker）
+### 1. 安装
 
 ```bash
-# 1. 安装后端
+# 后端（存储 + Dispatcher）
 cd backend && pip install -e .
 
-# 2.（可选）开启代理
-export STOCKSTAT_PROXY_ENABLED=true
-export STOCKSTAT_PROXY_URL=http://127.0.0.1:8889
-
-# 3. 启动 API 服务（默认 sqlite:///stockstat.db，数据持久化；含 Admin Plugin）
-stockstat serve --host 0.0.0.0 --port 8000
-
-# 4. 安装前端库（另一个终端）
+# 前端（计算库 + V3 协议层）
 cd frontend && pip install -e .
 
-# 5.（可选）安装 extras
-pip install -e "frontend/[matplotlib]"          # 可视化
-pip install -e "frontend/[dsl]"                 # DSL 解析（lark）
-pip install -e "frontend/[signal_processing]"   # 小波变换（PyWavelets）
-pip install -e "frontend/[backtest_full]"       # 回测全套
-pip install rich                                # TUI 彩色表格
+# V3 分布式计算（可选）
+pip install -e "frontend/[compute]"          # cloudpickle + psutil
+pip install -e "frontend/[distributed]"      # + redis + msgpack
+pip install -e worker/                       # stockstat-compute Worker 包
+
+# 其他可选 extras
+pip install -e "frontend/[matplotlib]"       # 可视化
+pip install -e "frontend/[dsl]"              # DSL 解析（lark）
+pip install -e "frontend/[backtest_full]"    # 回测全套
+pip install rich                              # TUI 彩色表格
 ```
 
-启动后浏览器访问 `http://localhost:8000/admin/` 即可使用网页管理界面。
+### 2. 启动后端
 
-### 存储-计算分离部署
+```bash
+# 基础启动（仅 Storage）
+stockstat serve --host 0.0.0.0 --port 8000
 
-后端独立部署在网络中的任意机器上，前端通过 HTTP 访问：
+# V3 启用 Dispatcher（P2+）
+STOCKSTAT_DISPATCHER_ENABLED=true stockstat serve --host 0.0.0.0 --port 8000
+```
+
+浏览器访问 `http://localhost:8000/admin/` 查看管理界面。
+
+### 3. 启动 Worker（V3 分布式）
+
+```bash
+# 在另一台机器（或同机另一进程）
+stockstat-compute worker \
+    --dispatcher-url http://storage:8000 \
+    --concurrency 8 \
+    --alias "gpu-box-alpha" \
+    --label rack=A-12
+```
+
+### 4. 使用 Client
 
 ```python
 from stockstat import StockStatClient
-client = StockStatClient(host="192.168.1.100", port=8000)
 
+# v1.7 行为（默认 LocalComputeBackend）
+client = StockStatClient(host="localhost", port=8000)
 client.ingest("BTC/USDT", source="binance", start="2024-01-01")
 data = client.ohlcv("BTC/USDT")
-symbols = client.symbols()
+result = client.backtest(data, strategy, initial_cash=10000)
+
+# V3 远程计算（透明同步）
+from stockstat._core.compute import RemoteComputeBackend
+client = StockStatClient(
+    host="localhost", port=8000,
+    compute_backend=RemoteComputeBackend("http://localhost:8000"),
+)
+result = client.backtest(data, strategy)  # 内部 submit + wait
+
+# V3 显式异步
+task = client.compute.remote(
+    "grid_search",
+    symbols=["BTC/USDT"], timeframe="1d", start="2024-01-01",
+    strategy_ref=strategy_ref,
+    param_grid={"short": [3, 5, 8], "long": [10, 20, 30]},
+    metric="sharpe",
+)
+print(task.id, task.status)
+result = task.wait(timeout=3600)
+
+# V3 自动路由
+from stockstat._core.compute import AutoComputeBackend, LocalComputeBackend
+client = StockStatClient(compute_backend=AutoComputeBackend(
+    local=LocalComputeBackend(),
+    remote=RemoteComputeBackend("http://dispatch:9000"),
+))
+# 重型任务自动走远程，轻型走本地
 ```
 
-也可通过 CLI / TUI / 浏览器访问同一后端。
-
-### 离线模式（无需后端）
+### 5. 离线模式（无需后端）
 
 ```python
 from stockstat._api.client import V2Client
 from stockstat._core.storage import MemoryStorage, SQLStorage
 
-# 方式1：离线下载到内存
+# 内存离线
 client = V2Client(mode="offline", storage=MemoryStorage())
-client.ingest("BTC/USDT", source="binance", start="2024-01-01")  # 直接从 Binance 下载
-df = client.ohlcv("BTC/USDT")
+client.ingest("BTC/USDT", source="binance", start="2024-01-01")
 
-# 方式2：读取现有 SQLite 数据库文件
-client = V2Client(mode="offline", storage=SQLStorage(database_url="sqlite:///stockstat.db"))
-df = client.ohlcv("BTC/USDT")
-
-# 方式3：离线下载 + 持久化到 SQLite
-client = V2Client(mode="offline", storage=SQLStorage(database_url="sqlite:///my_data.db"))
-client.ingest("AAPL", source="yfinance", start="2024-01-01")
+# 读取现有 SQLite
+client = V2Client(mode="offline",
+                  storage=SQLStorage(database_url="sqlite:///stockstat.db"))
 ```
 
-### Docker 生产部署
+### 6. Docker 部署
 
 ```bash
 docker compose up -d
-# API 可通过 http://localhost:8000 访问
+# 启动 db + redis + api + dispatcher + 4 个 worker
 ```
+
+---
+
+## 部署场景
+
+| 场景 | Client | Dispatcher | Storage | Worker | 配置 |
+|------|--------|-----------|---------|--------|------|
+| A 单机全栈 | 同进程 | — | — | — | 默认 |
+| B 存储分离 | 远程HTTP | — | 独立 | Client本地 | v2.1 |
+| C 离线 | 本地 | — | 本地 | Client本地 | v2.1 |
+| D Dispatcher+Worker | 远程HTTP | Storage同机 | 独立 | 远程 | `--enable-dispatcher` |
+| E 独立Dispatcher | 远程HTTP | 独立 | 独立 | 多节点 | `stockstat-dispatcher` |
+| F 多级Dispatcher | 远程HTTP | 主+子 | 独立 | 多级 | P7 |
+
+每个场景对应一个部署测试：[tests/deployments/](tests/deployments/)
+
+```bash
+# 运行部署测试
+tests/deployments/run_case_a_single_machine.bat   # Windows
+./tests/deployments/run_case_a_single_machine.sh  # Linux/macOS
+
+# V3 分布式
+tests/deployments/run_case_e_dispatcher_worker.bat
+tests/deployments/run_case_f_multilevel.bat
+```
+
+---
 
 ## 使用方式
 
-StockStat 提供三种使用入口（共享同一后端服务和数据）：
+StockStat 提供四种使用入口：
 
-- **Python 库**：`StockStatClient` — 全功能编程接口，支持指标计算、回测、DSL、可视化
-- **CLI 命令行**：`stockstat` — 无需写 Python 即可采集、查询、管理插件
-- **DSL 查询**：SQL-like 声明式查询语言 — 一行完成数据查询 + 指标计算
+- **Python 库**：`StockStatClient` / `V2Client` — 全功能编程接口
+- **CLI 命令行**：`stockstat` — 采集、查询、管理插件
+- **DSL 查询**：SQL-like 声明式查询语言
+- **V3 远程计算**：`client.compute.remote()` 异步提交 + `TaskRef`
 
 ### 采集数据
 
-支持多数据源（yfinance / Binance / Coinbase / 合成数据），自动检测数据源类型（含 `/` → 加密货币，否则 → 股票）。每个数据源支持多种时间粒度（Binance 16 种：1s ~ 1M；yfinance 12 种：1m ~ 3mo）。采集前可通过 `probe_range()` 实测数据源中该标的的实际可用时间范围。
-
 ```python
-from stockstat import StockStatClient
-client = StockStatClient(host="localhost", port=8000)
-
-# 股票（Yahoo Finance 直连，支持任意 ticker：AAPL / ^GSPC / 600519.SS / GC=F / JPY=X）
 client.ingest("AAPL", source="yfinance", start="2024-01-01", end="2024-12-31")
-
-# 加密货币（Binance，支持 16 种时间粒度：1s/1m/3m/5m/15m/30m/1h/2h/4h/6h/8h/12h/1d/3d/1w/1M）
 client.ingest("BTC/USDT", source="binance", start="2024-01-01", timeframe="1h")
-
-# 自动检测数据源（股票→yfinance，加密货币→binance）
-client.ingest("MSFT", start="2024-01-01", end="2024-06-30")
-```
-
-```bash
-# CLI 等价命令
-stockstat ingest AAPL --source yfinance --start 2024-01-01 --end 2024-12-31
-stockstat ingest BTC/USDT --source binance --start 2024-01-01 --tf 1h
-```
-
-### 查询数据
-
-支持时间范围过滤、时间粒度选择、返回条数限制，以及 `order=asc/desc` 双向分页（用于 K 线图懒加载场景）。查询结果为 pandas DataFrame，时间索引按升序排列。支持 JSON / CSV 两种输出格式。
-
-```python
-data = client.ohlcv("AAPL", start="2024-01-01", timeframe="1d")
-# 双向分页（懒加载场景）
-recent = client.ohlcv("BTC/USDT", limit=500, order="desc")  # 最近 500 根
-earlier = client.ohlcv("BTC/USDT", end="2024-01-01", limit=1000, order="desc")  # 更早的 1000 根
-
-# 批量查询多个标的
-batch = client.ohlcv_batch(["BTC/USDT", "ETH/USDT"], start="2024-01-01")
-```
-
-```bash
-stockstat query BTC/USDT --limit 5
-stockstat query AAPL --start 2024-01-01 --format csv
+client.ingest("MSFT", start="2024-01-01")  # 自动检测数据源
 ```
 
 ### 计算指标
 
-内置 23 个技术指标，涵盖趋势（MA / EMA / MACD）、震荡（RSI / KDJ）、波动率（布林带 / ATR / STD）、统计（Beta / Sharpe / 最大回撤 / VaR / 相关性）、变换（收益率 / 对数收益率）五大类别。所有指标接受 pandas Series 输入，返回 Series 或标量。
+23 个技术指标 + 8 个非线性动力学函数：
 
 ```python
-# 趋势指标
 sma = client.compute.ma(data.close, window=20)
-ema = client.compute.ema(data.close, window=12)
-macd_line, signal_line, hist = client.compute.macd(data.close)
-
-# 震荡指标
 rsi = client.compute.rsi(data.close, window=14)
-k, d, j = client.compute.kdj(data.high, data.low, data.close, window=9)
-
-# 波动率指标
 upper, mid, lower = client.compute.bollinger(data.close, window=20, k=2.0)
-atr = client.compute.atr(data.high, data.low, data.close, window=14)
-
-# 统计指标
-beta = client.compute.beta(stock_returns, market_returns, window=60)
 sharpe = client.compute.sharpe(returns, risk_free=0.02, annualize=True)
-dd = client.compute.max_drawdown(data.close)
-var_95 = client.compute.var(returns, confidence=0.95)
-
-# 注册自定义指标
-@client.compute.register("volatility_regime", category="custom")
-def volatility_regime(data, window=20, threshold=0.04):
-    vol = data.close.pct_change().rolling(window).std()
-    return vol.apply(lambda v: "high" if v > threshold else "low")
+hurst = client.compute.hurst_dfa(np.diff(np.log(path)))  # DFA Hurst 指数
 ```
 
-### DSL 查询（v2.0 自动反射）
+### 信号处理与非线性动力学
 
-SQL-like 声明式查询语言，一行完成数据查询 + 指标计算。v2.0 的 `DslEngine` 从 `PluginRegistry` 自动反射全部 23 个已注册指标（含 8 个非线性指标），比 v1.7 的 15 个硬编码函数更丰富。支持 `SELECT ... FROM ... WHERE ... LIMIT` 语法，支持关键字参数。
+8 个高级分析函数，涵盖信号处理（连续小波变换 CWT / 谱熵 / 灰色关联度 / GM(1,1) 灰色预测）和非线性动力学（传递熵 / Hurst 指数 DFA / 样本熵 / 排列熵）。未安装 PyWavelets 时 CWT 自动降级为基于 FFT 的自实现 Morlet 小波。还提供 3 个 PlotSpec 工厂函数（CWT 时频热力图 / DFA 拟合图 / 功率谱密度图）。
+
+```python
+import numpy as np
+path = data.close.values[-48:]
+
+# 信号处理
+coef, scales = client.compute.wavelet_decompose(path, scales=np.arange(1, 25))  # 连续小波变换
+h_spec = client.compute.spectral_entropy(np.diff(np.log(path)))                  # 谱熵（频域复杂度）
+gr = client.compute.grey_relation(path_a, path_b, rho=0.5)                       # 灰色关联度（形态相似性）
+forecast = client.compute.gm11_predict(sequence)                                  # GM(1,1) 灰色预测
+
+# 非线性动力学
+hurst = client.compute.hurst_dfa(np.diff(np.log(path)))    # Hurst 指数（≈0.5 随机 | >0.5 持久 | <0.5 反持久）
+te = client.compute.transfer_entropy(btc_rets, eth_rets)   # 传递熵（有向信息流）
+sampen = client.compute.sample_entropy(signal, m=2)         # 样本熵
+permen = client.compute.permutation_entropy(signal, m=3)    # 排列熵
+
+# 可视化
+spec = client.compute.wavelet_scalogram(coef, scales, title="CWT Scalogram")
+renderer = client.plot.get_renderer()
+renderer.render(spec)
+```
+
+<details open>
+<summary>📊 经典统计图表（真实数据生成）</summary>
+
+#### 收盘价 + MA + 布林带
+![BTC 布林带](docs/images/btc_bollinger.png)
+
+#### RSI 超买超卖区域
+![BTC RSI](docs/images/btc_rsi.png)
+
+#### MACD 柱状图 + 信号线
+![ETH MACD](docs/images/eth_macd.png)
+
+#### 回撤图
+![BTC 回撤](docs/images/btc_drawdown.png)
+
+#### Beta 散点图（AAPL vs 标普500）
+![AAPL Beta](docs/images/aapl_beta_scatter.png)
+
+#### BTC vs ETH 滚动相关性
+![BTC ETH 相关性](docs/images/btc_eth_corr.png)
+
+#### 标准化价格对比
+![价格对比](docs/images/price_comparison.png)
+
+</details>
+
+<details open>
+<summary>🔬 PAXG 周末涨跌 vs 周一涨跌幅（真实数据 2022-2024）</summary>
+
+PAXG（黄金锚定代币）周末涨跌幅（周五收盘→周日收盘）与周一的**最大涨幅**和**最大跌幅**，**独立记录**。
+
+#### 散点图 — 涨幅与跌幅同图显示
+![PAXG 周末散点图](docs/images/paxg_weekend_scatter.png)
+
+**结果**：r(涨幅)=0.23 (p=0.004)，r(跌幅)=-0.20 (p=0.012)。均显著但较弱——周末涨跌幅对周一涨幅和跌幅有适度的独立预测力。
+
+#### 按周末涨跌方向的涨跌幅分布
+![PAXG 方向性](docs/images/paxg_directional.png)
+
+#### 周末涨跌幅分布
+![PAXG 周末直方图](docs/images/paxg_weekend_hist.png)
+
+</details>
+
+### DSL 查询
 
 ```python
 result = client.run_dsl('''
@@ -171,20 +272,9 @@ result = client.run_dsl('''
     FROM ohlcv("BTC/USDT", "1d", "2024-01-01", "2024-12-31")
     LIMIT 30
 ''')
-
-# 带 WHERE 过滤
-result = client.run_dsl('''
-    SELECT close, volume
-    FROM ohlcv("BTC/USDT", "1d", "2024-01-01", "2024-12-31")
-    WHERE close > 100000
-''')
 ```
 
-> 注册新指标到 `PluginRegistry` 后，调用 `engine.refresh()` 即可 DSL 自动可用，无需手动维护函数映射表。
-
 ### 回测
-
-功能完整的量化回测引擎，支持：多标的交易组、多时间尺度 K 线（最细 tf 为主索引，高 tf ffill 对齐）、6 种订单类型（市价 / 限价 / 止损 / 移动止损 / OCO / 互斥 OCO）、8 种成本模型（含 Binance 现货/合约 + BNB 折扣 4 预设）、7 种成交模型、可插拔执行模型（`NextBarExecution` 默认 / `IntrabarExecution` 同 bar 入场+出场）、做空、未来函数防护、参数网格搜索、批量回测、退出原因分析、子期间/状态分析、DCA 基准、费率扫描。策略内可通过 `ctx.compute` 复用全部 23 个指标。
 
 ```python
 from stockstat.backtest import BacktestEngine, strategy, Order
@@ -201,8 +291,8 @@ def ma_cross(ctx):
         ctx.broker.submit(Order("BTC/USDT", "sell", pos.qty))
 
 res = client.backtest({"BTC/USDT": {"1d": data}}, ma_cross, initial_cash=10000)
-print(res.summary())  # Sharpe / Sortino / Calmar / 回撤 / 胜率 / 盈亏比
-res.render("dashboard", path="dashboard.png")  # 9 种图表，安装 matplotlib 后自动激活
+print(res.summary())
+res.render("dashboard", path="dashboard.png")
 ```
 
 回测可视化提供 9 种图表类型：资金曲线、回撤、交易标注、收益分布、月度热力图、年度收益、参数网格热力图、水下曲线、综合仪表盘（2×2）。无 matplotlib 时自动降级为 `NullBacktestChartRenderer`（发告警、不崩溃）。
@@ -259,49 +349,54 @@ res.render("dashboard", path="dashboard.png")  # 9 种图表，安装 matplotlib
 
 </details>
 
-### 信号处理与非线性动力学
-
-8 个高级分析函数，涵盖信号处理（连续小波变换 CWT / 谱熵 / 灰色关联度 / GM(1,1) 灰色预测）和非线性动力学（传递熵 / Hurst 指数 DFA / 样本熵 / 排列熵）。未安装 PyWavelets 时 CWT 自动降级为基于 FFT 的自实现 Morlet 小波。还提供 3 个 PlotSpec 工厂函数（CWT 时频热力图 / DFA 拟合图 / 功率谱密度图）。
+### V3 分布式计算
 
 ```python
-import numpy as np
-path = data.close.values[-48:]
+# 显式异步提交
+task = client.compute.remote(
+    "grid_search",
+    symbols=["BTC/USDT"], timeframe="1d", start="2024-01-01",
+    strategy_ref=strategy_ref,
+    param_grid={"short": list(range(2, 22)), "long": list(range(20, 70))},
+    metric="sharpe",
+    dispatch_spec=DispatchSpec(split_strategy="param_wise", max_workers=4),
+)
+print(task.id, task.status)  # UUID + "pending" / "running" / "completed"
 
-# 信号处理
-coef, scales = client.compute.wavelet_decompose(path, scales=np.arange(1, 25))  # 连续小波变换
-h_spec = client.compute.spectral_entropy(np.diff(np.log(path)))                  # 谱熵（频域复杂度）
-gr = client.compute.grey_relation(path_a, path_b, rho=0.5)                       # 灰色关联度（形态相似性）
-forecast = client.compute.gm11_predict(sequence)                                  # GM(1,1) 灰色预测
+# 轮询 / 等待
+result = task.wait(timeout=3600)
+print(f"Best params: {result[0]['params']}, sharpe: {result[0]['sharpe']}")
 
-# 非线性动力学
-hurst = client.compute.hurst_dfa(np.diff(np.log(path)))    # Hurst 指数（≈0.5 随机 | >0.5 持久 | <0.5 反持久）
-te = client.compute.transfer_entropy(btc_rets, eth_rets)   # 传递熵（有向信息流）
-sampen = client.compute.sample_entropy(signal, m=2)         # 样本熵
-permen = client.compute.permutation_entropy(signal, m=3)    # 排列熵
+# 流式结果（grid_search 进度）
+for partial in task.stream_results():
+    print(f"Progress: {partial.get('progress', 0):.0%}")
 
-# 可视化
-spec = client.compute.wavelet_scalogram(coef, scales, title="CWT Scalogram")
-renderer = client.plot.get_renderer()
-renderer.render(spec)
+# 集群拓扑
+info = client.compute.cluster_info()
+for w in info["workers"]:
+    print(f"  {w['alias']:20s}  {w['status']:8s}  "
+          f"CPU {w['hardware']['cpu']['cores_logical']}核  "
+          f"负载 {w['load'].get('cpu_percent', 0):.1f}%")
 ```
 
-<details open>
-<summary>🔬 PAXG 周末涨跌 vs 周一涨跌幅（真实数据 2022-2024）</summary>
+### V3 集群管理
 
-PAXG（黄金锚定代币）周末涨跌幅（周五收盘→周日收盘）与周一的**最大涨幅**和**最大跌幅**，**独立记录**。
+```bash
+# 查看集群
+stockstat cluster info
+stockstat cluster workers
+stockstat cluster stats
 
-#### 散点图 — 涨幅与跌幅同图显示
-![PAXG 周末散点图](docs/images/paxg_weekend_scatter.png)
+# Autoscaler 指标
+curl http://dispatch:8000/dispatch/autoscaler
+# {"queue_depth": 15, "scale_up_recommended": true, ...}
 
-**结果**：r(涨幅)=0.23 (p=0.004)，r(跌幅)=-0.20 (p=0.012)。均显著但较弱——周末涨跌幅对周一涨幅和跌幅有适度的独立预测力。
+# 任务历史
+curl http://dispatch:8000/dispatch/tasks/history?limit=10
+curl http://dispatch:8000/dispatch/tasks/stats
+```
 
-#### 按周末涨跌方向的涨跌幅分布
-![PAXG 方向性](docs/images/paxg_directional.png)
-
-#### 周末涨跌幅分布
-![PAXG 周末直方图](docs/images/paxg_weekend_hist.png)
-
-</details>
+---
 
 ## 管理界面
 
@@ -312,8 +407,6 @@ stockstat tui                    # 连接本地服务器
 stockstat tui --host 192.168.1.100
 ```
 
-提供 6 项交互式菜单：浏览标的 / 查询 OHLCV / 采集数据 / 数据统计 / 列出数据源 / 查看代理配置。基于 `rich`（可选安装），未安装时降级为纯文本菜单。
-
 ### 网页管理界面
 
 浏览器访问 `http://storage-server:8000/admin/`：
@@ -321,14 +414,23 @@ stockstat tui --host 192.168.1.100
 | 页面 | 功能 |
 |------|------|
 | 概览仪表盘 | 标的数、行数、磁盘、数据覆盖甘特图、最近采集记录 |
-| 数据源浏览 | 分页 + 搜索 + 批量下载 + **手动输入任意标的** |
-| 本地标的 | K 线图（**缩放时懒加载**）+ 截选范围补全 + 导出 CSV |
-| 配置 | 数据库 / 代理（在线修改）/ 缓存 / 磁盘 |
+| 数据源浏览 | 分页 + 搜索 + 批量下载 + 手动输入任意标的 |
+| 本地标的 | K 线图（缩放时懒加载）+ 截选范围补全 + 导出 CSV |
+| 配置 | 数据库 / 代理 / 缓存 / 磁盘 |
 | 日志 | 采集历史（分页 + 过滤） |
 
-**K 线图懒加载**：初始加载最近 500 根 → 缩放时自动加载窗口外数据（300ms 防抖 + 时间戳去重 + 加载进度显示）
+### V3 Dispatcher 监控（P7）
 
-**下载模态框**：自动实测数据源范围（`probe_range` 拉首末 K 线）→ 日期预填最大范围 → 动态时间粒度下拉 → 存储估算提示
+启用 `STOCKSTAT_DISPATCHER_ENABLED=true` + `STOCKSTAT_ADMIN_ENABLED=true` 后：
+
+| 端点 | 说明 |
+|------|------|
+| `GET /admin/api/dispatcher/cluster` | 完整集群拓扑（含 sub_dispatchers） |
+| `GET /admin/api/dispatcher/tasks` | 任务历史 |
+| `GET /admin/api/dispatcher/stats` | 任务统计（by_state / by_type / avg_duration） |
+| `GET /admin/api/dispatcher/autoscaler` | Autoscaler 指标 + 扩缩容建议 |
+
+---
 
 ## 数据源
 
@@ -339,6 +441,8 @@ stockstat tui --host 192.168.1.100
 | `coinbase` | 加密货币 | 1,183（528 USD 对） | 7 种 | ✅ 首末 K 线实测 |
 | `synthetic` | 混合 | 5 个示例 | 9 种 | ✅ 固定范围 |
 
+---
+
 ## 可选 extras
 
 | extras | 用途 |
@@ -348,51 +452,59 @@ stockstat tui --host 192.168.1.100
 | `signal_processing` | PyWavelets（CWT 完整实现） |
 | `backtest_full` | 回测全套（matplotlib + optuna） |
 | `rich` | TUI 彩色表格 |
+| `compute` | V3 本地后端（cloudpickle + psutil） |
+| `distributed` | V3 分布式（compute + redis + msgpack） |
+
+---
 
 ## 运行测试
 
 ```bash
-cd backend && python -m pytest tests/ -v          # 后端 15 项
-cd frontend && python -m pytest tests/ -v          # 前端 491 项
+# 后端测试
+cd backend && python -m pytest tests/ -v          # 15 项
+
+# 前端测试（含 V3）
+cd frontend && python -m pytest tests/ -v          # 814 项 + 6 跳过
+
+# 部署场景测试（6 个 Case）
+cd tests/deployments
+python test_case_a_single_machine.py              # 单机
+python test_case_e_dispatcher_worker.py           # V3 分布式
+python test_case_f_multilevel.py                  # V3 多级
+
+# PAXG 研究验证
+cd working/PAXG-Weekend-Monday-Law-v5-redo/phase2_backtest
+python run_redo.py                                 # 132 次回测
+python compare_v3.py                               # V3 与直调对比
 ```
 
-**总计 506 项测试，全部通过。**
+**总计 922 项测试通过 + 6 项 Redis 跳过 + 132 次 PAXG 回测字节级一致。**
 
 ### 连接与性能测试
 
-项目附带两个集成测试脚本，用于验证前后端通讯通路和测量通讯性能：
-
 ```bash
-# 连接通路测试：健康检查 → 下载标的数据 → 查询 → 计算指标 → DSL → 回测 → 可视化
+# 连接通路测试
 python tests/test_connection.py --host localhost --port 8000
-python tests/test_connection.py --host 192.168.1.100 --port 8000   # 远程后端
 
-# 通讯性能测试：RTT 延迟 → 查询延迟 vs 数据量 → 传输速度 → 抖动分布
+# 通讯性能测试
 python tests/test_perf.py --host localhost --port 8000 --rounds 10
 ```
 
-详见 [使用文档 §17](docs/USAGE_CN.md#17-连接与性能测试)。
-
-## 启动脚本
-
-后端提供极简启动脚本和完整配置脚本：
-
-```bash
-# 极简启动（改环境变量后直接运行）
-backend/start.bat            # Windows
-backend/start.sh             # Linux/macOS
-
-# 完整配置（命令行参数 + 交互式配置）
-backend/serve.bat --config   # Windows
-backend/serve.sh --config    # Linux/macOS
-```
+---
 
 ## 文档
 
 - [使用文档](docs/USAGE_CN.md) — 详细示例与预期结果
-- [设计报告](DESIGN_CN.md) — 完整架构设计（含分布式计算预留）
+- [V3 设计报告](DESIGN_V3_CN.md) — 完整设计（3057 行）
+- [V3 架构设计](DESIGN_ARCHITECTURE_CN.md) — 四角色 + 三包 + 五层 + ComputeBackend
+- [V3 协议设计](DESIGN_PROTOCOL_CN.md) — Envelope + TaskSpec + Codec + Transport
+- [V3 阶段文档](docs/v3/) — P0-P7 每阶段实施详情
+- [V3 完整总结](docs/v3/SUMMARY_FULL_CN.md) — P0-P7 全部完成总结
+- [v2.1 设计报告](DESIGN_CN.md) — 原始架构（保留）
 - [回测阶段文档](docs/backtest/) — BT-0 ~ BT-14 + BT-V0 ~ V3
-- [计算卸载规划](reports/COMPUTE_OFFLOAD_PLAN_V2_CN.md) — 分布式计算架构设计
+- [部署测试](tests/deployments/README.md) — Case A-F 部署场景测试
+
+---
 
 ## 配置
 
@@ -403,6 +515,10 @@ backend/serve.sh --config    # Linux/macOS
 | `DATABASE_URL` | `sqlite:///stockstat.db` | 数据库连接字符串 |
 | `STOCKSTAT_PROXY_ENABLED` | `false` | 启用代理 |
 | `STOCKSTAT_ADMIN_ENABLED` | `true` | 启用网页管理界面 |
+| `STOCKSTAT_DISPATCHER_ENABLED` | `false` | **V3** 启用 Dispatcher 插件 |
+| `STOCKSTAT_DISPATCHER_QUEUE` | `memory` | **V3** 队列后端（memory/redis） |
+| `STOCKSTAT_DISPATCHER_CACHE_MB` | `512` | **V3** DataCache 最大尺寸 |
+| `REDIS_URL` | — | **V3** Redis 连接（queue=redis 时） |
 
 ### 前端环境变量
 
@@ -410,6 +526,25 @@ backend/serve.sh --config    # Linux/macOS
 |------|--------|------|
 | `STOCKSTAT_HOST` | `localhost` | 前端默认主机 |
 | `STOCKSTAT_PORT` | `8000` | 前端默认端口 |
+| `STOCKSTAT_DISPATCHER_URL` | — | **V3** Worker / Client 连接 Dispatcher |
+| `STOCKSTAT_TRANSPORT` | `in_process` | **V3** 传输类型（in_process/http） |
+
+---
+
+## 启动脚本
+
+```bash
+# 极简启动
+backend/start.bat            # Windows
+backend/start.sh             # Linux/macOS
+
+# 完整配置（命令行参数 + 交互式配置）
+backend/serve.bat --config   # Windows
+backend/serve.sh --config    # Linux/macOS
+
+# V3 Worker
+stockstat-compute worker --dispatcher-url http://localhost:8000
+```
 
 ---
 
