@@ -28,6 +28,10 @@ def create_app() -> FastAPI:
             redis_url=settings.redis_url or None,
             cache_size_mb=settings.dispatcher_cache_size_mb,
         )
+        # P7: wire the dispatcher into Admin UI for monitoring
+        if settings.admin_enabled:
+            from .plugins.admin.router import set_dispatcher_ref
+            set_dispatcher_ref(app.state.dispatcher)
 
     return app
 

@@ -6,9 +6,10 @@ The protocol layer sits between Codec (encoding) and Transport
 """
 from .envelope import Envelope, Headers, PROTOCOL_NAME, PROTOCOL_VERSION
 from . import messages
+from .retry import RetryPolicy
 
 __all__ = [
     "Envelope", "Headers",
     "PROTOCOL_NAME", "PROTOCOL_VERSION",
-    "messages",
+    "messages", "RetryPolicy",
 ]

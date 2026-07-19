@@ -45,12 +45,18 @@ class Dispatcher:
     Thread-safe; designed to run inside a FastAPI app. Workers pull
     tasks via ``assign_task()``; results are posted back via
     ``on_complete()`` / ``on_fail()``.
+
+    P7: supports multi-level Dispatcher topology — sub-Dispatchers
+    can register themselves, and ``cluster_info`` includes the full
+    hierarchy.
     """
 
     def __init__(self, *, queue: TaskQueue = None, storage_url: str = None,
                  cache_dir: str = None, cache_size_mb: int = 512,
                  offline_timeout: float = 30.0,
-                 storage_app=None):
+                 storage_app=None,
+                 alias: str = "dispatch-primary",
+                 parent_url: str = None):
         self._queue = queue or MemoryTaskQueue()
         self._storage_url = storage_url or "http://localhost:8000"
         self._storage_app = storage_app  # FastAPI app for same-process data access
@@ -59,6 +65,12 @@ class Dispatcher:
         self._tasks: dict[str, _TaskState] = {}
         self._lock = threading.Lock()
         self._started_at = time.time()
+        # P7: multi-level Dispatcher state
+        self._alias = alias
+        self._parent_url = parent_url  # if set, this is a sub-dispatcher
+        self._sub_dispatchers: dict[str, dict] = {}  # sub_id -> {alias, address, status}
+        self._task_history: list[dict] = []  # P7: task history for Admin UI
+        self._history_max = 1000  # keep last 1000 completed tasks
         # Start background heartbeat checker
         self._checker = threading.Thread(target=self._check_loop, daemon=True)
         self._checker.start()
@@ -96,17 +108,43 @@ class Dispatcher:
         """Return the merged result. Raises if not ready."""
         from stockstat._core.errors import TaskNotReadyError
         from stockstat._core.contracts.compute import TaskState
+        import base64
         state = self._get_task(task_id)
         if state.info.state != TaskState.COMPLETED:
             raise TaskNotReadyError(
                 f"Task {task_id} is {state.info.state.value}",
                 context={"task_id": task_id, "state": state.info.state.value},
             )
+        # merged_result may be either a Python object (decoded) or a
+        # base64 string (single-slice pass-through). Normalise to base64
+        # so the wire format is consistent.
+        merged = state.merged_result
+        if isinstance(merged, str) and merged.startswith("cloudpickle:"):
+            # Already encoded (uncommon path)
+            return {
+                "task_id": task_id, "state": "completed",
+                "result_codec": "cloudpickle", "result": merged,
+            }
+        if isinstance(merged, (bytes, bytearray)):
+            b64 = base64.b64encode(merged).decode("ascii")
+        elif isinstance(merged, str):
+            # Heuristic: assume already-base64 if it decodes cleanly
+            try:
+                base64.b64decode(merged, validate=True)
+                b64 = merged
+            except Exception:
+                # Plain string — cloudpickle-encode then base64
+                from stockstat._core.codec import CloudpickleCodec
+                b64 = base64.b64encode(CloudpickleCodec().encode(merged)).decode("ascii")
+        else:
+            # Python object — cloudpickle-encode then base64
+            from stockstat._core.codec import CloudpickleCodec
+            b64 = base64.b64encode(CloudpickleCodec().encode(merged)).decode("ascii")
         return {
             "task_id": task_id,
             "state": "completed",
             "result_codec": "cloudpickle",
-            "result": state.merged_result,
+            "result": b64,
         }
 
     def cancel(self, task_id: str) -> bool:
@@ -122,7 +160,10 @@ class Dispatcher:
 
     def cluster_info(self, include_offline: bool = False,
                      filter_labels: dict = None) -> dict:
-        """Return cluster topology — V2 §12.13.4."""
+        """Return cluster topology — V2 §12.13.4.
+
+        P7: includes ``sub_dispatchers`` field for multi-level topology.
+        """
         all_workers = self._workers.list_all() if include_offline else self._workers.list_online()
         if filter_labels:
             all_workers = [w for w in all_workers
@@ -149,16 +190,107 @@ class Dispatcher:
         return {
             "dispatcher": {
                 "id": "dispatcher-01",
-                "alias": "dispatch-primary",
+                "alias": self._alias,
                 "address": self._storage_url,
                 "status": "online",
                 "uptime_s": int(time.time() - self._started_at),
                 "queue_depth": self._queue.size(),
                 "cache_size_mb": round(self._cache.size_mb, 2),
                 "cache_hit_rate": round(self._cache.hit_rate, 4),
+                "parent_url": self._parent_url,  # P7: parent Dispatcher URL
             },
             "workers": workers_list,
+            "sub_dispatchers": list(self._sub_dispatchers.values()),  # P7
             "stats": self._workers.stats(),
+        }
+
+    # ── P7: Multi-level Dispatcher ────────────────────────────
+
+    def register_sub_dispatcher(self, sub_id: str, alias: str,
+                                  address: str, parent_url: str = None) -> dict:
+        """P7: a sub-Dispatcher registers itself with the parent.
+
+        Sub-Dispatchers forward tasks they can't handle locally to
+        their parent. The parent includes them in cluster_info so
+        Clients can see the full topology.
+        """
+        with self._lock:
+            self._sub_dispatchers[sub_id] = {
+                "id": sub_id,
+                "alias": alias,
+                "address": address,
+                "status": "online",
+                "registered_at": datetime.utcnow().isoformat() + "Z",
+            }
+        return {"status": "registered", "sub_id": sub_id}
+
+    def unregister_sub_dispatcher(self, sub_id: str) -> dict:
+        """P7: sub-Dispatcher graceful removal."""
+        with self._lock:
+            self._sub_dispatchers.pop(sub_id, None)
+        return {"status": "unregistered"}
+
+    def list_sub_dispatchers(self) -> list:
+        """P7: return list of registered sub-Dispatchers."""
+        return list(self._sub_dispatchers.values())
+
+    # ── P7: Task history for Admin UI ─────────────────────────
+
+    def _record_history(self, state: _TaskState) -> None:
+        """Record a completed/failed task in history (for Admin UI)."""
+        try:
+            entry = {
+                "task_id": state.spec.task_id,
+                "task_type": state.spec.compute_spec.task_type,
+                "state": state.info.state.value,
+                "created_at": state.info.created_at.isoformat() if state.info.created_at else None,
+                "started_at": state.info.started_at.isoformat() if state.info.started_at else None,
+                "finished_at": state.info.finished_at.isoformat() if state.info.finished_at else None,
+                "worker_id": state.info.worker_id,
+                "error": state.info.error,
+                "trace_id": state.spec.trace_id,
+            }
+            self._task_history.append(entry)
+            # Trim to max size
+            if len(self._task_history) > self._history_max:
+                self._task_history = self._task_history[-self._history_max:]
+        except Exception:
+            pass
+
+    def get_task_history(self, limit: int = 100,
+                          state_filter: str = None) -> list:
+        """P7: return recent task history for Admin UI."""
+        history = list(self._task_history[-limit:])
+        if state_filter:
+            history = [h for h in history if h["state"] == state_filter]
+        return history
+
+    def get_task_stats(self) -> dict:
+        """P7: aggregate task statistics for Admin UI dashboard."""
+        from collections import Counter
+        history = self._task_history
+        total = len(history)
+        state_counts = Counter(h["state"] for h in history)
+        type_counts = Counter(h["task_type"] for h in history)
+        # Compute avg duration for completed tasks
+        durations = []
+        for h in history:
+            if (h["state"] == "completed" and h["started_at"]
+                    and h["finished_at"]):
+                try:
+                    from datetime import datetime
+                    started = datetime.fromisoformat(h["started_at"])
+                    finished = datetime.fromisoformat(h["finished_at"])
+                    durations.append((finished - started).total_seconds())
+                except Exception:
+                    pass
+        avg_duration = sum(durations) / len(durations) if durations else 0
+        return {
+            "total_tasks": total,
+            "by_state": dict(state_counts),
+            "by_type": dict(type_counts),
+            "avg_duration_s": round(avg_duration, 3),
+            "history_size": total,
         }
 
     # ── Worker-facing API ─────────────────────────────────────
@@ -205,10 +337,17 @@ class Dispatcher:
                 parent_state.info.worker_id = worker_id
                 parent_state.info.slice_id = spec.task_id
             self._workers.increment_active(worker_id)
+            # Build assignment payload — data is base64-encoded for JSON transport
+            import base64
+            data_bytes = self._cache.fetch_ref(data_ref) if data_ref else None
+            data_b64 = None
+            if data_bytes is not None:
+                data_b64 = base64.b64encode(data_bytes).decode("ascii")
             return {
                 "task_spec": spec.to_dict(),
                 "data_ref": data_ref,
-                "data": self._cache.fetch_ref(data_ref) if data_ref else None,
+                "data": data_b64,
+                "data_codec": "cloudpickle" if data_b64 else None,
             }
         return None
 
@@ -221,14 +360,25 @@ class Dispatcher:
         if state is None:
             return {"status": "unknown_task"}
         self._workers.decrement_active(worker_id, completed=True)
+        # Decode the result if it arrived as base64-encoded cloudpickle bytes
+        decoded = result
+        if isinstance(result, str) and result_codec == "cloudpickle":
+            import base64
+            try:
+                raw = base64.b64decode(result)
+                from stockstat._core.codec import CloudpickleCodec
+                decoded = CloudpickleCodec().decode(raw)
+            except Exception:
+                decoded = result  # keep as-is on decode failure
         with state.lock:
-            state.partial_results[slice_id] = result
+            state.partial_results[slice_id] = decoded
             # Check if all slices are done
             if len(state.partial_results) >= len(state.slices):
                 state.merged_result = self._merge_results(state)
                 state.info.state = TaskState.COMPLETED
                 state.info.progress = 1.0
                 state.info.finished_at = datetime.utcnow()
+                self._record_history(state)  # P7: record for Admin UI
         return {"status": "ok", "completed": state.info.state == TaskState.COMPLETED}
 
     def on_fail(self, worker_id: str, slice_id: str, error: str,
@@ -247,6 +397,7 @@ class Dispatcher:
             state.info.error = error
             state.info.error_code = "WORKER_FAILED"
             state.info.finished_at = datetime.utcnow()
+            self._record_history(state)  # P7: record for Admin UI
         return {"status": "failed_recorded"}
 
     def on_partial(self, worker_id: str, slice_id: str, partial: Any) -> dict:
@@ -260,6 +411,113 @@ class Dispatcher:
             state.stream_partials = []
         state.stream_partials.append(partial)
         return {"status": "ok"}
+
+    # ── P6: Preemption / Drain / Discovery ────────────────────
+
+    def preempt(self, slice_id: str, worker_id: str = "") -> dict:
+        """V2 §13.3: preempt a running task on a Worker.
+
+        The Worker saves a checkpoint and stops the task. Dispatcher
+        marks the slice as 'preempted' so it can be resumed later.
+
+        Note: actual preemption requires the Worker to cooperatively
+        check the preempt flag. Dispatcher cannot forcibly stop a
+        thread on a remote Worker.
+        """
+        from stockstat._core.contracts.compute import TaskState
+        parent_id = slice_id.split("-s")[0] if "-s" in slice_id else slice_id
+        state = self._tasks.get(parent_id)
+        if state is None:
+            return {"status": "unknown_task"}
+        # Mark slice as preempted
+        with state.lock:
+            state.info.state = TaskState.PENDING  # back to pending
+            state.info.worker_id = None
+            state.assigned.pop(slice_id, None)
+        # In a real deployment, Dispatcher would forward the preempt
+        # message to the Worker via HTTP. For now, just acknowledge.
+        return {"status": "preempted", "slice_id": slice_id}
+
+    def resume(self, slice_id: str, worker_id: str = "") -> dict:
+        """V2 §13.3: resume a preempted task from checkpoint."""
+        parent_id = slice_id.split("-s")[0] if "-s" in slice_id else slice_id
+        state = self._tasks.get(parent_id)
+        if state is None:
+            return {"status": "unknown_task"}
+        # Re-enqueue the slice for any Worker to pick up
+        # (the Worker that has the checkpoint should ideally pick it up)
+        for slice_spec in state.slices:
+            if slice_spec.task_id == slice_id:
+                self._queue.enqueue(slice_spec)
+                return {"status": "resumed", "slice_id": slice_id}
+        return {"status": "slice_not_found"}
+
+    def drain_worker(self, worker_id: str) -> dict:
+        """V2 §13.4: tell a Worker to gracefully stop accepting tasks.
+
+        Worker will finish active tasks, then unregister.
+        """
+        w = self._workers.get(worker_id)
+        if w is None:
+            return {"status": "unknown_worker"}
+        w.status = "draining"
+        return {"status": "draining", "worker_id": worker_id}
+
+    def discover(self) -> dict:
+        """V2 §13.4: service discovery — return available Dispatchers.
+
+        For single-Dispatcher deployments, returns just self. P7
+        (multi-level Dispatcher) will return parent + children.
+        """
+        return {
+            "dispatchers": [{
+                "id": "dispatcher-01",
+                "alias": "dispatch-primary",
+                "address": self._storage_url,
+                "status": "online",
+            }],
+            "count": 1,
+        }
+
+    # ── Autoscaler hooks (P6) ─────────────────────────────────
+
+    def get_autoscaler_metrics(self) -> dict:
+        """Return metrics for an external Autoscaler to consume.
+
+        The Autoscaler (K8s / Docker Swarm / custom script) reads
+        these metrics to decide whether to scale Workers up or down.
+
+        Scale-up signals:
+        - ``queue_depth`` > threshold (e.g. 10)
+        - ``available_concurrency`` == 0 (and there are workers)
+
+        Scale-down signals:
+        - ``queue_depth`` == 0
+        - ``available_concurrency`` > 2 * active_tasks (over-provisioned)
+        """
+        stats = self._workers.stats()
+        has_workers = stats["online_workers"] > 0
+        return {
+            "queue_depth": self._queue.size(),
+            "active_tasks": stats["active_tasks"],
+            "total_concurrency": stats["total_concurrency"],
+            "available_concurrency": stats["available_concurrency"],
+            "online_workers": stats["online_workers"],
+            "scale_up_recommended": (
+                # Deep queue — need more workers
+                self._queue.size() > 10
+                # All workers busy (only relevant if there are workers)
+                or (has_workers and stats["available_concurrency"] == 0)
+            ),
+            "scale_down_recommended": (
+                # No queued tasks
+                self._queue.size() == 0
+                # Over-provisioned: 2x more capacity than active
+                and stats["available_concurrency"] > 2 * max(1, stats["active_tasks"])
+                # More than 1 worker (don't scale to zero)
+                and stats["online_workers"] > 1
+            ),
+        }
 
     # ── Data prefetch ─────────────────────────────────────────
 

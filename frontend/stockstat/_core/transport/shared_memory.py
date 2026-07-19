@@ -21,7 +21,7 @@ class SharedMemoryTransport:
     avoid serialization/copy overhead on the same host.
     """
 
-    name = "shared_memory"
+    _name = "shared_memory"
 
     def __init__(self, underlying=None, *, inline_threshold: int = 10 * 1024 * 1024):
         """Args:

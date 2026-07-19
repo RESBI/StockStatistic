@@ -51,9 +51,40 @@ class Worker:
         self._completed = 0
         self._failed = 0
         self._total_duration = 0.0
+        # P6: preemption + drain state
+        self._draining = False
+        self._preempted: set[str] = set()
+        self._registered = False
+        self._bg_thread = None
 
     def start(self) -> None:
-        """Start the Worker: register, heartbeat, poll loop."""
+        """Start the Worker: register, heartbeat, poll loop (blocking)."""
+        self._start_background()
+        try:
+            # Wait until stop() is called (or KeyboardInterrupt)
+            while not self._stopping.is_set():
+                time.sleep(0.5)
+        except (KeyboardInterrupt, SystemExit):
+            self._stopping.set()
+        finally:
+            self._unregister()
+            self._executor_pool.shutdown(wait=True)
+            print(f"[Worker] Stopped: completed={self._completed}, failed={self._failed}")
+
+    def start_background(self) -> None:
+        """Start the Worker in a background thread (non-blocking).
+
+        For tests and embedding in a larger process. Caller is
+        responsible for calling ``stop()`` for graceful shutdown.
+        """
+        self._bg_thread = threading.Thread(
+            target=self._start_background, daemon=True,
+            name=f"worker-{self._alias}",
+        )
+        self._bg_thread.start()
+
+    def _start_background(self) -> None:
+        """Internal: register, start heartbeat, run poll loop."""
         from .register import detect_hardware
         print(f"[Worker] Starting: alias={self._alias}, concurrency={self._concurrency}")
         print(f"[Worker] Dispatcher: {self._url}")
@@ -62,21 +93,28 @@ class Worker:
         # Register
         hw = detect_hardware()
         import httpx
-        resp = httpx.post(f"{self._url}/dispatch/register", json={
-            "worker_id": self._worker_id,
-            "alias": self._alias,
-            "address": socket.gethostname(),
-            "port": 0,
-            "concurrency": self._concurrency,
-            "hardware": hw,
-            "capabilities": self._capabilities,
-            "stockstat_version": _get_version(),
-            "labels": self._labels,
-            "preemptable": self._preemptable,
-        }, timeout=10)
-        if resp.status_code != 200:
-            raise RuntimeError(f"Registration failed: {resp.status_code} {resp.text}")
+        try:
+            resp = httpx.post(f"{self._url}/dispatch/register", json={
+                "worker_id": self._worker_id,
+                "alias": self._alias,
+                "address": socket.gethostname(),
+                "port": 0,
+                "concurrency": self._concurrency,
+                "hardware": hw,
+                "capabilities": self._capabilities,
+                "stockstat_version": _get_version(),
+                "labels": self._labels,
+                "preemptable": self._preemptable,
+            }, timeout=10)
+            if resp.status_code != 200:
+                raise RuntimeError(
+                    f"Registration failed: {resp.status_code} {resp.text}"
+                )
+        except Exception as e:
+            print(f"[Worker] Registration error: {e}")
+            raise
         print(f"[Worker] Registered: worker_id={self._worker_id}")
+        self._registered = True
 
         # Start heartbeat thread
         hb = threading.Thread(target=self._heartbeat_loop, daemon=True)
@@ -90,9 +128,64 @@ class Worker:
             self._executor_pool.shutdown(wait=True)
             print(f"[Worker] Stopped: completed={self._completed}, failed={self._failed}")
 
+    def wait_registered(self, timeout: float = 10.0) -> bool:
+        """Wait until the worker has registered with the Dispatcher."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if getattr(self, "_registered", False):
+                return True
+            time.sleep(0.05)
+        return getattr(self, "_registered", False)
+
     def stop(self) -> None:
-        """Signal the Worker to stop (graceful drain)."""
+        """Signal the Worker to stop (graceful drain).
+
+        P6: marks the worker as ``draining`` — stops accepting new tasks,
+        waits for active tasks to complete, then exits.
+        """
         self._stopping.set()
+        self._draining = True
+
+    def drain(self) -> None:
+        """V2 §13.4: graceful drain — same as stop().
+
+        Distinct method name for the ``dispatch.drain`` message handler.
+        """
+        self.stop()
+
+    def preempt(self, slice_id: str) -> bool:
+        """V2 §13.3: preempt a running task.
+
+        Saves a checkpoint (if the handler supports it) and stops the task.
+        Returns True if preemption was accepted, False if not supported.
+
+        P6 implementation: marks the task's future for cancellation;
+        the handler must cooperatively check ``cancel_requested`` and
+        save a checkpoint before exiting.
+        """
+        future = self._active_futures.get(slice_id)
+        if future is None:
+            return False
+        # Mark for cooperative cancellation
+        self._preempted.add(slice_id)
+        # Cannot forcibly cancel a running thread; the handler must
+        # check self._preempted and exit gracefully
+        return True
+
+    def resume(self, slice_id: str) -> bool:
+        """V2 §13.3: resume a preempted task from checkpoint.
+
+        Currently a placeholder — full resume requires the Worker to
+        re-fetch the checkpoint and restart the handler from where it
+        left off. P6 implementation: just acknowledge.
+        """
+        return slice_id in self._preempted
+
+    def join(self, timeout: float = 10.0) -> None:
+        """Wait for the background thread to finish (after stop())."""
+        t = getattr(self, "_bg_thread", None)
+        if t is not None:
+            t.join(timeout=timeout)
 
     def _heartbeat_loop(self) -> None:
         from .register import get_current_load
@@ -163,6 +256,7 @@ class Worker:
 
     def _run_task(self, spec, data, data_ref):
         """Execute a single task — called in thread pool."""
+        from .executor import TaskExecutor
         executor = TaskExecutor(worker=self)
         return executor.run(spec, data=data, data_ref=data_ref)
 

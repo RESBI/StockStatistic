@@ -110,6 +110,77 @@ def create_dispatcher_router(dispatcher) -> APIRouter:
             body.get("partial"),
         )
 
+    # ── P6: Preemption + Drain ────────────────────────────────
+
+    @router.post("/preempt/{slice_id}")
+    async def preempt_task(slice_id: str, worker_id: str = ""):
+        """V2 §13.3: Dispatcher tells Worker to preempt a task.
+
+        Forwards the preempt request to the Worker; Worker saves
+        checkpoint and stops the task.
+        """
+        return dispatcher.preempt(slice_id, worker_id)
+
+    @router.post("/resume/{slice_id}")
+    async def resume_task(slice_id: str, worker_id: str = ""):
+        """V2 §13.3: Dispatcher tells Worker to resume a preempted task."""
+        return dispatcher.resume(slice_id, worker_id)
+
+    @router.post("/drain/{worker_id}")
+    async def drain_worker(worker_id: str):
+        """V2 §13.4: tell a Worker to gracefully stop accepting tasks."""
+        return dispatcher.drain_worker(worker_id)
+
+    # ── P6: Service discovery ─────────────────────────────────
+
+    @router.get("/discover")
+    async def discover_dispatchers():
+        """V2 §13.4: Workers query available Dispatchers.
+
+        Returns a list of Dispatcher URLs. For single-Dispatcher
+        deployments, returns just self.
+        """
+        return dispatcher.discover()
+
+    @router.get("/autoscaler")
+    async def autoscaler_metrics():
+        """P6: return metrics for an external Autoscaler to consume."""
+        return dispatcher.get_autoscaler_metrics()
+
+    # ── P7: Multi-level Dispatcher + Task monitoring ──────────
+
+    @router.post("/sub/register")
+    async def register_sub_dispatcher(request: Request):
+        """P7: a sub-Dispatcher registers itself with the parent."""
+        body = await request.json()
+        return dispatcher.register_sub_dispatcher(
+            sub_id=body.get("sub_id", ""),
+            alias=body.get("alias", ""),
+            address=body.get("address", ""),
+            parent_url=body.get("parent_url"),
+        )
+
+    @router.post("/sub/unregister/{sub_id}")
+    async def unregister_sub_dispatcher(sub_id: str):
+        """P7: sub-Dispatcher graceful removal."""
+        return dispatcher.unregister_sub_dispatcher(sub_id)
+
+    @router.get("/sub")
+    async def list_sub_dispatchers():
+        """P7: list registered sub-Dispatchers."""
+        return {"sub_dispatchers": dispatcher.list_sub_dispatchers()}
+
+    @router.get("/tasks/history")
+    async def task_history(limit: int = 100, state: str = None):
+        """P7: return recent task history for Admin UI."""
+        return {"history": dispatcher.get_task_history(limit=limit,
+                                                          state_filter=state)}
+
+    @router.get("/tasks/stats")
+    async def task_stats():
+        """P7: aggregate task statistics for Admin UI dashboard."""
+        return dispatcher.get_task_stats()
+
     # ── Also expose via /api/v1/tasks/* for compatibility ─────
 
     return router

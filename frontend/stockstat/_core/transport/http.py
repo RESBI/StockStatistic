@@ -50,15 +50,25 @@ class HttpTransport:
             return Envelope(type="task.ack", payload=None)
         if resp.status_code not in (200, 201):
             raise RuntimeError(f"HTTP {resp.status_code}: {resp.text}")
-        # Response may be raw Envelope or plain JSON
+        # Response may be a real Envelope OR plain JSON (Dispatcher's reply)
+        # Detect by checking for the "protocol" field
         try:
-            return Envelope.decode(resp.content)
-        except Exception:
-            # Fall back to wrapping the JSON response
+            import json
+            d = json.loads(resp.content.decode("utf-8"))
+            if isinstance(d, dict) and d.get("protocol") == "stockstat-rpc":
+                return Envelope.decode(resp.content)
+            # Plain JSON response — wrap as Envelope
             return Envelope(
                 type=f"{envelope.type}.reply",
                 reply_to=envelope.id,
-                payload=resp.json(),
+                payload=d,
+            )
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            # Fall back to wrapping the raw response
+            return Envelope(
+                type=f"{envelope.type}.reply",
+                reply_to=envelope.id,
+                payload=resp.content,
             )
 
     def send_data(self, data: bytes, content_type: str) -> str:

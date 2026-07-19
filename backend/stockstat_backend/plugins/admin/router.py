@@ -498,4 +498,79 @@ def create_admin_router() -> APIRouter:
         except Exception as e:
             return {"logs": [], "total": 0, "error": str(e)}
 
+    # ── V3 Dispatcher monitoring (P7) ─────────────────────────
+
+    @router.get("/dispatcher/cluster")
+    async def admin_dispatcher_cluster():
+        """V3 P7: cluster topology for Admin UI.
+
+        Returns 404 if Dispatcher is not enabled.
+        """
+        from fastapi import HTTPException
+        from stockstat_backend.app import app as _  # avoid circular import
+        # We use the app's state, but routes are mounted on a different app.
+        # Just re-create the dispatcher check via env var.
+        import os
+        if not os.environ.get("STOCKSTAT_DISPATCHER_ENABLED", "false").lower() in (
+            "1", "true", "yes", "on"
+        ):
+            raise HTTPException(404, "Dispatcher not enabled")
+        # Find the dispatcher via the app's state
+        from stockstat_backend.config import settings
+        # Use the FastAPI app's state where DispatcherPlugin.mount stored it
+        # This is a bit hacky but works for the in-process case
+        try:
+            # The router was mounted on a specific app; we need to access it.
+            # Use a module-level reference set by mount_admin_with_dispatcher.
+            dispatcher = _DISPATCHER_REF[0]
+            if dispatcher is None:
+                raise HTTPException(404, "Dispatcher not registered")
+            return dispatcher.cluster_info(include_offline=True)
+        except Exception as e:
+            raise HTTPException(500, f"Failed: {e}")
+
+    @router.get("/dispatcher/tasks")
+    async def admin_dispatcher_tasks(limit: int = Query(100, ge=1, le=1000),
+                                       state: str = ""):
+        """V3 P7: recent task history for Admin UI."""
+        from fastapi import HTTPException
+        dispatcher = _DISPATCHER_REF[0]
+        if dispatcher is None:
+            raise HTTPException(404, "Dispatcher not enabled")
+        return {"history": dispatcher.get_task_history(
+            limit=limit, state_filter=state or None,
+        )}
+
+    @router.get("/dispatcher/stats")
+    async def admin_dispatcher_stats():
+        """V3 P7: aggregate task stats for Admin UI dashboard."""
+        from fastapi import HTTPException
+        dispatcher = _DISPATCHER_REF[0]
+        if dispatcher is None:
+            raise HTTPException(404, "Dispatcher not enabled")
+        return dispatcher.get_task_stats()
+
+    @router.get("/dispatcher/autoscaler")
+    async def admin_dispatcher_autoscaler():
+        """V3 P7: Autoscaler metrics for Admin UI."""
+        from fastapi import HTTPException
+        dispatcher = _DISPATCHER_REF[0]
+        if dispatcher is None:
+            raise HTTPException(404, "Dispatcher not enabled")
+        return dispatcher.get_autoscaler_metrics()
+
     return router
+
+
+# Module-level reference for the Dispatcher (set when admin + dispatcher
+# are mounted on the same app). This avoids circular imports.
+_DISPATCHER_REF: list = [None]
+
+
+def set_dispatcher_ref(dispatcher) -> None:
+    """Set the Dispatcher reference for Admin UI access.
+
+    Called by ``stockstat_backend.app.create_app`` when both admin and
+    dispatcher are mounted on the same app.
+    """
+    _DISPATCHER_REF[0] = dispatcher

@@ -105,7 +105,7 @@ class RedisTaskQueue:
 
     def dequeue(self, block: bool = True, timeout: float = None) -> Optional[object]:
         import json
-        from .....frontend.stockstat._core.contracts.task import TaskSpec
+        from stockstat._core.contracts.task import TaskSpec
         # Get the highest-priority task
         if block:
             # Use BZPOPMIN for blocking dequeue
@@ -124,6 +124,8 @@ class RedisTaskQueue:
         spec_raw = self._r.hget(f"{self._task_prefix}:{task_id}", "spec")
         if spec_raw is None:
             return None
+        if isinstance(spec_raw, bytes):
+            spec_raw = spec_raw.decode("utf-8")
         spec_dict = json.loads(spec_raw)
         return TaskSpec.from_dict(spec_dict)
 
@@ -136,7 +138,7 @@ class RedisTaskQueue:
 
 def build_queue(backend: str = "memory", redis_url: str = None) -> TaskQueue:
     """Factory: build a queue by backend name."""
-    if backend == "redis" or backend == "redis":
+    if backend == "redis":
         if redis_url is None:
             raise ValueError("redis_url is required for Redis backend")
         return RedisTaskQueue(redis_url)
