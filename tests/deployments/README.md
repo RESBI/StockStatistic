@@ -17,8 +17,8 @@
 | **B** | 存储-计算分离（HTTP backend） | 是 | 否 | `test_case_b_storage_separated.py` + `run_case_b_*.bat/.sh` |
 | **C** | 离线模式（local Storage） | 否 | 否 | `test_case_c_offline.py` + `run_case_c_*.bat/.sh` |
 | **D** | 显式 LocalComputeBackend（V3 API 全覆盖） | 否 | 否 | `test_case_d_local_compute_backend.py` + `run_case_d_*.bat/.sh` |
-
-**P2+ 待补**：Case E（独立 Dispatcher + Worker 集群）、Case F（多级 Dispatcher）。
+| **E** | Dispatcher + Worker（跨进程） | 否（同进程模拟） | 是（后台线程） | `test_case_e_dispatcher_worker.py` + `run_case_e_*.bat/.sh` |
+| **F** | 多级 Dispatcher + 监控（P7） | 否（同进程模拟） | 否 | `test_case_f_multilevel.py` + `run_case_f_*.bat/.sh` |
 
 ## 运行方式
 
@@ -36,6 +36,12 @@ tests\deployments\run_case_c_offline.bat
 
 :: Case D — V3 API 全覆盖
 tests\deployments\run_case_d_local_compute_backend.bat
+
+:: Case E — Dispatcher + Worker 跨进程
+tests\deployments\run_case_e_dispatcher_worker.bat
+
+:: Case F — 多级 Dispatcher + 监控
+tests\deployments\run_case_f_multilevel.bat
 ```
 
 ### Linux / macOS
@@ -45,6 +51,8 @@ tests\deployments\run_case_d_local_compute_backend.bat
 ./tests/deployments/run_case_b_storage_separated.sh
 ./tests/deployments/run_case_c_offline.sh
 ./tests/deployments/run_case_d_local_compute_backend.sh
+./tests/deployments/run_case_e_dispatcher_worker.sh
+./tests/deployments/run_case_f_multilevel.sh
 ```
 
 ### 直接运行 Python（跳过启动器）
@@ -55,6 +63,8 @@ python test_case_a_single_machine.py
 python test_case_b_storage_separated.py --host 192.168.1.100 --port 8000
 python test_case_c_offline.py
 python test_case_d_local_compute_backend.py
+python test_case_e_dispatcher_worker.py
+python test_case_f_multilevel.py
 ```
 
 ## 环境变量
@@ -120,6 +130,26 @@ python test_case_d_local_compute_backend.py
 - 4 种任务类型 via `compute.remote()`（indicator / backtest / grid_search / custom）
 - `InProcessTransport` request/reply 模式
 - `Envelope` 编解码（JSON + Msgpack）
+
+### Case E：Dispatcher + Worker（跨进程）
+
+- 启动 Dispatcher（FastAPI TestClient + DispatcherPlugin）
+- 启动 Worker（后台线程，HTTP 轮询 assign）
+- `RemoteComputeBackend` via `HttpTransport` 提交任务
+- Custom / Backtest / Indicator 三种任务类型 e2e
+- 远程回测与直调 `BacktestEngine` 数值一致（精度 1e-6）
+- `async_submit=True` 透明模式
+- Dispatcher `/dispatch/tasks/stats` 端点可用
+
+### Case F：多级 Dispatcher + 监控（P7）
+
+- 启动父 Dispatcher（admin + dispatcher 双启用）
+- 注册子 Dispatcher（`POST /dispatch/sub/register`）
+- `cluster_info()` 包含 `sub_dispatchers` 拓扑
+- 任务历史记录 + 状态/类型统计
+- Autoscaler 指标端点
+- Admin `/admin/api/dispatcher/*` 路由可用
+- `cluster.discover` 服务发现端点
 
 ## 共享辅助模块
 
