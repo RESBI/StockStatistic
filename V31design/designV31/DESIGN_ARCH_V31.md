@@ -223,7 +223,7 @@ flowchart BT
     K[stockstat-kernel] --> C
     S[stockstat-storage] --> C
     D[stockstat-dispatcher] --> C
-    D --> K: planner metadata only
+    D -->|planner metadata only| K
     W[stockstat-worker] --> C
     W --> K
     SDK[stockstat SDK] --> C
@@ -278,9 +278,9 @@ flowchart LR
     L --> X[running]
     X --> C[commit artifacts]
     C --> S[succeeded]
-    L --> R: lease expired
-    X --> R: retryable failure
-    X --> F[failed]: attempts exhausted
+    L -->|lease expired| R
+    X -->|retryable failure| R
+    X -->|attempts exhausted| F[failed]
 ```
 
 底层允许重复执行，但 lease token 和幂等 complete 防止旧结果覆盖。
