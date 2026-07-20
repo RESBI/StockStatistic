@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "stockstat-v31-workspace"
+version = "3.1.0"
+description = "StockStat V3.1 monorepo workspace"
+requires-python = ">=3.11,<3.13"
+
+[tool.pytest.ini_options]
+testpaths = ["tests_v31"]
+addopts = "-ra"
+markers = [
+    "postgres: requires PostgreSQL",
+    "network: starts real HTTP services",
+    "performance: performance and capacity checks",
+]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]

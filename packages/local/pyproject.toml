@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "stockstat-local"
+version = "3.1.0"
+description = "StockStat V3.1 embedded composition"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+    "stockstat==3.1.0",
+    "stockstat-dispatcher==3.1.0",
+    "stockstat-storage==3.1.0",
+    "stockstat-worker==3.1.0",
+]
+
+[tool.setuptools.packages.find]
+include = ["stockstat_local*"]

@@ -1,0 +1,13 @@
+.venv-v31
+.pytest_cache
+.ruff_cache
+legacy
+working
+recycleBin
+**/__pycache__
+**/*.pyc
+**/*.db
+**/*.sqlite
+**/*.sqlite3
+.env
+.git

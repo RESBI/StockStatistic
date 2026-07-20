@@ -1,0 +1,16 @@
+{
+  "commit": "8dae0e6ff27f088853709f7195c0cfd5aaede223",
+  "clients": ["StockStatClient", "V2Client"],
+  "compute_entrypoints": ["ComputeEngine", "ComputeBackend", "client.compute.remote"],
+  "backtest": ["BacktestEngine", "Strategy", "Order", "grid_search", "StrategyBatchRunner", "bootstrap_returns", "walk_forward"],
+  "indicators": ["ma", "ema", "macd", "rsi", "kdj", "std", "atr", "bollinger", "corr", "beta", "sharpe", "max_drawdown", "var", "returns", "log_returns", "wavelet_decompose", "spectral_entropy", "grey_relation", "gm11_predict", "transfer_entropy", "hurst_dfa", "sample_entropy", "permutation_entropy"],
+  "legacy_test_baseline": {
+    "frontend": "814 passed, 6 skipped",
+    "backend": "15 passed",
+    "root_collection_limitations": [
+      "tests/test_connection.py parses CLI arguments at import time",
+      "tests/test_perf.py parses CLI arguments at import time",
+      "tests/deployments requires its script runner and has no pytest env fixture"
+    ]
+  }
+}

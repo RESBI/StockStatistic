@@ -1,535 +1,147 @@
-# StockStat — Programmable Financial Instrument Statistical Computing Platform
+# StockStat V3.1
 
-A user-programmable stock / cryptocurrency statistical computing platform with **compute-storage separation + V3 distributed compute offload** architecture, supporting local / remote / offline / distributed deployment modes.
+StockStat V3.1 is a finance computation platform built around explicit Contracts, a deterministic finance Kernel, immutable Arrow Artifacts, a persistent Dispatcher state machine, spawn-isolated Workers, and one public SDK.
 
-- **Unified data access**: yfinance direct (85 curated symbols + manual input for any ticker) / ccxt (Binance 4,498, Coinbase 1,183 pairs) / synthetic data
-- **Programmable computation**: Python library + SQL-like DSL (v2.0 auto-reflects 23 indicators from `PluginRegistry`)
-- **Backtest subsystem**: multi-instrument / multi-timeframe / pluggable execution model / 9 visualization charts / intrabar matching
-- **V3 distributed compute**: `ComputeBackend` protocol transparent swap; Dispatcher + Worker cross-process; multi-level Dispatcher topology; preemption / elasticity / Autoscaler
-- **Three-layer protocol stack**: Codec (JSON/Arrow/Cloudpickle/Msgpack) + Message (Envelope) + Transport (HTTP/InProcess/SHM/Redis)
-- **Zero core modification**: `BacktestEngine` / `ComputeEngine` unchanged; Worker reuses directly; 599 existing tests zero regression
-- **Visual management**: Web SPA + TUI terminal interface + V3 Task monitoring API
+V3.1 is a breaking replacement for the archived V3 runtime. New code must use `StockStat.local()` or `StockStat.connect()` and must not import packages under `legacy/`.
 
----
+## Architecture
 
-## V3 New Capabilities (P0-P7 All Complete)
+- `packages/contracts`: lightweight Pydantic protocol and domain contracts.
+- `packages/kernel`: indicators, time-series analysis, backtesting, and compound experiment execution.
+- `packages/sdk`: the public `stockstat` package, local/remote Session APIs, DSL, migration scanner, and strategy package tooling.
+- `packages/local`: embedded composition for one-process local use.
+- `services/storage`: OHLCV repositories, snapshots, Artifact metadata, LocalFS, and S3-compatible blobs.
+- `services/dispatcher`: persistent Job/Stage/Work/Attempt state machine and HTTP/SSE control plane.
+- `services/worker`: spawn-isolated compute agent and Artifact cache.
+- `tests_v31`: the V3.1 contract, architecture, kernel, service, E2E, fault, security, and performance tests.
 
-| Phase | Content | Tests |
-|-------|---------|-------|
-| P0 | Protocol skeleton (Envelope / TaskSpec / Codec / Errors) | 50 |
-| P1 | LocalComputeBackend + InProcessTransport | 58 |
-| P2 | Dispatcher + Worker cross-process (HTTP + memory queue) | 83 |
-| P3 | HttpTransport + RemoteComputeBackend + AutoComputeBackend | 22 |
-| P4 | SharedMemoryTransport + Stream + dispatch.partial + data_dispatch | 34 |
-| P5 | RedisTaskQueue + RedisTransport + MessagePack | 17 |
-| P6 | Preemption / Drain / Discover / Autoscaler / RetryPolicy | 36 |
-| P7 | Multi-level Dispatcher + Admin monitoring + task history | 23 |
+Large data never passes through Dispatcher control messages. Storage publishes immutable Arrow Artifacts; Dispatcher persists only metadata and references; Workers materialize inputs directly from Storage.
 
-**Total**: 922 tests passing + 6 Redis skipped
+## Install
 
-See [DESIGN_V3_CN.md](DESIGN_V3_CN.md) (full design), [DESIGN_ARCHITECTURE.md](DESIGN_ARCHITECTURE.md) (architecture), [DESIGN_PROTOCOL.md](DESIGN_PROTOCOL.md) (protocol).
+Python 3.11 or 3.12 is required.
 
----
-
-## Quick Start
-
-### 1. Installation
-
-```bash
-# Backend (Storage + Dispatcher)
-cd backend && pip install -e .
-
-# Frontend (compute library + V3 protocol layer)
-cd frontend && pip install -e .
-
-# V3 distributed compute (optional)
-pip install -e "frontend/[compute]"          # cloudpickle + psutil
-pip install -e "frontend/[distributed]"      # + redis + msgpack
-pip install -e worker/                       # stockstat-compute Worker package
-
-# Other optional extras
-pip install -e "frontend/[matplotlib]"       # visualization
-pip install -e "frontend/[dsl]"              # DSL parser (lark)
-pip install -e "frontend/[backtest_full]"    # full backtest suite
-pip install rich                              # TUI colored tables
+```powershell
+scripts\install_v31.ps1
 ```
 
-### 2. Start Backend
+Manual editable installation order:
 
-```bash
-# Basic startup (Storage only)
-stockstat serve --host 0.0.0.0 --port 8000
-
-# V3 enable Dispatcher (P2+)
-STOCKSTAT_DISPATCHER_ENABLED=true stockstat serve --host 0.0.0.0 --port 8000
+```powershell
+.venv-v31\Scripts\python.exe -m pip install -r requirements-v31.txt
+.venv-v31\Scripts\python.exe -m pip install -e packages/contracts -e packages/kernel
+.venv-v31\Scripts\python.exe -m pip install -e services/storage -e services/dispatcher
+.venv-v31\Scripts\python.exe -m pip install -e packages/sdk -e services/worker -e packages/local
 ```
 
-Browse to `http://localhost:8000/admin/` for the management UI.
-
-### 3. Start Worker (V3 Distributed)
-
-```bash
-# On another machine (or another process on same machine)
-stockstat-compute worker \
-    --dispatcher-url http://storage:8000 \
-    --concurrency 8 \
-    --alias "gpu-box-alpha" \
-    --label rack=A-12
-```
-
-### 4. Use Client
+## Embedded Use
 
 ```python
-from stockstat import StockStatClient
+from stockstat import StockStat
 
-# v1.7 behavior (default LocalComputeBackend)
-client = StockStatClient(host="localhost", port=8000)
-client.ingest("BTC/USDT", source="binance", start="2024-01-01")
-data = client.ohlcv("BTC/USDT")
-result = client.backtest(data, strategy, initial_cash=10000)
+ss = StockStat.local(".stockstat-v31")
+try:
+    ss.data.ingest(
+        "PAXG/USDT",
+        source="synthetic",
+        venue="synthetic",
+        asset_class="crypto",
+        timeframe="1d",
+        start="2024-01-01",
+        end="2024-06-01",
+    )
+    data = ss.data.selector(
+        "PAXG/USDT",
+        source="synthetic",
+        venue="synthetic",
+        asset_class="crypto",
+        timeframe="1d",
+        start="2024-01-01",
+        end="2024-06-01",
+    )
+    ma20 = ss.indicators.ma(data, window=20)
+finally:
+    ss.close()
+```
 
-# V3 remote compute (transparent sync)
-from stockstat._core.compute import RemoteComputeBackend
-client = StockStatClient(
-    host="localhost", port=8000,
-    compute_backend=RemoteComputeBackend("http://localhost:8000"),
+## Network Use
+
+Start the services:
+
+```powershell
+stockstat-storage --database-url sqlite:///market.db --artifact-root .stockstat-v31/artifacts
+stockstat-dispatcher --database-url sqlite:///tasks.db --storage-url http://127.0.0.1:8101
+stockstat-worker --dispatcher-url http://127.0.0.1:8100 --storage-url http://127.0.0.1:8101
+```
+
+Connect with the same API surface:
+
+```python
+from stockstat import StockStat
+
+ss = StockStat.connect(
+    "http://127.0.0.1:8100",
+    storage_url="http://127.0.0.1:8101",
+    token="client-token",
 )
-result = client.backtest(data, strategy)  # internally submit + wait
-
-# V3 explicit async
-task = client.compute.remote(
-    "grid_search",
-    symbols=["BTC/USDT"], timeframe="1d", start="2024-01-01",
-    strategy_ref=strategy_ref,
-    param_grid={"short": [3, 5, 8], "long": [10, 20, 30]},
-    metric="sharpe",
-)
-print(task.id, task.status)
-result = task.wait(timeout=3600)
-
-# V3 auto routing
-from stockstat._core.compute import AutoComputeBackend, LocalComputeBackend
-client = StockStatClient(compute_backend=AutoComputeBackend(
-    local=LocalComputeBackend(),
-    remote=RemoteComputeBackend("http://dispatch:9000"),
-))
-# Heavy tasks go remote, light tasks go local
 ```
 
-### 5. Offline Mode (No Backend Required)
+Production deployments should configure separate client and Worker tokens, PostgreSQL, and S3-compatible Artifact storage. See `docs/DEPLOYMENT.md` and `docs/OPERATIONS.md`.
 
-```python
-from stockstat._api.client import V2Client
-from stockstat._core.storage import MemoryStorage, SQLStorage
+## Compound Jobs
 
-# In-memory offline
-client = V2Client(mode="offline", storage=MemoryStorage())
-client.ingest("BTC/USDT", source="binance", start="2024-01-01")
+The Dispatcher plans and persists fan-out/fan-in WorkUnits for:
 
-# Read existing SQLite
-client = V2Client(mode="offline",
-                  storage=SQLStorage(database_url="sqlite:///stockstat.db"))
+- `ss.experiments.grid_search(...)`
+- `ss.experiments.batch(...)`
+- `ss.simulations.bootstrap(...)`
+- `ss.validation.walk_forward(...)`
+
+Reducers receive only upstream Artifact references. Fixed random seeds are stable across shard counts and retries.
+
+## DSL And Migration
+
+```powershell
+stockstat dsl-explain "SELECT close, ma(close, 20) AS ma20 FROM ohlcv('PAXG/USDT','1d','2024-01-01','2024-02-01')"
+stockstat migrate-scan path\to\old_project
+stockstat strategy-package strategy.py strategy:build strategy.zip
+stockstat strategy-verify strategy.zip --trusted-key PUBLIC_KEY_HEX
 ```
 
-### 6. Docker Deployment
+The network protocol does not deserialize pickle or cloudpickle payloads. Remote Python strategies are importable/signed modules or packages, not arbitrary serialized functions.
 
-```bash
-docker compose up -d
-# Starts db + redis + api + dispatcher + 4 workers
+## PAXG Migration
+
+`working/PAXG-Weekend-Monday-Law-v5-v31` is the V3.1-native migration of the PAXG research series.
+
+- 307 real Binance Monday/weekend observations.
+- 52-strategy migration matrix.
+- 45 V3.1-native strategies and 7 explicitly analysis-only cross-session/time-exit strategies.
+- 180/180 native strategy x fee backtests succeeded.
+- Search, deterministic Monte Carlo, and walk-forward Jobs succeeded.
+- No legacy API findings in the migrated directory.
+
+See `working/PAXG-Weekend-Monday-Law-v5-v31/RUN_REPORT.md`.
+
+## Test
+
+```powershell
+scripts\run_v31_tests.ps1
 ```
 
----
+PostgreSQL contract and HA tests:
 
-## Deployment Scenarios
-
-| Scenario | Client | Dispatcher | Storage | Worker | Config |
-|----------|--------|-----------|---------|--------|--------|
-| A Single-machine full-stack | same process | — | — | — | default |
-| B Storage-compute separation | remote HTTP | — | independent | Client local | v2.1 |
-| C Offline | local | — | local | Client local | v2.1 |
-| D Dispatcher+Worker | remote HTTP | same host as Storage | independent | remote | `--enable-dispatcher` |
-| E Independent Dispatcher | remote HTTP | independent | independent | multi-node | `stockstat-dispatcher` |
-| F Multi-level Dispatcher | remote HTTP | parent + sub | independent | multi-level | P7 |
-
-Each scenario has a deployment test: [tests/deployments/](tests/deployments/)
-
-```bash
-# Run deployment tests
-tests/deployments/run_case_a_single_machine.bat   # Windows
-./tests/deployments/run_case_a_single_machine.sh  # Linux/macOS
-
-# V3 distributed
-tests/deployments/run_case_e_dispatcher_worker.bat
-tests/deployments/run_case_f_multilevel.bat
+```powershell
+$env:STOCKSTAT_V31_POSTGRES_URL = "postgresql://user:password@host:5432/stockstat"
+.venv-v31\Scripts\python.exe -m pytest tests_v31 -q
 ```
 
----
+## Release Status
 
-## Usage
-
-StockStat provides four entry points:
-
-- **Python library**: `StockStatClient` / `V2Client` — full programming interface
-- **CLI**: `stockstat` — ingest, query, manage plugins
-- **DSL queries**: SQL-like declarative query language
-- **V3 remote compute**: `client.compute.remote()` async submit + `TaskRef`
-
-### Ingest Data
-
-```python
-client.ingest("AAPL", source="yfinance", start="2024-01-01", end="2024-12-31")
-client.ingest("BTC/USDT", source="binance", start="2024-01-01", timeframe="1h")
-client.ingest("MSFT", start="2024-01-01")  # auto-detect source
-```
-
-### Compute Indicators
-
-23 technical indicators + 8 nonlinear dynamics functions:
-
-```python
-sma = client.compute.ma(data.close, window=20)
-rsi = client.compute.rsi(data.close, window=14)
-upper, mid, lower = client.compute.bollinger(data.close, window=20, k=2.0)
-sharpe = client.compute.sharpe(returns, risk_free=0.02, annualize=True)
-hurst = client.compute.hurst_dfa(np.diff(np.log(path)))  # DFA Hurst exponent
-```
-
-### Signal Processing and Nonlinear Dynamics
-
-8 advanced analysis functions covering signal processing (Continuous Wavelet Transform CWT / Spectral Entropy / Grey Relational Degree / GM(1,1) Grey Prediction) and nonlinear dynamics (Transfer Entropy / Hurst Exponent DFA / Sample Entropy / Permutation Entropy). When PyWavelets is not installed, CWT gracefully degrades to an FFT-based self-implemented Morlet wavelet. Also provides 3 PlotSpec factory functions (CWT scalogram / DFA fit plot / PSD plot).
-
-```python
-import numpy as np
-path = data.close.values[-48:]
-
-# Signal processing
-coef, scales = client.compute.wavelet_decompose(path, scales=np.arange(1, 25))  # CWT
-h_spec = client.compute.spectral_entropy(np.diff(np.log(path)))                  # Spectral entropy
-gr = client.compute.grey_relation(path_a, path_b, rho=0.5)                       # Grey relational degree
-forecast = client.compute.gm11_predict(sequence)                                  # GM(1,1) grey prediction
-
-# Nonlinear dynamics
-hurst = client.compute.hurst_dfa(np.diff(np.log(path)))    # Hurst exponent (≈0.5 random | >0.5 persistent | <0.5 anti-persistent)
-te = client.compute.transfer_entropy(btc_rets, eth_rets)   # Transfer entropy (directed info flow)
-sampen = client.compute.sample_entropy(signal, m=2)         # Sample entropy
-permen = client.compute.permutation_entropy(signal, m=3)    # Permutation entropy
-
-# Visualization
-spec = client.compute.wavelet_scalogram(coef, scales, title="CWT Scalogram")
-renderer = client.plot.get_renderer()
-renderer.render(spec)
-```
-
-<details open>
-<summary>🔬 PAXG Weekend Returns vs Monday Returns (Real Data 2022-2024)</summary>
-
-PAXG (gold-pegged token) weekend returns (Friday close → Sunday close) vs Monday's **max gain** and **max loss**, **recorded independently**.
-
-#### Scatter Plot — Gains and Losses on Same Chart
-![PAXG Weekend Scatter](docs/images/paxg_weekend_scatter.png)
-
-**Result**: r(gain)=0.23 (p=0.004), r(loss)=-0.20 (p=0.012). Both significant but weak — weekend returns have moderate independent predictive power for Monday gains and losses.
-
-#### Distribution by Weekend Direction
-![PAXG Directional](docs/images/paxg_directional.png)
-
-#### Weekend Returns Distribution
-![PAXG Weekend Histogram](docs/images/paxg_weekend_hist.png)
-
-</details>
-
-### DSL Queries
-
-```python
-result = client.run_dsl('''
-    SELECT close, ma(close, 20) AS ma20, rsi(close, 14) AS rsi
-    FROM ohlcv("BTC/USDT", "1d", "2024-01-01", "2024-12-31")
-    LIMIT 30
-''')
-```
-
-### Backtest
-
-```python
-from stockstat.backtest import BacktestEngine, strategy, Order
-
-@strategy
-def ma_cross(ctx):
-    d = ctx.get("BTC/USDT", "1d", lookback=30)
-    if len(d) < 21: return
-    ma5, ma20 = d.close.rolling(5).mean().iloc[-1], d.close.rolling(20).mean().iloc[-1]
-    pos = ctx.portfolio.get_position("BTC/USDT")
-    if ma5 > ma20 and pos.qty == 0:
-        ctx.broker.submit(Order("BTC/USDT", "buy", 0.1))
-    elif ma5 < ma20 and pos.qty > 0:
-        ctx.broker.submit(Order("BTC/USDT", "sell", pos.qty))
-
-res = client.backtest({"BTC/USDT": {"1d": data}}, ma_cross, initial_cash=10000)
-print(res.summary())
-res.render("dashboard", path="dashboard.png")
-```
-
-Backtest visualization provides 9 chart types: equity curve, drawdown, trade markers, returns distribution, monthly heatmap, annual returns, parameter grid heatmap, underwater curve, comprehensive dashboard (2×2). When matplotlib is not installed, it gracefully degrades to `NullBacktestChartRenderer` (warns but doesn't crash).
-
-<details open>
-<summary>📊 Classic Statistical Charts (Real Data)</summary>
-
-#### Close Price + MA + Bollinger Bands
-![BTC Bollinger](docs/images/btc_bollinger.png)
-
-#### RSI Overbought/Oversold Zones
-![BTC RSI](docs/images/btc_rsi.png)
-
-#### MACD Histogram + Signal Line
-![ETH MACD](docs/images/eth_macd.png)
-
-#### Drawdown
-![BTC Drawdown](docs/images/btc_drawdown.png)
-
-#### Beta Scatter (AAPL vs S&P 500)
-![AAPL Beta](docs/images/aapl_beta_scatter.png)
-
-#### BTC vs ETH Rolling Correlation
-![BTC ETH Correlation](docs/images/btc_eth_corr.png)
-
-#### Normalized Price Comparison
-![Price Comparison](docs/images/price_comparison.png)
-
-</details>
-
-<details open>
-<summary>📈 Backtest Visualization Charts (Real Data)</summary>
-
-#### Comprehensive Dashboard (2×2: equity + drawdown + returns dist + monthly heatmap)
-![BTC Backtest Dashboard](docs/images/backtest_btc_dashboard.png)
-
-#### Equity Curve + Benchmark
-![BTC Equity](docs/images/backtest_btc_equity.png)
-
-#### Drawdown (filled area)
-![BTC Drawdown](docs/images/backtest_btc_drawdown.png)
-
-#### Trade Markers (B/S arrows)
-![BTC Trades](docs/images/backtest_btc_trades.png)
-
-#### Monthly Returns Heatmap
-![BTC Monthly Heatmap](docs/images/backtest_btc_monthly_heatmap.png)
-
-#### Parameter Grid Heatmap (AAPL MA short × long → Sharpe)
-![Param Heatmap](docs/images/backtest_param_heatmap.png)
-
-#### Pair Trading Dashboard (BTC/ETH)
-![Pair Trading Dashboard](docs/images/backtest_pair_dashboard.png)
-
-</details>
-
-### V3 Distributed Compute
-
-```python
-# Explicit async submit
-task = client.compute.remote(
-    "grid_search",
-    symbols=["BTC/USDT"], timeframe="1d", start="2024-01-01",
-    strategy_ref=strategy_ref,
-    param_grid={"short": list(range(2, 22)), "long": list(range(20, 70))},
-    metric="sharpe",
-    dispatch_spec=DispatchSpec(split_strategy="param_wise", max_workers=4),
-)
-print(task.id, task.status)  # UUID + "pending" / "running" / "completed"
-
-# Poll / wait
-result = task.wait(timeout=3600)
-print(f"Best params: {result[0]['params']}, sharpe: {result[0]['sharpe']}")
-
-# Stream results (grid_search progress)
-for partial in task.stream_results():
-    print(f"Progress: {partial.get('progress', 0):.0%}")
-
-# Cluster topology
-info = client.compute.cluster_info()
-for w in info["workers"]:
-    print(f"  {w['alias']:20s}  {w['status']:8s}  "
-          f"CPU {w['hardware']['cpu']['cores_logical']} cores  "
-          f"load {w['load'].get('cpu_percent', 0):.1f}%")
-```
-
-### V3 Cluster Management
-
-```bash
-# View cluster
-stockstat cluster info
-stockstat cluster workers
-stockstat cluster stats
-
-# Autoscaler metrics
-curl http://dispatch:8000/dispatch/autoscaler
-# {"queue_depth": 15, "scale_up_recommended": true, ...}
-
-# Task history
-curl http://dispatch:8000/dispatch/tasks/history?limit=10
-curl http://dispatch:8000/dispatch/tasks/stats
-```
-
----
-
-## Management Interface
-
-### TUI Terminal
-
-```bash
-stockstat tui                    # connect to local server
-stockstat tui --host 192.168.1.100
-```
-
-### Web Admin
-
-Browse to `http://storage-server:8000/admin/`:
-
-| Page | Features |
-|------|----------|
-| Overview dashboard | Symbol count, row count, disk, data coverage Gantt, recent ingest |
-| Source browser | Pagination + search + batch download + manual input for any symbol |
-| Local symbols | K-line chart (lazy-load on zoom) + range completion + CSV export |
-| Config | Database / proxy / cache / disk |
-| Logs | Ingest history (paginated + filtered) |
-
-### V3 Dispatcher Monitoring (P7)
-
-When `STOCKSTAT_DISPATCHER_ENABLED=true` + `STOCKSTAT_ADMIN_ENABLED=true`:
-
-| Endpoint | Description |
-|----------|-------------|
-| `GET /admin/api/dispatcher/cluster` | Full cluster topology (incl. sub_dispatchers) |
-| `GET /admin/api/dispatcher/tasks` | Task history |
-| `GET /admin/api/dispatcher/stats` | Task stats (by_state / by_type / avg_duration) |
-| `GET /admin/api/dispatcher/autoscaler` | Autoscaler metrics + scale up/down recommendations |
-
----
-
-## Data Sources
-
-| Source | Type | Symbol count | Time granularities | Range probing |
-|--------|------|--------------|---------------------|---------------|
-| `yfinance` | Stock/ETF/Index/Commodity/FX | 85 curated + manual | 12 | ✅ Yahoo API probe |
-| `binance` | Crypto | 4,498 (1,479 USDT pairs) | 16 | ✅ First/last K-line probe |
-| `coinbase` | Crypto | 1,183 (528 USD pairs) | 7 | ✅ First/last K-line probe |
-| `synthetic` | Mixed | 5 examples | 9 | ✅ Fixed range |
-
----
-
-## Optional Extras
-
-| Extras | Use case |
-|--------|----------|
-| `matplotlib` | Protocol-based visualization (lazy import, core zero-dep) |
-| `dsl` | DSL parser (lark) |
-| `signal_processing` | PyWavelets (full CWT implementation) |
-| `backtest_full` | Full backtest suite (matplotlib + optuna) |
-| `rich` | TUI colored tables |
-| `compute` | V3 local backend (cloudpickle + psutil) |
-| `distributed` | V3 distributed (compute + redis + msgpack) |
-
----
-
-## Run Tests
-
-```bash
-# Backend tests
-cd backend && python -m pytest tests/ -v          # 15 tests
-
-# Frontend tests (incl V3)
-cd frontend && python -m pytest tests/ -v          # 814 tests + 6 skipped
-
-# Deployment scenario tests (6 Cases)
-cd tests/deployments
-python test_case_a_single_machine.py              # Single-machine
-python test_case_e_dispatcher_worker.py           # V3 distributed
-python test_case_f_multilevel.py                  # V3 multi-level
-
-# PAXG research validation
-cd working/PAXG-Weekend-Monday-Law-v5-redo/phase2_backtest
-python run_redo.py                                 # 132 backtests
-python compare_v3.py                               # V3 vs direct comparison
-```
-
-**Total 922 tests passing + 6 Redis skipped + 132 PAXG backtests byte-level identical.**
-
-### Connection and Performance Tests
-
-```bash
-# Connection smoke test
-python tests/test_connection.py --host localhost --port 8000
-
-# Communication performance test
-python tests/test_perf.py --host localhost --port 8000 --rounds 10
-```
-
----
-
-## Documentation
-
-- [Usage docs](docs/USAGE.md) — detailed examples and expected results
-- [V3 design report](DESIGN_V3_CN.md) — complete design (3057 lines)
-- [V3 architecture design](DESIGN_ARCHITECTURE.md) — four-role + three-package + five-layer + ComputeBackend
-- [V3 protocol design](DESIGN_PROTOCOL.md) — Envelope + TaskSpec + Codec + Transport
-- [V3 phase docs](docs/v3/) — P0-P7 implementation details
-- [V3 complete summary](docs/v3/SUMMARY_FULL_CN.md) — P0-P7 full summary
-- [v2.1 design report](DESIGN_CN.md) — original architecture (preserved)
-- [Backtest phase docs](docs/backtest/) — BT-0 ~ BT-14 + BT-V0 ~ V3
-- [Deployment tests](tests/deployments/README.md) — Case A-F deployment scenario tests
-
----
-
-## Configuration
-
-### Backend Environment Variables
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `DATABASE_URL` | `sqlite:///stockstat.db` | Database connection string |
-| `STOCKSTAT_PROXY_ENABLED` | `false` | Enable proxy |
-| `STOCKSTAT_ADMIN_ENABLED` | `true` | Enable web admin |
-| `STOCKSTAT_DISPATCHER_ENABLED` | `false` | **V3** enable Dispatcher plugin |
-| `STOCKSTAT_DISPATCHER_QUEUE` | `memory` | **V3** queue backend (memory/redis) |
-| `STOCKSTAT_DISPATCHER_CACHE_MB` | `512` | **V3** DataCache max size |
-| `REDIS_URL` | — | **V3** Redis connection (when queue=redis) |
-
-### Frontend Environment Variables
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `STOCKSTAT_HOST` | `localhost` | Default host |
-| `STOCKSTAT_PORT` | `8000` | Default port |
-| `STOCKSTAT_DISPATCHER_URL` | — | **V3** Dispatcher URL for Worker/Client |
-| `STOCKSTAT_TRANSPORT` | `in_process` | **V3** transport type (in_process/http) |
-
----
-
-## Startup Scripts
-
-```bash
-# Minimal startup
-backend/start.bat            # Windows
-backend/start.sh             # Linux/macOS
-
-# Full config (CLI args + interactive config)
-backend/serve.bat --config   # Windows
-backend/serve.sh --config    # Linux/macOS
-
-# V3 Worker
-stockstat-compute worker --dispatcher-url http://localhost:8000
-```
-
----
+The repository cutover is V3.1-only. The current machine passed SQLite, authenticated network, fault, security, performance baseline, PAXG, and real PostgreSQL tests. Redis and MinIO were not reachable and Docker was not installed during final verification, so production deployment remains **No-Go** until the external S3/MinIO and deployment/backup drills in `V31design/realizeV31/P9_REPORT.md` are completed.
 
 ## License
 
-This project is licensed under **GNU General Public License v3.0** — see [LICENSE](LICENSE).
+GNU General Public License v3.0. See `LICENSE`.
 
-Copyright (C) 2026 RESBI
-
-## Disclaimer
-
-This project — including all source code, documentation, test cases, and charts — was entirely designed, implemented, and written by **GLM-5.2** (AI assistant).
-
-This software is for **learning and research purposes only** and does **not constitute** any financial, investment, or trading advice. Users are fully responsible for their own investment decisions and should consult a qualified financial professional before making any investment.
+This software is for research and education and is not financial advice.
