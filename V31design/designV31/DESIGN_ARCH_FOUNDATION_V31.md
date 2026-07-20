@@ -1,409 +1,405 @@
 # StockStat V3.1 Foundation 架构设计
 
-> 大模块：共享底层与契约
-> 日期：2026-07-20
-> 状态：V3.1 设计稿
-> 上位文档：[DESIGN_ARCH_V31.md](DESIGN_ARCH_V31.md)
-> 协议文档：[DESIGN_PROT_V31.md](DESIGN_PROT_V31.md)
+> 大模块：Foundation（共享契约与运行基础）
+> 版本：V3.1 设计稿
+> 关联：[DESIGN_ARCH_V31.md](DESIGN_ARCH_V31.md)、[DESIGN_PROT_V31.md](DESIGN_PROT_V31.md)
 
 ## 1. 模块定位
 
-Foundation 是 Invocation、Dispatcher、Storage、Compute 与 Finance 共同依赖的唯一底层。它不是通用分布式框架，而是 StockStat 金融任务系统的稳定词汇表和边界契约。
+Foundation 是所有进程唯一可以共同依赖的底层包，负责定义稳定数据契约、标识、内容寻址、operation 元数据、错误模型和可观测上下文。它不实现 HTTP 服务、不访问数据库、不执行金融算法，也不包含 V2/V3 兼容代码。
 
-Foundation 解决以下问题：
+Foundation 的核心目标是让以下执行路径共享同一语义：
 
-- 所有角色使用同一套 Job、WorkUnit、Attempt、Artifact 和金融数据标识。
-- SDK 与服务端对参数、结果、错误和版本有相同理解。
-- 各部署包不通过导入对方实现共享代码。
-- 新金融能力可增加 schema 与模块，不修改传输骨架。
-- 本地嵌入式拓扑与跨机拓扑可用同一组合同测试。
+- SDK 进程内本地执行。
+- SDK 到独立 Dispatcher。
+- Dispatcher 到独立 Storage。
+- Dispatcher 到一个或多个 Worker。
+- Worker 之间不同硬件、不同能力包的执行。
 
-## 2. 完全重构约束
+## 2. 设计原则
 
-V3.1 Foundation 不从以下旧目录导入任何实现：
-
-```text
-frontend/stockstat/
-backend/stockstat_backend/
-worker/stockstat_compute/
-```
-
-旧目录在迁移期仅承担三项作用：
-
-1. 生成行为基线和 golden artifacts。
-2. 提供旧 API 到新 API 的迁移样例。
-3. 在 V3.1 切换前运行黑盒结果对比。
-
-V3.1 新包不得使用 `_compat.py`、fallback import、双客户端转发或 `isinstance(LocalComputeBackend)` 等兼容手段。
+| 原则 | 约束 |
+|---|---|
+| 契约小而稳定 | 只定义跨模块真正共享的数据，不承载算法实现 |
+| 类型化 operation | 每个 operation 有独立参数和结果 schema |
+| 大对象引用化 | 市场数据、策略包和结果通过 `ArtifactRef` 传递 |
+| 内容寻址 | 可复用资产以 digest 标识，支持缓存和完整性验证 |
+| 规范化编码 | JSON 使用 canonical 规则，时间统一 UTC，浮点规则明确 |
+| 失败可分类 | 业务失败、数据失败、资源失败、基础设施失败分开 |
+| 不兼容旧内部接口 | 不复用 V3 `TaskSpec`、`ComputeBackend`、`Envelope` 类 |
 
 ## 3. 包边界
 
-建议新建独立包 `packages/contracts/`，发布名为 `stockstat-contracts`：
+建议独立包：`stockstat-contracts`。
 
 ```text
 packages/contracts/
 ├── pyproject.toml
 └── stockstat_contracts/
-    ├── __init__.py
     ├── ids.py
     ├── time.py
-    ├── errors.py
-    ├── envelope.py
-    ├── jobs.py
-    ├── work.py
+    ├── canonical.py
     ├── artifacts.py
     ├── datasets.py
-    ├── capabilities.py
+    ├── operations.py
+    ├── jobs.py
+    ├── workers.py
     ├── events.py
-    ├── resources.py
-    ├── finance/
-    │   ├── instruments.py
-    │   ├── market_data.py
-    │   ├── strategies.py
-    │   ├── backtest.py
-    │   ├── indicators.py
-    │   ├── experiments.py
-    │   └── results.py
-    └── schema/
-        ├── registry.py
-        └── canonical_json.py
+    ├── errors.py
+    ├── auth.py
+    └── schemas/
+        ├── common/
+        ├── market/
+        ├── statistics/
+        ├── backtest/
+        ├── experiment/
+        └── validation/
 ```
 
-依赖目标：
+依赖限制：
 
-- Python 标准库。
-- 一个明确固定 major 版本的 schema/validation 库；推荐 Pydantic v2。
-- 不依赖 pandas、numpy、scipy、FastAPI、SQLAlchemy、Redis、httpx 或云 SDK。
+- 允许：Python 标准库、轻量 schema 库。
+- 禁止：pandas、numpy、scipy、SQLAlchemy、FastAPI、httpx、Redis client、cloudpickle。
+- 所有服务依赖 `stockstat-contracts`，`stockstat-contracts` 不依赖任何服务或金融实现包。
 
-## 4. 依赖规则
+## 4. 核心标识
+
+### 4.1 标识种类
+
+| 标识 | 语义 | 生成方 |
+|---|---|---|
+| `request_id` | 单次 API 请求 | 调用方或网关 |
+| `trace_id` | 一条端到端调用链 | 首个调用方 |
+| `job_id` | 用户可见金融任务 | Dispatcher |
+| `unit_id` | Planner 生成的执行单元 | Dispatcher |
+| `attempt_id` | WorkUnit 的一次执行尝试 | Dispatcher |
+| `worker_id` | Worker 实例 | Worker |
+| `snapshot_id` | 不可变数据快照 | Storage |
+| `artifact_id` | 不可变结果资产 | Storage |
+| `lease_id` | 某次 WorkUnit 租约 | Dispatcher |
+
+外部可见 ID 建议使用 UUIDv7，兼顾全局唯一和时间排序。内容地址使用 `sha256:<hex>`，不与资源 ID 混用。
+
+### 4.2 幂等键
+
+所有创建型请求支持 `idempotency_key`。Dispatcher 以 `(tenant_id, operation, idempotency_key)` 唯一约束防止重复 Job。Storage 的采集和资产提交也必须有独立幂等键。
+
+## 5. ArtifactRef
+
+### 5.1 为什么必须引用化
+
+V3 将 DataFrame 和 BacktestResult cloudpickle 后 base64 放入 HTTP JSON，存在以下问题：
+
+- base64 增加约 33% 体积。
+- Dispatcher 成为大数据和大结果中转站。
+- Python 对象与库版本强耦合。
+- 无法独立校验分区、schema 和 lineage。
+- 结果状态与结果数据生命周期耦合。
+
+V3.1 统一使用 `ArtifactRef`：
+
+```json
+{
+  "artifact_id": "art_019b...",
+  "kind": "feature_table",
+  "media_type": "application/vnd.apache.parquet",
+  "schema_id": "feature-table@1",
+  "digest": "sha256:8a1f...",
+  "size_bytes": 184203,
+  "location": "artifact://art_019b...",
+  "created_at": "2026-07-21T00:00:00Z"
+}
+```
+
+`location` 是逻辑地址，不直接暴露后端文件路径。具体下载地址通过 Storage 解析或签发短期 URL。
+
+### 5.2 资产清单
+
+一个逻辑结果可以由多个文件组成，使用 `ArtifactManifest`：
+
+```json
+{
+  "manifest_version": 1,
+  "kind": "backtest_result",
+  "members": [
+    {"name": "equity", "ref": {"artifact_id": "..."}},
+    {"name": "returns", "ref": {"artifact_id": "..."}},
+    {"name": "fills", "ref": {"artifact_id": "..."}},
+    {"name": "orders", "ref": {"artifact_id": "..."}},
+    {"name": "metrics", "ref": {"artifact_id": "..."}}
+  ]
+}
+```
+
+## 6. DatasetSnapshot
+
+### 6.1 快照语义
+
+`DatasetSnapshot` 是不可变、可复现的输入数据视图。它不是 SQL 查询字符串，也不是“当前数据库里符合条件的数据”的动态引用。
+
+```json
+{
+  "snapshot_id": "snap_019b...",
+  "kind": "market_table",
+  "query": {
+    "instruments": ["crypto:binance:PAXG/USDT"],
+    "timeframes": ["1d", "1h"],
+    "start": "2020-08-28T00:00:00Z",
+    "end": "2026-07-16T00:00:00Z",
+    "fields": ["open", "high", "low", "close", "volume"],
+    "adjustment": "raw",
+    "timezone": "UTC"
+  },
+  "partitions": [
+    {
+      "instrument": "crypto:binance:PAXG/USDT",
+      "timeframe": "1h",
+      "ref": {"artifact_id": "art_..."},
+      "rows": 51520,
+      "min_ts": "2020-08-28T00:00:00Z",
+      "max_ts": "2026-07-15T23:00:00Z"
+    }
+  ],
+  "lineage": {
+    "source_revisions": ["binance:PAXG/USDT:1h:rev_..."],
+    "normalizer_version": "ohlcv@1.0.0"
+  },
+  "digest": "sha256:..."
+}
+```
+
+### 6.2 快照不变量
+
+- 快照创建后内容不能被覆盖。
+- 相同 canonical query 和相同 source revision 应产生相同 digest。
+- 所有时间戳为 UTC ISO 8601。
+- schema、时区、调整方式、交易日历和质量策略均进入 digest。
+- 下游 Job 只依赖 `snapshot_id` 或其 manifest digest。
+
+## 7. OperationDescriptor
+
+每个可执行能力注册一个 `OperationDescriptor`：
+
+| 字段 | 说明 |
+|---|---|
+| `operation` | 如 `backtest.run@1` |
+| `parameter_schema` | 参数 schema ID |
+| `input_kinds` | 允许的输入资产类型 |
+| `output_kinds` | 输出类型 |
+| `deterministic` | 给定输入、参数、环境是否确定 |
+| `splittable` | 是否可拆成多个 WorkUnit |
+| `merge_operation` | 合并所用 operation |
+| `resource_profile` | 默认 CPU/内存/临时盘/GPU 类别 |
+| `security_profile` | 内置代码、签名包、受信任本地等 |
+| `implementation_version` | 执行实现版本 |
+
+operation 名称包含主版本。破坏参数或结果语义时新增 `@2`，不在同名 schema 中偷偷改变语义。
+
+## 8. Job 与 WorkUnit 契约
+
+### 8.1 JobSpec
+
+Job 是用户意图：
+
+```json
+{
+  "operation": "backtest.run@1",
+  "inputs": {
+    "market": {"snapshot_id": "snap_..."},
+    "strategy": {"artifact_id": "art_strategy_..."}
+  },
+  "parameters": {
+    "initial_cash": 10000,
+    "allow_short": true,
+    "cost_model": {"id": "cost.binance", "params": {"venue": "spot"}},
+    "fill_model": {"id": "fill.intrabar", "params": {}},
+    "execution_model": {
+      "id": "execution.intrabar",
+      "params": {"parent_tf": "1d", "intrabar_tf": "1h"}
+    }
+  },
+  "policy": {
+    "priority": 50,
+    "deadline": null,
+    "max_attempts": 2,
+    "result_retention_days": 30
+  }
+}
+```
+
+### 8.2 WorkUnitSpec
+
+WorkUnit 是 Planner 的内部产物，客户端不能直接构造：
+
+```json
+{
+  "unit_id": "unit_...",
+  "job_id": "job_...",
+  "operation": "backtest.run@1",
+  "inputs": {"market": {"snapshot_id": "snap_..."}},
+  "parameters": {"...": "..."},
+  "partition": {"index": 0, "count": 1},
+  "requires": {
+    "capabilities": ["backtest.run@1", "execution.intrabar"],
+    "cpu_cores": 1,
+    "memory_mb": 1024,
+    "gpu": false
+  },
+  "environment": {
+    "kernel_version": "3.1.0",
+    "strategy_digest": "sha256:..."
+  }
+}
+```
+
+### 8.3 ResultManifest
+
+WorkUnit 完成时返回小型清单，不返回大对象：
+
+```json
+{
+  "unit_id": "unit_...",
+  "attempt_id": "attempt_...",
+  "outputs": {
+    "result": {"artifact_id": "art_manifest_..."}
+  },
+  "metrics": {
+    "duration_ms": 1821,
+    "peak_memory_mb": 184
+  },
+  "environment_digest": "sha256:..."
+}
+```
+
+## 9. 状态模型
+
+### 9.1 JobState
 
 ```mermaid
-graph TD
-    SDK[stockstat-sdk] --> C[stockstat-contracts]
-    D[stockstat-dispatcher] --> C
-    S[stockstat-storage] --> C
-    W[stockstat-worker] --> C
-    K[stockstat-kernel] --> C
-    W --> K
-    A[stockstat-admin] --> SDK
-
-    D -. forbidden .-> K
-    S -. forbidden .-> K
-    C -. forbidden .-> SDK
-    C -. forbidden .-> D
+stateDiagram-v2
+    [*] --> accepted
+    accepted --> planning
+    planning --> queued
+    queued --> running
+    running --> succeeded
+    running --> failed
+    running --> cancelling
+    cancelling --> cancelled
+    queued --> cancelled
+    planning --> failed
 ```
 
-铁律：
+### 9.2 WorkUnitState
 
-| 规则 | 说明 |
+```mermaid
+stateDiagram-v2
+    [*] --> ready
+    ready --> leased
+    leased --> running
+    running --> committing
+    committing --> succeeded
+    leased --> ready: lease expired
+    running --> ready: retryable failure
+    running --> failed: attempts exhausted
+    ready --> cancelled
+    leased --> cancelled
+```
+
+状态迁移由 Dispatcher 持久化，并带单调递增的 `state_version`，防止乱序回调覆盖新状态。
+
+## 10. 错误模型
+
+### 10.1 错误分类
+
+| category | 示例 | 默认可重试 |
+|---|---|---|
+| `validation` | 参数 schema 不合法 | 否 |
+| `data` | 缺数据、schema 不匹配、质量失败 | 视错误码 |
+| `finance` | 资金不足、未知成本模型、未来函数违规 | 否 |
+| `code` | 策略入口不存在、依赖缺失 | 否 |
+| `resource` | OOM、临时盘不足、GPU 不足 | 是，可换 Worker |
+| `execution` | Worker 进程崩溃、超时 | 是 |
+| `storage` | Artifact 上传失败、快照不可达 | 是 |
+| `protocol` | 版本、签名、摘要不匹配 | 否 |
+| `internal` | 未分类服务错误 | 有限重试 |
+
+### 10.2 ErrorInfo
+
+错误不得只传递 traceback 字符串：
+
+```json
+{
+  "code": "DATA_SNAPSHOT_INCOMPLETE",
+  "category": "data",
+  "message": "PAXG/USDT 1h snapshot has 4 missing partitions",
+  "retryable": false,
+  "details": {"snapshot_id": "snap_...", "missing": 4},
+  "cause_id": "err_..."
+}
+```
+
+traceback 作为受权限控制的诊断 Artifact 保存，不默认返回给所有客户端。
+
+## 11. Canonical 编码
+
+为了保证 digest、幂等和跨进程一致性：
+
+- JSON key 按字典序。
+- UTF-8，无 BOM。
+- 时间戳统一 UTC，并使用 `Z`。
+- 不允许 NaN/Infinity 出现在控制面 JSON。
+- decimal/货币参数使用字符串或明确精度模型。
+- schema 未声明的字段默认拒绝，不静默忽略。
+- 大整数不得通过 JavaScript 不安全 number 表达。
+
+## 12. 环境指纹
+
+可复现任务必须记录：
+
+| 字段 | 内容 |
 |---|---|
-| Contracts 不依赖实现包 | 防止共享底层反向耦合服务 |
-| Dispatcher 不依赖 Kernel | 调度器不加载 pandas 或执行金融算法 |
-| Storage 不依赖 Kernel | 数据服务不执行回测和指标 |
-| Worker 不依赖 Dispatcher 实现 | 只通过协议客户端交互 |
-| SDK 不导入服务私有模块 | 本地模式通过公开嵌入式装配包组合 |
-| Finance schema 不携带 Python 对象 | 所有跨边界字段可验证、可序列化 |
+| `kernel_version` | 金融内核版本 |
+| `operation_impl_version` | operation 实现版本 |
+| `python_version` | Python 版本 |
+| `platform` | OS/arch |
+| `dependency_lock_digest` | 依赖锁摘要 |
+| `code_bundle_digest` | 策略/模型代码摘要 |
+| `random_seed` | 随机种子 |
+| `snapshot_digest` | 输入数据摘要 |
 
-## 5. 核心实体
+这些字段共同形成 `environment_digest`，进入结果 lineage。
 
-### 5.1 Job
+## 13. 本地与远程一致性
 
-Job 是用户可观察的业务任务，具有稳定 `job_id`。Job 不等于队列消息，也不等于 Worker 执行单元。
+Foundation 不定义 `LocalComputeBackend` 与 `RemoteComputeBackend` 两套语义。它只定义 `JobService` 契约：
 
-```text
-JobSpec
-├── metadata
-├── operation
-├── inputs[]
-├── execution
-└── outputs
-```
+- 本地 Session 使用 InProcess JobService 实现。
+- 远程 Session 使用 HTTP JobService 实现。
+- 两者接收同一 JobSpec、返回同一 JobView、生成同一 ResultManifest。
 
-Job 的状态、生命周期和幂等语义详见 `DESIGN_PROT_V31.md`。
+本地模式不是绕过协议直接调用内核，而是把相同的 Dispatcher、Storage 和 Worker 端口组合在同一进程内。这使本地测试真正覆盖远程语义。
 
-### 5.2 Stage
+## 14. 测试要求
 
-Stage 是 Planner 生成的有依赖关系的计划节点，例如参数生成、N 个回测、结果归并。Stage 只存在于 Dispatcher 的执行计划中，不直接暴露为用户必须管理的对象。
+### 14.1 契约测试
 
-### 5.3 WorkUnit
+- 所有 schema 的合法/非法 fixture。
+- canonical JSON 和 digest golden test。
+- Job/WorkUnit/Artifact roundtrip。
+- 状态机允许与禁止迁移。
+- 错误分类与 retryable 判定。
+- 未知字段、缺失字段和版本冲突。
 
-WorkUnit 是可独立租约、重试和完成的最小执行单元。它包含：
+### 14.2 兼容规则
 
-- `work_unit_id`。
-- 所属 `job_id` 与 `stage_id`。
-- 能力 ID 和版本。
-- Planner 生成的内部 `executor_role`，首版固定为 `execute` 或 `reduce`。
-- 输入 Artifact 引用。
-- 已解析参数。
-- 资源请求。
-- 分片信息。
-- 输出合同。
+V3.1 内部第一版可以快速演进，但一旦 P4 对外 SDK 开始使用：
 
-WorkUnit 不通过修改 `job_id` 后缀模拟父子关系。
+- `@1` schema 只能增加有默认值且不改变语义的字段。
+- 破坏性变更新增 operation 主版本。
+- 旧 schema 的读取支持期至少覆盖一个 V3.1 次版本周期。
 
-`executor_role` 不是公共 capability ID，也不允许 Client 在 JobSpec 中指定。它只在持久执行计划和 WorkLease 中出现，使同一 capability 包能够选择普通 Executor 或 Reducer Executor，同时避免开放任意内部处理器调用。该字段参与 plan digest。
+这不是 V2/V3 向后兼容，而是 V3.1 自身契约纪律。
 
-### 5.4 Attempt
+## 15. 结论
 
-Attempt 表示 WorkUnit 的一次实际执行。重试会创建新的 `attempt_id`，并获得新的 fencing token。旧 Attempt 的迟到结果不得覆盖新 Attempt。
-
-### 5.5 Artifact
-
-Artifact 是不可变二进制或结构化结果。大数据、策略包、模型、回测明细、检查点和中间结果都通过 Artifact 传递。
-
-Artifact 的身份以内容摘要为核心，而不是某台机器的临时文件路径。
-
-## 6. 标识设计
-
-| 标识 | 建议 | 说明 |
-|---|---|---|
-| `message_id` | UUIDv7 | 消息唯一性和时间排序 |
-| `job_id` | UUIDv7 | 用户任务 |
-| `stage_id` | UUIDv7 | 计划阶段 |
-| `work_unit_id` | UUIDv7 | 原子执行单元 |
-| `attempt_id` | UUIDv7 | 一次执行尝试 |
-| `worker_id` | 持久 UUID | Worker 实例身份 |
-| `artifact_id` | UUIDv7 | 元数据身份 |
-| `sha256` | 64 位 hex | Artifact 内容身份 |
-| `dataset_snapshot_id` | UUIDv7 | 固定数据快照 |
-
-不得再通过解析 `{task_id}-s3` 推断父任务。
-
-## 7. 时间与区间语义
-
-统一规则：
-
-- 所有协议时间使用 RFC 3339 UTC，例如 `2026-07-20T10:30:00.123456Z`。
-- 市场数据内部使用 Arrow `timestamp[us, tz=UTC]`。
-- 时间范围默认半开区间 `[start, end)`，避免相邻分片重复。
-- `deadline_at` 表示绝对截止时间，`timeout_seconds` 只作为 SDK 辅助输入。
-- 事件排序以 `sequence` 为主、`occurred_at` 为辅，不能依赖不同机器时钟完全同步。
-
-## 8. 金融标识与市场数据 schema
-
-### 8.1 InstrumentRef
-
-```json
-{
-  "asset_class": "crypto",
-  "symbol": "BTC/USDT",
-  "venue": "binance",
-  "currency": "USDT"
-}
-```
-
-迁移期允许 SDK 接收旧字符串符号，但进入协议前必须解析为 `InstrumentRef`。不能让 Storage、Dispatcher 与 Worker 各自猜测数据源。
-
-### 8.2 Timeframe
-
-Timeframe 使用规范字符串：`1s`、`1m`、`5m`、`1h`、`1d`。Contracts 提供解析和标准化，不在各数据源中重复维护。
-
-### 8.3 Canonical OHLCV
-
-| 字段 | Arrow 类型 | 约束 |
-|---|---|---|
-| `ts` | `timestamp[us, tz=UTC]` | 严格升序，快照内唯一 |
-| `instrument` | `string` 或字典编码 | 规范 Instrument key |
-| `timeframe` | `string` | 规范 Timeframe |
-| `open/high/low/close` | `float64` | 有限数，价格非负 |
-| `volume` | `float64` | 默认非负，缺失策略显式记录 |
-| `source` | `string` | 数据来源 |
-| `ingest_batch_id` | `string` | 数据谱系 |
-
-首版继续使用 `float64` 以保证现有指标和回测迁移；精确 Decimal 仅用于未来需要的账务边界，不在首版混入 pandas 核心。
-
-## 9. DatasetSelector 与 DatasetSnapshot
-
-`DatasetSelector` 描述用户想要的数据，`DatasetSnapshot` 描述实际参与计算的不可变数据。
-
-Selector 关键字段：
-
-```text
-instruments[]
-timeframe
-start
-end
-fields[]
-source_policy
-adjustment
-calendar
-as_of
-snapshot_policy
-```
-
-Snapshot Manifest 关键字段：
-
-```text
-dataset_snapshot_id
-resolved_instruments[]
-resolved_range
-row_count
-schema_ref
-artifact_ref
-source_versions[]
-ingest_batch_ids[]
-created_at
-sha256
-```
-
-默认 `snapshot_policy=pin_on_submit`：Storage 在规划阶段生成或复用不可变 Arrow Artifact。后续数据库写入不会改变运行中的 Job。
-
-## 10. ArtifactRef
-
-规范结构：
-
-```json
-{
-  "artifact_id": "0190...",
-  "kind": "market_data_snapshot",
-  "media_type": "application/vnd.apache.arrow.stream",
-  "codec": "arrow-ipc-stream",
-  "size_bytes": 52428800,
-  "sha256": "...",
-  "schema_ref": "stockstat.market.ohlcv/1",
-  "locator": "artifact://sha256/...",
-  "expires_at": null
-}
-```
-
-约束：
-
-- 控制面只传 `ArtifactRef`，不传 base64 大对象。
-- `locator` 是逻辑定位符；具体下载 URL 由 Storage/Data Exchange 临时签发。
-- Artifact 完成上传后不可原地修改。
-- 相同内容可去重，但 Artifact 元数据仍可记录不同业务用途和保留策略。
-- 下载后必须校验 `size_bytes` 与 `sha256`。
-
-## 11. OperationSpec 与能力目录
-
-`OperationSpec` 结构：
-
-```json
-{
-  "capability_id": "finance.backtest.run",
-  "capability_version": "1.0",
-  "parameters": {},
-  "result_schema": "stockstat.result.backtest/1"
-}
-```
-
-Contracts 中只保存 descriptor 和参数 schema，不保存 Executor 实现。
-
-能力版本独立于协议版本：
-
-- 协议 `3.1` 可同时承载 `finance.backtest.run@1.0` 与 `@2.0`。
-- Worker 注册具体能力版本。
-- Dispatcher Planner 选择与 Job 匹配的版本。
-- SDK 可默认使用最新稳定版本，也允许用户固定版本以复现实验。
-
-## 12. ResourceSpec
-
-```text
-cpu_cores
-memory_bytes
-gpu_count
-gpu_memory_bytes
-scratch_bytes
-labels
-exclusive
-```
-
-V3.1 的资源模型保持有限：CPU、内存、GPU、临时磁盘和标签。不会首版引入任意拓扑约束语言。
-
-资源值既可由用户给出上限，也可由 Planner 根据数据规模和能力 descriptor 估算。Dispatcher 最终写入已解析 `ResourceSpec`。
-
-## 13. 错误模型
-
-统一错误对象：
-
-```json
-{
-  "code": "WORKER_LOST",
-  "category": "infrastructure",
-  "message": "worker heartbeat expired during attempt",
-  "retryable": true,
-  "details": {},
-  "causes": [],
-  "trace_id": "..."
-}
-```
-
-错误分类：
-
-| category | 示例 | 默认重试 |
-|---|---|---|
-| `validation` | 参数、schema、能力版本错误 | 否 |
-| `data` | 数据不存在、快照失败、数据质量错误 | 视错误码 |
-| `compute` | 算法异常、数值异常、策略异常 | 默认否 |
-| `infrastructure` | Worker 丢失、网络中断、暂时存储失败 | 是 |
-| `cancelled` | 用户取消、deadline 到期 | 否 |
-| `security` | 签名失败、无权限、代码包不可信 | 否 |
-
-服务不得把原始 Python traceback 作为公共错误主体返回。traceback 进入受控日志，公共错误通过 `error_id` 关联。
-
-## 14. Canonical JSON 与摘要
-
-幂等键、缓存键和签名需要稳定序列化。Foundation 提供 Canonical JSON：
-
-- UTF-8。
-- 对象键按字典序。
-- 无无意义空白。
-- 时间先规范为 UTC RFC 3339。
-- 浮点禁止 NaN/Infinity。
-- 不使用 Python `default=str` 隐式序列化。
-
-Job 语义摘要不包含 `message_id`、`sent_at` 等传输字段；包含已固定的 operation、parameters、input snapshots 和 kernel version。
-
-## 15. 配置模型
-
-Foundation 只定义配置 schema，不读取环境变量或文件。读取与合并由各应用包完成。
-
-建议公共段：
-
-```text
-identity
-endpoints
-timeouts
-protocol
-artifact_policy
-observability
-security
-```
-
-避免复用 V2 中一个 `Config` 同时描述客户端、存储、代理、Dispatcher 和 Worker 的方式。
-
-## 16. 测试策略
-
-### 16.1 Schema 测试
-
-- 每个公开模型 valid/invalid fixtures。
-- JSON round-trip。
-- 未知字段策略测试。
-- 半开时间区间和 UTC 规范测试。
-- NaN/Infinity 拒绝测试。
-
-### 16.2 Golden protocol 测试
-
-每种核心消息保存 canonical JSON fixture，变更时必须显式审阅。禁止因字段顺序、默认值或 datetime 格式产生非预期漂移。
-
-### 16.3 Dependency tests
-
-- 导入 `stockstat_contracts` 不得加载 pandas、numpy、FastAPI、SQLAlchemy。
-- 使用 import graph 测试阻止 Contracts 反向依赖。
-- Dispatcher 和 Storage 包不得导入 `stockstat_kernel`。
-
-### 16.4 Property tests
-
-- ID 唯一性和可排序性。
-- Canonical JSON 稳定性。
-- Artifact 摘要篡改检测。
-- 时间分片无重叠、无缺口。
-
-## 17. 验收标准
-
-- Contracts 包可独立安装和导入。
-- 所有公开 schema 有版本标识和 golden fixture。
-- Job、WorkUnit、Attempt、Artifact 身份完全分离。
-- OHLCV、策略、回测结果等金融 schema 能表达现有功能。
-- 任意服务间共享信息均可由 Contracts 表达，无需导入对方实现。
-- 不存在 `Any` 型公共 payload、pickle payload 或静默 fallback。
+Foundation 的价值不在于抽象数量，而在于把“金融任务如何被唯一描述、如何引用数据、如何持久化状态、如何验证结果”统一起来。只要这组契约稳定，Storage、Dispatcher、Worker、SDK 和金融能力包就可以独立实现、独立部署和增量扩展。

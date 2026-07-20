@@ -1,500 +1,474 @@
 # StockStat V3.1 Dispatcher 架构设计
 
-> 大模块：任务规划、调度与持久状态
-> 日期：2026-07-20
-> 状态：V3.1 设计稿
-> 上位文档：[DESIGN_ARCH_V31.md](DESIGN_ARCH_V31.md)
-> 协议文档：[DESIGN_PROT_V31.md](DESIGN_PROT_V31.md)
+> 大模块：Dispatcher（金融任务控制面）
+> 版本：V3.1 设计稿
+> 关联：[DESIGN_ARCH_FOUNDATION_V31.md](DESIGN_ARCH_FOUNDATION_V31.md)、[DESIGN_ARCH_COMPUTE_V31.md](DESIGN_ARCH_COMPUTE_V31.md)、[DESIGN_PROT_V31.md](DESIGN_PROT_V31.md)
 
 ## 1. 模块定位
 
-Dispatcher 是 `调用 -> 分发 -> {存储、n*计算}` 架构中的控制核心。它负责把一个金融 Job 解析为可执行计划，协调 Storage 固定输入快照，向 Worker 发放有租约的 WorkUnit，持久化状态和事件，并在所有 Stage 完成后发布最终 Result Manifest。
+Dispatcher 是 V3.1 的金融任务控制面，负责接收 Job、校验 operation、创建数据快照、规划 WorkUnit、匹配 Worker、管理租约与重试、聚合结果引用，并向调用方提供状态和事件。
 
-Dispatcher 不负责：
+Dispatcher 明确不负责：
 
-- 保存 OHLCV 主数据。
-- 代理大块数据传输。
-- 在自身进程中运行 pandas、指标、回测或大型归并。
-- 执行用户策略代码。
-- 通过进程内 dict 作为任务事实来源。
+- 存放或转发 OHLCV/DataFrame 大数据。
+- 执行指标、统计或回测算法。
+- cloudpickle 解码用户策略。
+- 持久化最终结果内容。
+- 提供任意函数或任意 DAG 执行。
 
-## 2. 从 V3 实现中纠正的问题
+## 2. V3 Dispatcher 的结构性问题
 
-| V3 现状 | V3.1 决策 |
-|---|---|
-| `Dispatcher` 单类包含提交、分片、预取、Worker、合并、历史、Autoscaler | 拆为 Gateway、Planner、Scheduler、Lease Manager、State Store、Event Log |
-| 任务状态保存在 `_tasks` dict | 所有状态持久化到 Task Store |
-| Redis Queue 与内存 TaskState 不一致 | 队列是派生调度索引，数据库是事实来源 |
-| `task_id-sN` 推断父任务 | 显式 `job_id/stage_id/work_unit_id/attempt_id` |
-| Worker 离线只改状态，不可靠回收任务 | Lease 到期后以 fencing token 创建新 Attempt |
-| retry 只有 TODO | 明确 attempt、退避、错误分类和最大尝试次数 |
-| complete 可重复提交且无防旧结果覆盖 | `attempt_id + lease_token` 条件提交，幂等完成 |
-| Dispatcher 解码 cloudpickle 并 `pd.concat` | Reducer 作为专用 WorkUnit，在 Worker 中归并 Artifact |
-| 数据拉取失败吞异常并返回空数据 | 规划/快照失败是显式终态错误 |
-| 多级 Dispatcher 仅登记拓扑 | V3.1 首版不做树；一个逻辑 Dispatcher 可多副本 HA |
-| 抢占只改状态，未通知 Worker | 首版用取消/租约失效；仅可检查点能力支持暂停恢复 |
+V3 已验证 Client -> Dispatcher -> Worker 的基本图景，但实现仍是原型：
+
+| 问题 | 影响 | V3.1 处理 |
+|---|---|---|
+| Job/Worker/历史在进程内 dict | Dispatcher 重启丢任务 | 持久化 JobStore |
+| slice ID 通过字符串 `-s` 推导父任务 | 脆弱、不可版本化 | 显式 job_id/unit_id |
+| 先出队后执行，无正式 lease | Worker 丢失时状态不清 | 租约 + attempt |
+| fail 直接使整个任务失败 | 无真实重试 | 错误分类 + attempt policy |
+| complete 可重复回调 | 可能重复合并 | attempt token + 幂等 commit |
+| Dispatcher 内联和解码数据/结果 | 内存、带宽、版本耦合 | 只传 ArtifactRef |
+| `auto` 分片缺少业务 planner | 任务类型硬编码 | operation-specific Planner |
+| 多级 Dispatcher 仅登记拓扑 | 复杂度先于需求 | V3.1 首期不做级联 |
+| 抢占只是状态标记 | 语义虚假 | 首期做取消/租约；可恢复抢占后置 |
 
 ## 3. 内部组件
 
+建议独立服务：`stockstat-dispatcher`。
+
 ```mermaid
-graph TB
-    G[API Gateway]
-    CH[Command Handler]
-    QH[Query Handler]
-    CP[Capability Planner]
-    DS[Dataset Snapshot Coordinator]
-    SC[Scheduler]
-    LM[Lease Manager]
-    WR[Worker Registry]
-    SS[(Task State Store)]
-    EL[(Event Log / Outbox)]
-    Q[(Ready Queue Index)]
-
-    G --> CH
-    G --> QH
-    CH --> SS
-    CH --> CP
-    CP --> DS
-    DS -->|Storage control API| ST[Storage]
-    CP --> SS
-    SC --> SS
-    SC --> Q
-    LM --> SS
-    LM --> Q
-    WR --> SS
-    QH --> SS
-    QH --> EL
-    SS --> EL
+flowchart TB
+    API[Job API] --> CMD[Command Service]
+    CMD --> VALID[Operation Validator]
+    VALID --> SNAP[Snapshot Coordinator]
+    SNAP --> PLAN[Finance Planner]
+    PLAN --> STORE[(JobStore)]
+    STORE --> SCHED[Scheduler]
+    REG[Worker Registry] --> SCHED
+    SCHED --> LEASE[Lease Service]
+    LEASE --> WAPI[Worker API]
+    WAPI --> STORE
+    WAPI --> REDUCE[Reducer Coordinator]
+    REDUCE --> STORE
+    STORE --> EVT[Event Log / SSE]
+    STORE --> QUERY[Query Service]
 ```
 
-### 3.1 API Gateway
+### 3.1 组件职责
 
-- 验证认证、授权、协议版本和请求大小。
-- 解析 Contracts 模型。
-- 执行 idempotency lookup。
-- 将命令交给 Command Handler。
-- 提供 Job 查询、事件 SSE、Worker 管理和能力查询。
-- 不读取大型 Artifact 内容。
+| 组件 | 职责 |
+|---|---|
+| Job API | 提交、查询、取消、事件流 |
+| Command Service | 幂等、权限、状态迁移事务 |
+| Operation Validator | 参数 schema、输入类型、策略权限 |
+| Snapshot Coordinator | 向 Storage 创建/解析 DatasetSnapshot |
+| Finance Planner | 将复合 Job 展开为 WorkUnit DAG |
+| JobStore | Job、Unit、Attempt、Lease、Event 持久化 |
+| Worker Registry | capability、资源、版本、健康状态 |
+| Scheduler | ready unit 与 Worker 匹配、公平性和优先级 |
+| Lease Service | 发放、续租、过期回收 |
+| Reducer Coordinator | 创建 merge/rank/aggregate unit |
+| Query Service | 只读视图和集群信息 |
+| Event Log | 可恢复进度订阅和审计 |
 
-### 3.2 Command Handler
+## 4. JobStore
 
-处理 `submit/cancel/retry` 等命令。每个命令在单个数据库事务中更新状态并写入 Outbox 事件，避免“状态已变但事件丢失”。
+### 4.1 首期技术选择
 
-### 3.3 Capability Planner
+- 本地模式：SQLite。
+- 独立部署：PostgreSQL。
+- 队列不以 Redis 作为唯一事实源。
+- 可选 Redis 只用于唤醒、短期通知或缓存，Job 状态以关系数据库为准。
 
-按 `capability_id@version` 查找金融 Planner：
+这样避免“Redis 队列有任务但 Dispatcher 状态丢失”或反向不一致。
 
-1. 校验参数 schema。
-2. 解析输入绑定。
-3. 请求 Storage 固定 DatasetSnapshot。
-4. 生成 Stage DAG。
-5. 生成带内部 `executor_role` 的初始 WorkUnit。
-6. 计算资源请求、分片和 Reducer。
-7. 将完整计划持久化。
+### 4.2 核心表
 
-Planner 是扩展金融能力的主要控制面扩展点。Dispatcher 核心不写 `if task_type == "grid_search"`。
+| 表 | 关键字段 |
+|---|---|
+| `jobs` | job_id、tenant、operation、state、state_version、spec、result_ref |
+| `work_units` | unit_id、job_id、operation、dependencies、state、partition、requirements |
+| `attempts` | attempt_id、unit_id、worker_id、state、started/finished、error |
+| `leases` | lease_id、attempt_id、token_hash、expires_at、renewed_at |
+| `workers` | worker_id、session_id、capabilities、resources、status、last_seen |
+| `job_events` | event_id、job_id、sequence、type、payload、created_at |
+| `idempotency_keys` | tenant、scope、key、resource_id、request_digest |
 
-### 3.4 Scheduler
+### 4.3 事务边界
 
-Scheduler 只处理已规划的 WorkUnit：
+关键操作必须单事务：
 
-- 依赖已满足。
-- 状态为 `ready`。
-- 当前时间已过 `not_before`。
-- Job 未取消、未过 deadline。
+- 接受 Job + 写 accepted event。
+- 创建 WorkUnit DAG + Job 转 queued。
+- 发放 lease + 创建 attempt + unit 转 leased。
+- complete 校验 token + attempt/unit 转 succeeded + 写 event。
+- lease 过期 + attempt lost + unit 重回 ready 或 failed。
+- cancel 标记 + 阻止新 lease。
 
-Scheduler 根据 Worker capability、资源、标签、数据局部性和公平性选择候选。Worker 采用 pull + lease 模式，避免 Dispatcher 必须反向连接任意 Worker。
-
-### 3.5 Lease Manager
-
-Lease 是 V3.1 可靠执行的核心：
-
-- Worker 领取 WorkUnit 时创建 Attempt。
-- 返回 `lease_token`、`lease_expires_at` 和 `heartbeat_after_seconds`。
-- Worker 定期续租。
-- 完成、失败、进度和检查点消息都必须携带 Attempt 与 token。
-- token 过期或不匹配时返回 `STALE_ATTEMPT`。
-- Lease 到期后，WorkUnit 可按策略重新进入 ready。
-
-### 3.6 Worker Registry
-
-保存：
-
-- Worker identity、session、状态。
-- 能力 ID 和版本。
-- 资源总量与实时可用量。
-- Kernel build、Python ABI、平台。
-- 标签、数据可达性和本地 Artifact cache 摘要。
-
-Worker heartbeat 与 WorkLease renew 可合并为一次请求，但 Worker 身份心跳和每个 Attempt 的租约状态在模型上分离。
-
-### 3.7 State Store
-
-首版推荐 PostgreSQL；单机模式使用 SQLite adapter。两者实现同一 Store 接口和事务语义测试。
-
-主要表：
-
-```text
-jobs
-job_inputs
-stages
-work_units
-attempts
-job_results
-artifacts
-workers
-worker_sessions
-job_events
-idempotency_keys
-ingest_schedules
-outbox
-```
-
-Redis 可作 ready queue 和短期 presence 加速层，但不是 Job 真相来源。
-
-### 3.8 Ingest Schedule Trigger
-
-为迁移现有 on-demand/cron 触发和 incremental 采集能力，Dispatcher 提供一个严格受限的采集触发器：
-
-- Schedule 只允许创建 `finance.data.ingest` Job。
-- Trigger 只支持 `manual`、`interval`、`cron`；`incremental` 属于 ingestion 参数。
-- 每个触发时点使用 `schedule_id + scheduled_at` 生成幂等键。
-- 持久化 `next_run_at/last_run_at/enabled`，多 Dispatcher 副本通过条件更新避免重复触发。
-- 默认不补跑长时间停机期间的全部历史窗口；catch-up 策略显式配置。
-- 不允许用户通过该接口定义任意 Stage DAG。
-
-## 4. Job 规划
-
-### 4.1 规划时序
+## 5. Job 提交流程
 
 ```mermaid
 sequenceDiagram
     participant C as Client
     participant D as Dispatcher
-    participant P as Capability Planner
     participant S as Storage
-    participant DB as Task Store
+    participant P as Finance Planner
+    participant DB as JobStore
 
-    C->>D: job.submit(JobSpec)
-    D->>DB: reserve idempotency key + create job
-    D->>P: validate and plan
-    P->>S: resolve DatasetSelector
-    S-->>P: DatasetSnapshot + ArtifactRef
-    P->>DB: persist stages/work units/input refs
-    DB-->>D: transaction committed
-    D-->>C: job.accepted
+    C->>D: POST /jobs (JobSpec + idempotency key)
+    D->>D: auth + schema + operation validation
+    alt input is inline table
+        D->>S: commit input artifact
+        S-->>D: ArtifactRef
+    else input is DatasetQuery
+        D->>S: create DatasetSnapshot
+        S-->>D: SnapshotRef
+    end
+    D->>P: plan(operation, refs, parameters)
+    P-->>D: WorkUnit DAG
+    D->>DB: atomic persist job + units + events
+    D-->>C: 202 JobView
 ```
 
-### 4.2 规划失败
+Planner 失败时 Job 进入 `failed`，错误分类为 validation/data/planning，不产生可执行 Unit。
 
-以下错误在任何 WorkUnit 发放前使 Job 进入 `rejected` 或 `failed`：
+## 6. Planner
 
-- 能力不存在或版本不支持。
-- 参数 schema 错误。
-- 数据 selector 无法解析。
-- 输入 Artifact 不存在或摘要错误。
-- 没有允许的策略包。
-- 计划超过配置上限，例如 1000 万个参数组合。
+### 6.1 Planner 接口
 
-`rejected` 表示请求从未成为可执行 Job；`failed` 表示 Job 已接受但规划或准备阶段失败。具体边界在协议文档中固定。
+```python
+class Planner(Protocol):
+    operation: str
+    def plan(self, job: JobSpec, context: PlanningContext) -> ExecutionPlan: ...
+```
 
-## 5. 金融计划示例
+Planner 属于 Finance capability 包，Dispatcher 通过注册表调用。Dispatcher 核心不硬编码 `if task_type == grid_search`。
 
-### 5.1 单次指标
+### 6.2 典型计划
+
+#### 单指标/单回测
 
 ```text
-Stage 1: indicator.compute (1..N WorkUnits by symbol/indicator)
-Stage 2: finance.indicator.compute internal reducer (only when partitioned)
+one execute unit
 ```
 
-窗口指标按时间分片时，Planner 计算 overlap；Executor 输出有效范围；Reducer 校验无缺口和重复。
-
-### 5.2 单次回测
-
-通常为单 WorkUnit。只有策略和数据语义允许时才按标的分片；不能默认按时间切回测，因为跨窗口持仓、现金和订单状态不可独立归并。
-
-### 5.3 Grid Search
+#### Batch
 
 ```mermaid
-graph LR
-    A[Prepare candidate artifact] --> B1[Backtest shard 1]
-    A --> B2[Backtest shard 2]
-    A --> BN[Backtest shard N]
-    B1 --> R[Search reducer]
-    B2 --> R
-    BN --> R
+flowchart LR
+    J[experiment.batch] --> R1[backtest run 1]
+    J --> R2[backtest run 2]
+    J --> RN[backtest run N]
+    R1 --> M[experiment.merge]
+    R2 --> M
+    RN --> M
 ```
 
-每个 Backtest WorkUnit 可处理一个小 batch 的参数组合，以平衡调度开销和尾延迟。batch 大小由 Planner 根据历史耗时和目标 WorkUnit 时长估算。
-
-### 5.4 Monte Carlo
+#### Grid Search
 
 ```text
-baseline backtest -> returns artifact -> simulation shards -> quantile reducer
+canonical parameter combinations -> groups of backtest units -> rank unit
 ```
 
-每个 shard 有确定的 simulation range 和 seed stream，不因重试改变随机样本。
-
-### 5.5 Walk-forward
-
-每个窗口是独立 Stage 子图。若窗口内含选参，则生成嵌套的内部计划模板，但不向用户暴露通用 DAG API。
-
-### 5.6 数据采集
-
-`finance.data.ingest` Planner 将 source、instrument、range 和 incremental watermark 展开为一个或多个 I/O WorkUnit。每个批次使用稳定 `ingest_batch_id`，Storage upsert 幂等；采集 Schedule 只负责定时创建这种 Job。
-
-## 6. 调度策略
-
-### 6.1 必要匹配
-
-Worker 必须同时满足：
-
-- capability ID/version。
-- Kernel compatibility。
-- CPU、内存、GPU、scratch 下限。
-- 任务要求的标签或安全域。
-- Artifact 可达性。
-
-### 6.2 候选评分
-
-首版可采用可解释加权评分：
+#### Monte Carlo
 
 ```text
-score = locality_bonus
-      + free_resource_score
-      + capability_warm_score
-      - active_load_penalty
-      - recent_failure_penalty
-      - fairness_penalty
+global sample IDs -> deterministic sample ranges -> quantile merge unit
 ```
 
-不在首版实现复杂机器学习调度器。
+#### Walk-forward
 
-### 6.3 公平性与优先级
+```text
+chronological windows -> independent validation units -> ordered merge unit
+```
 
-优先级采用数值越大越高的直觉语义，避免 V3 `-1` 高优的反直觉设计。
+### 6.3 计划约束
 
-建议：
+- DAG 必须无环。
+- Unit 数量有上限，防止参数爆炸。
+- 输入引用必须已 committed。
+- 每个 Unit 的 capability 和资源需求必须可计算。
+- Merge 规则必须显式 operation 化。
+- 用户不能直接提交内部 merge operation。
 
-- `priority` 范围 `0..100`，默认 50。
-- 同一租户内 priority queue。
-- 跨租户使用 weighted fair queue。
-- 可配置每用户最大运行 Job、最大 WorkUnit 和资源额度。
-- 高优先级默认只影响等待队列，不强制抢占运行中的不可检查点任务。
+## 7. 调度模型
 
-### 6.4 数据局部性
+### 7.1 Worker Pull + Lease
 
-Worker heartbeat 可报告缓存 Artifact 的 Bloom filter 或最近热点摘要。Scheduler 优先把引用相同大型数据快照的 WorkUnit 分给已缓存节点，减少 Dispatcher 到 Worker 的重复分发。
-
-Storage 出口仍只需为一个不可变 Artifact 生成一次；多个 Worker 可通过共享 Artifact Store、局部缓存或 peer/cache 层读取，而不是每次查询主数据库。
-
-## 7. 状态机
-
-### 7.1 Job 状态
+V3.1 首期沿用 Worker 拉模式，但补全租约：
 
 ```mermaid
-stateDiagram-v2
-    [*] --> accepted
-    accepted --> planning
-    planning --> queued
-    planning --> failed
-    queued --> running
-    queued --> cancelling
-    running --> cancelling
-    running --> succeeded
-    running --> failed
-    cancelling --> cancelled
-    queued --> expired
-    running --> expired
-    succeeded --> [*]
-    failed --> [*]
-    cancelled --> [*]
-    expired --> [*]
+sequenceDiagram
+    participant W as Worker
+    participant D as Dispatcher
+    participant DB as JobStore
+
+    W->>D: acquire(capabilities, free slots)
+    D->>DB: select ready unit FOR UPDATE SKIP LOCKED
+    D->>DB: create attempt + lease
+    D-->>W: assignment + lease token
+    loop running
+        W->>D: renew lease + progress
+        D->>DB: extend lease, append event
+    end
+    W->>D: complete(ResultManifestRef, lease token)
+    D->>DB: idempotent commit
 ```
 
-### 7.2 WorkUnit 状态
+### 7.2 为什么不首选推模式
+
+- Worker 常在 NAT 或防火墙后。
+- Dispatcher 无需维护到每个 Worker 的长连接。
+- Pull 天然表达可用 slot。
+- HTTP 容易部署和测试。
+
+### 7.3 匹配条件
+
+硬约束：
+
+- operation capability 及主版本。
+- kernel/API 兼容范围。
+- CPU arch/Python runtime（StrategyBundle 时）。
+- 内存、临时盘、GPU。
+- 安全 profile。
+- 数据可达性标签（必要时）。
+
+软评分：
+
+- 已缓存 snapshot/artifact digest。
+- 空闲 slot。
+- 历史 operation 吞吐。
+- 队列等待时间。
+- zone/affinity。
+
+### 7.4 优先级与公平性
+
+`priority` 使用 0-100，数值越大越优先。调度排序建议：
 
 ```text
-blocked -> ready -> leased -> running -> succeeded
-                    |          |-> failed_retryable -> ready
-                    |          |-> failed_terminal
-                    |          |-> cancelled
-                    |-> lease_expired -> ready
+effective_priority = base_priority + aging_bonus - tenant_penalty
 ```
 
-### 7.3 Attempt 状态
+- aging 防止低优先任务饥饿。
+- tenant 配额防止单用户占满集群。
+- 首期不做运行中强制抢占。
+- 高优先任务只优先获得新空闲 slot。
 
-Attempt 是不可回退的审计记录：`leased -> running -> succeeded|failed|expired|cancelled|stale`。
+## 8. Lease、重试与至多一次提交
 
-## 8. 幂等、重复与 exactly-once 边界
+### 8.1 执行语义
 
-系统提供：
+底层是 at-least-once execution：Worker 失联后 Unit 可能重新执行。系统通过以下机制提供“结果提交至多一次”效果：
 
-- Job submit 的效果幂等。
-- Work completion 的条件幂等。
-- Artifact upload 的内容幂等。
-- 事件的 at-least-once 投递和 sequence 去重。
+- 每次执行有唯一 attempt_id 和 lease token。
+- 只有当前有效 attempt 可以提交。
+- ResultManifest 先在 Storage committed。
+- complete 以 `(attempt_id, manifest_digest)` 幂等。
+- 旧 attempt 晚到的 complete 返回 `STALE_LEASE`，不覆盖结果。
 
-系统不承诺 Worker 计算物理 exactly-once。Lease 过期可能导致两个 Attempt 短暂并行，但只有持有当前 fencing token 的 Attempt 可提交为有效结果。金融计算应尽量无外部副作用；需要写入的任务使用幂等 Artifact/Storage commit。
+### 8.2 重试规则
 
-## 9. 取消、超时和检查点
-
-### 9.1 取消
-
-`job.cancel`：
-
-1. Job 进入 `cancelling`。
-2. 未租约 WorkUnit 标记 cancelled。
-3. 活跃 Attempt 收到 cancellation flag；Worker 在 renew 响应中获知。
-4. 支持协作取消的 Executor 终止并确认。
-5. grace period 后租约不再续期，迟到完成被 fencing 拒绝。
-6. 所有 WorkUnit 终止后 Job 进入 `cancelled`。
-
-### 9.2 Deadline
-
-Job 和 WorkUnit 使用绝对 `deadline_at`。Dispatcher 不依赖 Client 持久在线。deadline 到期后不再发新租约，并请求取消运行 Attempt。
-
-### 9.3 Checkpoint
-
-只有 capability descriptor 声明 `checkpoint_mode` 的能力可保存检查点。Checkpoint 是 ArtifactRef，必须绑定：
-
-- capability/version。
-- work_unit_id。
-- attempt_id。
-- input snapshot digests。
-- checkpoint sequence。
-
-首批建议仅对参数搜索 batch、模拟 batch 和模型训练支持检查点；单次轻量指标不需要。
-
-## 10. Reducer 架构
-
-V3 Dispatcher 在内存中反序列化并归并结果，造成内存和业务耦合。V3.1 中 Reducer 是能力模块提供的 Executor：
-
-- Reducer 仍属于原 capability 版本，是计划中的内部 WorkUnit role，不成为用户可提交的通用 `*.reduce` capability。
-- Planner 将 Reducer WorkUnit 的 `executor_role` 固定为 `reduce`；普通 WorkUnit 固定为 `execute`。
-- 输入为上游 ArtifactRef 列表。
-- 输出为类型化聚合 Artifact。
-- 可在普通 Worker 或高内存 Worker 上执行。
-- 可分层归并，避免一次读取上万个分片。
-- Dispatcher 只跟踪依赖和 Result Manifest。
-
-例外：极小 JSON 标量的计数、状态和进度可在 Dispatcher 聚合；金融大型结果不在 Dispatcher 聚合。
-
-## 11. 事件与可观测性
-
-所有状态变化写 `job_events`：
-
-```text
-job.accepted
-job.planning
-job.queued
-job.running
-job.progress
-stage.started
-stage.completed
-work.leased
-work.started
-work.checkpointed
-work.retry_scheduled
-work.succeeded
-work.failed
-job.succeeded
-job.failed
-job.cancelled
-```
-
-事件含单 Job 单调 `sequence`。SSE、Admin、CLI 和审计均读取同一事件日志，不再各自维护历史列表。
-
-日志/指标：
-
-- OpenTelemetry trace：`job_id/stage_id/work_unit_id/attempt_id`。
-- Prometheus metrics：队列等待、运行时长、重试、lease expiry、Worker 资源、Artifact 吞吐。
-- 结构化日志不直接包含策略源代码、token 或大参数。
-
-## 12. 高可用与部署
-
-### 12.1 单逻辑 Dispatcher，多副本
-
-首版生产拓扑：
-
-```mermaid
-graph LR
-    LB[Load Balancer] --> D1[Dispatcher Replica 1]
-    LB --> D2[Dispatcher Replica 2]
-    D1 --> PG[(PostgreSQL)]
-    D2 --> PG
-    D1 --> R[(Redis Ready Index)]
-    D2 --> R
-```
-
-所有副本无本地权威状态。Scheduler 使用数据库条件更新或 advisory lock 保证同一 WorkUnit 不被重复创建有效租约。
-
-### 12.2 多级 Dispatcher
-
-V3.1 不首发多级树。原因：
-
-- 当前真实规模尚未证明需要 100+ Worker。
-- V3 的多级实现没有任务转发语义。
-- HA、lease、Artifact 数据路径应先稳定。
-
-未来若跨地域需要联邦调度，使用显式 federation contract，而不是修改 `reply_to` 原样转发所有消息。
-
-## 13. 安全
-
-- Client 与 Worker 使用不同身份和 scopes。
-- Worker 只能领取允许能力和安全域的任务。
-- Strategy package 必须签名并在 allowlist/trust policy 下执行。
-- Dispatcher 不反序列化 pickle。
-- Job 参数大小、Stage 数和 fan-out 有配额。
-- Worker 完成回调必须验证 worker session、attempt 和 lease token。
-- Admin 操作写审计事件。
-
-## 14. 测试策略
-
-### 14.1 状态机模型测试
-
-- 所有合法/非法迁移。
-- cancel 与 complete 竞争。
-- deadline 与 renew 竞争。
-- lease expiry 与迟到 complete。
-- retry exhaustion。
-- Dispatcher 重启后恢复。
-
-### 14.2 Planner contract tests
-
-每个金融 capability 有固定输入 JobSpec 与期望计划：Stage 数、WorkUnit 数、依赖、seed、overlap、Reducer。
-
-### 14.3 多副本测试
-
-- 两个 Scheduler 并行争抢同一 ready WorkUnit，只能产生一个当前有效 Lease。
-- Outbox 重放不丢事件。
-- Redis 清空后可从 PostgreSQL 重建 ready index。
-
-### 14.4 故障注入
-
-- Storage snapshot 超时。
-- Worker 领取后崩溃。
-- Worker 完成响应丢失并重发。
-- Artifact 上传成功但 complete 前崩溃。
-- 数据库短暂不可用。
-- 大量 capability 不匹配 WorkUnit 不造成队列饥饿。
-
-### 14.5 性能目标
-
-| 指标 | 首版目标 |
+| 错误类别 | 行为 |
 |---|---|
-| 已持久化 Job submit P95 | < 100 ms，不含数据上传 |
-| Work lease P95 | < 50 ms |
-| 100 Worker heartbeat/renew | 稳定无任务状态锁争用 |
-| 10 万 WorkUnit 状态查询 | 分页和索引下可用 |
-| Dispatcher 重启恢复 | 不丢 Job，自动回收过期 lease |
+| validation/finance/code | 不重试 |
+| resource | 换更大资源 Worker，受 policy 限制 |
+| execution/storage/internal | 指数退避重试 |
+| protocol/security | 不重试并隔离 Worker |
+| lease expired | 新 attempt，旧 attempt 作废 |
 
-## 15. 验收标准
+重试次数属于 Job policy，但 operation descriptor 可设置上限。
 
-- Dispatcher 进程不导入 pandas/BacktestEngine。
-- Job、Stage、WorkUnit、Attempt 全部持久化并可审计。
-- Worker 丢失后任务能通过 Lease 自动重试。
-- 迟到 Attempt 不能覆盖新结果。
-- Redis/内存队列丢失不导致 Job 丢失。
-- 所有大型结果归并通过 Reducer WorkUnit 完成。
-- 单机 SQLite 与生产 PostgreSQL 通过相同状态机合同测试。
+### 8.3 Backoff
+
+```text
+delay = min(max_delay, base * 2^attempt + jitter)
+```
+
+不在 Worker 内睡眠重试；Dispatcher 设置 `not_before`，避免占用执行 slot。
+
+## 9. 取消、超时与后续抢占
+
+### 9.1 首期取消
+
+- queued/ready Unit 直接取消。
+- leased/running Unit 设置 cancel_requested。
+- Worker 在 lease renew 时收到取消标记，终止子进程。
+- 超过 grace period 后作废 lease。
+- 已 committed 但 Job 取消竞态按 state_version 决定最终状态。
+
+### 9.2 超时
+
+区分：
+
+- queue timeout。
+- execution timeout。
+- lease timeout。
+- Job deadline。
+
+### 9.3 抢占后置
+
+只有 operation 声明 checkpoint protocol 后才支持可恢复抢占。V3.1 首期不把“线程无法暂停”的占位实现称为抢占。
+
+## 10. Reducer 与结果合并
+
+Reducer 不是 Dispatcher 进程内 `pd.concat`。它是普通 WorkUnit：
+
+- 输入为多个 ResultManifestRef。
+- 在 Worker 上执行 merge/rank/aggregate operation。
+- 输出新的 ResultManifestRef。
+
+好处：
+
+- Dispatcher 不加载大结果。
+- 合并失败可以重试。
+- 合并过程有资源声明和 lineage。
+- 大型 experiment table 可分层归并。
+
+## 11. Worker 注册与健康
+
+Worker 注册包含：
+
+- worker_id 与本次 session_id。
+- operation capabilities + implementation versions。
+- resource totals。
+- execution slots。
+- labels/zone。
+- kernel/protocol 支持范围。
+- cache 摘要（可选 Bloom/Top-N digest）。
+- security profiles。
+
+心跳只报告变化快的字段，不重复完整硬件信息。
+
+Worker 状态：`starting`、`online`、`busy`、`draining`、`offline`、`quarantined`。
+
+## 12. 集群拓扑与扩缩容
+
+### 12.1 首期单 Dispatcher 逻辑集群
+
+支持一个 Dispatcher 服务实例或共享数据库的有限多副本，但只有一个逻辑调度域。暂不实现主/子 Dispatcher 级联。
+
+### 12.2 HA 演进
+
+当需要多副本：
+
+- API 副本无状态。
+- Scheduler 使用数据库抢锁或 leader lease。
+- Worker acquire 可到任意副本。
+- JobStore 保证唯一 lease。
+
+### 12.3 Autoscaler 指标
+
+输出事实指标，不直接输出过于简化的 true/false 建议：
+
+- ready units by resource class。
+- oldest queue age。
+- arrival/completion rate。
+- active/available slots。
+- lease expiry rate。
+- data cache hit hints。
+- estimated CPU seconds backlog。
+
+外部 Autoscaler 根据部署环境决定扩缩容。
+
+## 13. 可观测性
+
+### 13.1 Job 事件
+
+事件包括：
+
+- accepted、planned、queued。
+- unit_ready、unit_leased、unit_started。
+- progress、partial_available。
+- retry_scheduled、worker_lost。
+- cancelling、cancelled。
+- succeeded、failed。
+
+每个 Job 的 sequence 单调递增，SSE 断线可通过 `Last-Event-ID` 恢复。
+
+### 13.2 指标
+
+- submit latency。
+- planning latency。
+- queue wait。
+- execution duration by operation。
+- retry/error counts。
+- stale completion count。
+- active leases。
+- JobStore transaction latency。
+
+### 13.3 日志
+
+日志必须带 `trace_id/job_id/unit_id/attempt_id/worker_id`，禁止只输出自由文本。
+
+## 14. 部署模式
+
+### 14.1 本地组合
+
+Dispatcher 使用 SQLite JobStore，并与本地 Storage/Worker 组合在一个进程，但仍走内部端口接口和相同状态机。
+
+### 14.2 独立服务
+
+```text
+Client -> Dispatcher API
+Dispatcher -> PostgreSQL JobStore
+Dispatcher -> Storage API
+Workers -> Dispatcher Worker API
+Workers -> Storage data API
+```
+
+### 14.3 多 Worker
+
+不同 Worker pool 可以只安装部分 capability，例如：
+
+- `cpu-basic`：指标、统计、渲染。
+- `cpu-backtest`：回测、搜索、模拟。
+- `signal`：PyWavelets/sklearn/非线性。
+- `gpu-ml`：未来 ML/GPU operation。
+
+## 15. 安全
+
+- Client 与 Worker 使用不同凭据和权限域。
+- Worker lease token 短期有效且绑定 attempt。
+- Dispatcher 不接受 Worker 自报的任意 result URL，只接受已在指定 Storage committed 的 ArtifactRef。
+- Worker capability 由注册和镜像/包清单共同验证。
+- 多租户下 Job query、events、results 都做 tenant scope。
+- 请求限流、Unit 数量上限、参数空间上限。
+
+## 16. 测试要求
+
+### 16.1 状态与事务
+
+- 每条允许/禁止状态迁移。
+- 并发相同 idempotency key。
+- 两 Worker 竞争同一 Unit，只发一个 lease。
+- lease 过期重新分配。
+- stale complete 被拒绝。
+- complete 重发幂等。
+- Dispatcher 重启恢复 queued/running Job。
+
+### 16.2 Planner
+
+- batch/grid/Monte Carlo/walk-forward DAG golden tests。
+- 参数组合 canonical 顺序。
+- DAG 上限和环检测。
+- merge unit 依赖正确。
+
+### 16.3 调度
+
+- capability/resource 匹配。
+- priority + aging。
+- tenant 公平性。
+- cache affinity 只是软约束。
+- draining Worker 不获得新 lease。
+
+### 16.4 故障注入
+
+- Worker 执行中断电。
+- Storage commit 后 complete 前断线。
+- complete 后响应丢失并重发。
+- JobStore 短暂不可用。
+- 取消与完成并发。
+
+## 17. 结论
+
+V3.1 Dispatcher 是持久、轻量、金融感知但算法无关的控制面。它通过 operation planner、WorkUnit DAG、租约、attempt 和结果引用，把调用、分发、存储、N 个计算节点真正解耦，同时避免提前引入多级级联、虚假抢占和通用工作流复杂度。

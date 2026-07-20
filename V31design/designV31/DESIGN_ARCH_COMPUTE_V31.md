@@ -1,465 +1,360 @@
-# StockStat V3.1 Compute 架构设计
+# StockStat V3.1 Compute Worker 架构设计
 
-> 大模块：Worker Agent、执行沙箱与 Artifact 数据面
-> 日期：2026-07-20
-> 状态：V3.1 设计稿
-> 上位文档：[DESIGN_ARCH_V31.md](DESIGN_ARCH_V31.md)
-> 依赖文档：[DESIGN_ARCH_FINANCE_V31.md](DESIGN_ARCH_FINANCE_V31.md) | [DESIGN_PROT_V31.md](DESIGN_PROT_V31.md)
+> 大模块：Compute（可独立部署的金融计算执行面）
+> 版本：V3.1 设计稿
+> 关联：[DESIGN_ARCH_FINANCE_V31.md](DESIGN_ARCH_FINANCE_V31.md)、[DESIGN_ARCH_DISPATCHER_V31.md](DESIGN_ARCH_DISPATCHER_V31.md)
 
 ## 1. 模块定位
 
-Compute 模块由可横向扩展的 Worker 节点组成。每个 Worker 包含一个轻量 Agent 和若干隔离执行进程：
+Compute Worker 从 Dispatcher 获取有租约的 WorkUnit，从 Storage 读取不可变输入，在隔离执行器中调用 Finance Kernel，将结果先提交到 Storage，再向 Dispatcher 提交 ResultManifestRef。
 
-- Agent 与 Dispatcher 注册、领取租约、续租、上报状态。
-- Agent 解析 ArtifactRef 并管理本地缓存。
-- Executor Process 加载金融 Kernel 和能力模块，执行一个 WorkUnit。
-- 结果先写 Artifact Store，再以受 fencing 保护的 complete 消息提交。
+Worker 是可横向扩展的无共享执行节点。它不保存 Job 最终状态，不自行分片，不直接接受 Client 请求，也不把结果内容通过 Dispatcher 回传。
 
-Worker 不保存 Job 权威状态，不直接查询可变市场数据库，不承担任务归并的控制逻辑。
+## 2. V3 Worker 的主要问题
 
-## 2. 纠正 V3 Worker 模型
+| 问题 | 影响 | V3.1 处理 |
+|---|---|---|
+| CPU 任务用 `ThreadPoolExecutor` | GIL 下难以多核加速 | 进程执行器/隔离子进程 |
+| Worker 与 Dispatcher 只用临时 HTTP 调用 | 连接复用差、租约不完整 | 长生命周期 client + lease protocol |
+| 数据通过 assignment base64 内联 | 带宽和内存浪费 | 直接读取 Snapshot/Artifact |
+| cloudpickle 任意策略 | 安全和版本风险 | 签名 StrategyBundle |
+| cancel/preempt 只标记 set | 运行任务不停 | 子进程可终止 + cooperative token |
+| 所有 capability 默认宣称支持 | 与安装依赖不一致 | 启动时自检后注册 |
+| handler 注册表与 ComputeSpec 耦合 | 新能力修改共享文件 | operation capability package |
+| 进程内 checkpoint dict | 不可恢复 | 首期确定性重跑；后续 Artifact checkpoint |
 
-| V3 现状 | V3.1 决策 |
-|---|---|
-| CPU 密集任务使用 `ThreadPoolExecutor` | Agent 使用 spawn 进程池/独立子进程 |
-| HTTP 每轮新建 client | 长连接 client，支持 backoff 和连接复用 |
-| 无 backpressure，轮询可超出 capacity | claim 请求显式携带 free slots/resources |
-| 内联 base64 cloudpickle 数据 | ArtifactRef + Arrow 下载/本地 mmap |
-| 任意 cloudpickle 策略 | 签名策略包或受限 declarative strategy |
-| complete 无 lease token | attempt + fencing token 条件提交 |
-| 抢占只在 set 中记标志 | cancel/checkpoint control 贯穿子进程 |
-| Checkpoint 全局内存 dict | Checkpoint Artifact 持久化 |
-| capability 只有任务名字 | capability ID/version + schema + kernel compatibility |
-| Worker 依赖完整前端包 | Worker 依赖 Contracts + Kernel + 能力包 |
+## 3. Worker 内部结构
 
-## 3. 包结构
+```mermaid
+flowchart TB
+    AG[Worker Agent] --> REG[Capability Scanner]
+    AG --> ACQ[Lease Acquirer]
+    ACQ --> SLOT[Slot Manager]
+    SLOT --> EX[Process Executor]
+    EX --> RT[Operation Runtime]
+    RT --> K[Finance Kernel]
+    RT --> CACHE[Artifact Cache]
+    CACHE --> ST[Storage Client]
+    EX --> PROG[Progress/Lease Renewer]
+    PROG --> DISP[Dispatcher Client]
+    EX --> COMMIT[Result Committer]
+    COMMIT --> ST
+    COMMIT --> DISP
+```
 
-建议新建 `services/worker/`，发布名 `stockstat-worker`：
+### 3.1 Worker Agent
+
+负责注册、心跳、获取 lease、drain 和进程管理。Agent 自身不 import 重型金融依赖，以减少主进程崩溃面。
+
+### 3.2 Operation Runtime
+
+子进程加载指定 capability 包、解析 WorkUnit、加载输入、调用 executor、生成 artifacts 和 metrics。
+
+### 3.3 Artifact Cache
+
+按 digest 缓存 Snapshot partitions、StrategyBundle 和常用模型。缓存是只读加临时上传区，不能成为唯一结果存储。
+
+## 4. 包与能力
+
+建议基础包 `stockstat-worker`，能力包按需安装：
 
 ```text
 services/worker/
-├── pyproject.toml
 └── stockstat_worker/
-    ├── cli.py
-    ├── config.py
     ├── agent.py
-    ├── identity.py
-    ├── dispatcher_client.py
-    ├── heartbeat.py
+    ├── registration.py
     ├── leases.py
-    ├── resources.py
-    ├── capabilities.py
-    ├── cache/
-    │   ├── artifacts.py
-    │   └── eviction.py
-    ├── execution/
-    │   ├── supervisor.py
-    │   ├── process.py
-    │   ├── context.py
-    │   ├── cancellation.py
-    │   └── limits.py
-    ├── artifacts/
-    │   ├── resolver.py
-    │   └── publisher.py
-    └── telemetry.py
+    ├── slots.py
+    ├── process_executor.py
+    ├── runtime.py
+    ├── cache.py
+    ├── sandbox.py
+    ├── telemetry.py
+    └── cli.py
+
+packages/capabilities/
+├── stockstat-cap-basic
+├── stockstat-cap-statistics
+├── stockstat-cap-backtest
+├── stockstat-cap-signal
+├── stockstat-cap-experiment
+└── stockstat-cap-render
 ```
 
-金融算法位于独立 `packages/kernel/stockstat_kernel/`，详见 `DESIGN_ARCH_FINANCE_V31.md`。
+首期也可以将能力包放在 monorepo 内统一发布，但注册边界保持独立。
 
-## 4. Worker 内部架构
+## 5. Capability 扫描
+
+Worker 启动时只注册真正可执行的 operation：
+
+1. 发现受信任 capability entry points。
+2. 校验 contract 和 kernel 版本。
+3. 运行轻量 self-test。
+4. 检查可选依赖和外部 runtime。
+5. 生成 capability manifest digest。
+6. 注册 operation、实现版本、资源 profile 和 security profile。
+
+示例：未安装 PyWavelets 时，Worker 不应宣称完整 `feature.spectral@1`。如果 Finance Kernel 提供明确的 fallback 实现，则注册 descriptor 中标记实现变体和版本。
+
+## 6. 执行隔离
+
+### 6.1 默认进程模型
+
+每个 slot 对应一个独立任务子进程，而不是长期复用的任意 Python 状态进程。首期建议：
+
+- Agent 主进程。
+- `spawn` 创建任务子进程，Windows/Linux 一致。
+- 每个任务独立临时目录。
+- 完成后退出子进程，避免用户策略污染后续任务。
+- 对只含内置纯函数的轻任务，后续可增加受控常驻进程池优化。
+
+### 6.2 资源限制
+
+| 资源 | 机制 |
+|---|---|
+| CPU | slot 数 + OS/container quota |
+| 内存 | container/cgroup/job object；软监控 + 硬终止 |
+| 时间 | execution timeout |
+| 临时盘 | task workspace quota |
+| 网络 | 默认仅允许 Storage；策略网络禁用 |
+| 文件 | 只读输入，独立写目录 |
+
+Windows 本地开发可用 Job Object 或进程监控实现有限控制；生产 Linux 推荐容器/cgroup。
+
+### 6.3 StrategyBundle
+
+用户策略属于不可信代码：
+
+- 校验 digest 和签名。
+- 解压到任务目录，防路径穿越。
+- 只允许 manifest 声明入口。
+- 依赖使用预构建环境或受控 lock，不在运行时任意 `pip install` 公网包。
+- 默认禁网。
+- 运行用户无特权。
+
+## 7. Slot 与并发
+
+### 7.1 Slot 类型
+
+Worker 可以声明多个资源池：
+
+```json
+{
+  "pools": [
+    {"name": "cpu-small", "slots": 4, "memory_mb_per_slot": 2048},
+    {"name": "cpu-large", "slots": 1, "memory_mb_per_slot": 16384}
+  ]
+}
+```
+
+首期不在单个 Worker 内做复杂 bin packing。Unit 指定 resource class，Agent 只在对应 pool 有空闲 slot 时 acquire。
+
+### 7.2 CPU 密集任务
+
+回测、CWT、重采样和 Monte Carlo 使用进程并行。避免 Worker 外层 N 进程、operation 内层再开 N 进程造成过度订阅：
+
+- 默认 operation 内部单线程/单进程。
+- BLAS/OpenMP 线程数由 slot 配置限制。
+- 并行由 Dispatcher 的 WorkUnit 分片承担。
+- 明确允许内部并行的 operation 在 descriptor 中声明。
+
+## 8. 数据加载
+
+### 8.1 SnapshotResolver
+
+执行前：
+
+1. 获取 snapshot manifest。
+2. 校验 operation 需要的 instrument/timeframe/fields。
+3. 检查本地 digest cache。
+4. 并发下载缺失 partitions。
+5. 校验 digest。
+6. 使用 Arrow Dataset/Parquet predicate pushdown 读取需要的范围。
+7. 转为 Kernel 接受的受控 table/frame。
+
+### 8.2 不经过 Dispatcher
+
+数据链路：
 
 ```mermaid
-graph TB
-    A[Worker Agent]
-    DC[Dispatcher Client]
-    RM[Resource Manager]
-    CR[Capability Registry]
-    AC[Artifact Cache]
-    ES[Execution Supervisor]
-    P1[Spawned Executor 1]
-    P2[Spawned Executor 2]
-    PN[Spawned Executor N]
-    AS[Artifact Store]
-
-    A --> DC
-    A --> RM
-    A --> CR
-    A --> AC
-    A --> ES
-    ES --> P1
-    ES --> P2
-    ES --> PN
-    AC <--> AS
-    P1 --> AC
-    P2 --> AC
-    PN --> AC
+flowchart LR
+    S[Storage Blob] --> W1[Worker 1 cache]
+    S --> W2[Worker 2 cache]
+    S --> WN[Worker N cache]
+    D[Dispatcher] -.only refs.-> W1
+    D -.only refs.-> W2
+    D -.only refs.-> WN
 ```
 
-## 5. Worker 生命周期
+Storage 出口仍可能被 N Worker 下载，但通过不可变快照、Worker 本地缓存、共享对象存储和调度 cache affinity 解决，而不是让 Dispatcher 永久成为 N 倍中转瓶颈。对于同一 Job 的相同数据：
 
-```mermaid
-stateDiagram-v2
-    [*] --> starting
-    starting --> registering
-    registering --> ready
-    ready --> busy
-    busy --> ready
-    ready --> draining
-    busy --> draining
-    draining --> stopped
-    ready --> offline: session expired
-    busy --> offline: session expired
-```
+- 同机多进程共享 Worker 节点缓存。
+- 跨机 Worker 各下载一次，而不是每个 task 下载一次。
+- 大规模部署可用对象存储/CDN/局域网缓存。
 
-步骤：
+这比 V2 “Dispatcher 预取后 N 次分发”更符合 Storage 与计算完全独立部署，同时保留 Storage 只读、内容寻址和复用优势。
 
-1. 加载显式 allowlist 能力。
-2. 检测 CPU、内存、GPU、scratch 和 Kernel build。
-3. 加载或创建持久 Worker identity。
-4. 向 Dispatcher 注册并获得 `worker_session_id`、heartbeat/lease 参数。
-5. 按 free capacity 领取 WorkLease。
-6. 下载/验证输入 Artifact。
-7. 启动子进程执行。
-8. 周期续租、上报进度和资源使用。
-9. 发布结果 Artifact 并 complete。
-10. drain 时停止领取新任务，等待或取消现有 Attempt。
-
-## 6. 身份与注册
-
-Worker identity 分两层：
-
-| 标识 | 生命周期 |
-|---|---|
-| `worker_id` | 节点配置持久保存，重启保持 |
-| `worker_session_id` | 每次 Agent 启动新建，防旧进程继续上报 |
-
-注册内容：
-
-```text
-worker_id
-worker_session_id
-alias
-agent_version
-kernel_build_id
-python_abi
-platform
-resources_total
-capabilities[]
-labels
-artifact_access_modes
-cache_capacity
-security_attestation(optional)
-```
-
-Dispatcher 返回：
-
-```text
-accepted protocol
-heartbeat interval
-lease defaults
-max claim batch
-worker token/session expiry
-server time
-```
-
-## 7. Capacity 与资源管理
-
-### 7.1 Slot 不是唯一资源
-
-Worker 维护资源 reservation：
-
-- CPU cores。
-- Memory bytes。
-- GPU device/VRAM。
-- Scratch disk。
-- Executor process count。
-
-领取 WorkUnit 前先本地判断可承载资源。Dispatcher 同时做全局匹配，形成双重保护。
-
-### 7.2 默认执行器
-
-| 任务 | 默认执行方式 |
-|---|---|
-| 指标/统计 | spawn process |
-| 回测 | spawn process |
-| 参数组合 batch | spawn process，每进程串行小 batch |
-| Monte Carlo shard | spawn process，numpy 可释放 GIL 但仍按进程隔离 |
-| GPU 模型 | 指定 GPU 的独立长期 process，可后续实现 |
-| 数据下载/上传 | Agent async I/O，不占计算 slot |
-| 数据源采集 | 专用 I/O Worker pool 或 Storage Command Worker，不与 CPU 回测 slot 混用 |
-
-使用 `spawn` 而非依赖 `fork`，保证 Windows 与 Linux 语义接近，并避免继承不安全连接状态。
-
-### 7.3 线程控制
-
-每个 Executor 设置 BLAS/OpenMP 线程数，防止 `N processes x N BLAS threads` 过度订阅：
-
-```text
-OMP_NUM_THREADS
-MKL_NUM_THREADS
-OPENBLAS_NUM_THREADS
-NUMEXPR_NUM_THREADS
-```
-
-默认按 WorkUnit `cpu_cores` 分配。
-
-## 8. Claim 与 Lease
-
-Worker 使用长轮询：
-
-```text
-POST /internal/v31/work/claim
-free_resources + capability_versions + cache_hints
-```
-
-Dispatcher 可返回 0..N 个 WorkLease。Agent 只有在本地 reservation 成功后确认启动；无法启动时立即 `work.release`，不等待 lease 到期。
-
-Lease renew：
-
-- renew 周期小于 TTL 的 1/3。
-- 每个 Attempt 独立 token。
-- renew 携带进度、checkpoint ref、资源快照。
-- Dispatcher 响应可携带 `continue/cancel/checkpoint_and_stop`。
-- Agent 与 Dispatcher 暂时断开时允许短 grace；超过 lease expiry 后子进程结果不得提交为有效结果。
-
-## 9. 执行上下文
-
-Executor 接收只读 `ExecutionContext`：
-
-```text
-job_id
-stage_id
-work_unit_id
-attempt_id
-capability_id/version
-executor_role
-parameters
-input_artifacts
-partition
-deadline_at
-random_seed
-resource_limits
-checkpoint_ref
-trace_context
-```
-
-能力 Executor 的标准接口：
-
-```python
-class CapabilityExecutor(Protocol):
-    def execute(
-        self,
-        context: ExecutionContext,
-        inputs: ResolvedInputs,
-        reporter: ProgressReporter,
-    ) -> ExecutionOutput: ...
-```
-
-`ExecutionOutput` 只含小型 manifest 和待发布文件/Arrow streams，不返回任意 Python 对象给 Agent。
-
-Worker 以 `(capability_id, capability_version, executor_role)` 选择入口。`executor_role` 由 Planner 写入 WorkLease，首版仅允许 `execute` 和 `reduce`；Client 不能在 JobSpec 中选择它。能力没有对应 role 时，Worker 拒绝启动并返回 capability mismatch。
-
-## 10. Artifact 解析与缓存
-
-### 10.1 Resolver
-
-对于每个输入 Artifact：
-
-1. 查本地 content-addressed cache。
-2. 命中则校验 metadata/digest。
-3. 未命中则使用 download session 拉取到临时文件。
-4. 校验 size 和 sha256。
-5. 原子 rename 到 cache。
-6. 按输入模式提供 mmap、Arrow batches 或文件路径。
-
-### 10.2 Cache key
-
-缓存键为 digest，不是 Job ID。相同数据快照可被不同 Job 和 WorkUnit 复用。
-
-### 10.3 Eviction
-
-LRU + pin：
-
-- 活跃 Attempt 输入被 pin。
-- 上传中的输出被 pin。
-- 热点 Snapshot 可有短 TTL pin。
-- cache 超限先删除无 pin、最久未用对象。
-
-## 11. 结果发布
-
-正确顺序：
+## 9. WorkUnit 生命周期
 
 ```mermaid
 sequenceDiagram
-    participant P as Executor Process
-    participant A as Worker Agent
-    participant S as Artifact Store
+    participant A as Agent
     participant D as Dispatcher
+    participant S as Storage
+    participant P as Task Process
 
-    P-->>A: output files + manifest
-    A->>S: create/upload/commit
-    S-->>A: ArtifactRef(s)
-    A->>D: work.complete(attempt, token, refs)
-    D-->>A: accepted or stale
+    A->>D: acquire lease
+    D-->>A: WorkUnit + token
+    A->>P: spawn(unit, workspace)
+    P->>S: resolve snapshot/artifacts
+    loop progress
+        P-->>A: progress event
+        A->>D: renew lease + progress
+    end
+    P->>S: upload + commit result manifest
+    S-->>P: ResultManifestRef
+    P-->>A: success(ref, metrics)
+    A->>D: complete attempt
+    D-->>A: committed/duplicate/stale
 ```
 
-若 `work.complete` 响应丢失，Agent 使用相同 completion ID 重试。若 Dispatcher 返回 stale，Artifact 成为暂时无引用对象，后续由 GC 回收。
+## 10. Progress 与 partial
 
-## 12. 进度、日志与流式结果
+Operation Runtime 使用结构化 progress API：
 
-进度是小型事件：
-
-```text
-fraction
-completed_units
-total_units
-message
-metrics
-checkpoint_ref
+```python
+ctx.progress.update(completed=125, total=1000, phase="backtest")
+ctx.progress.publish_partial(artifact_ref)
+ctx.cancellation.raise_if_requested()
 ```
 
-大型 partial result 不通过 heartbeat/renew 内联。若任务需要逐批结果：
+Agent 节流发送，例如最多每秒一次，防止 100 Worker 产生过量小消息。
 
-1. Worker 发布 partial Artifact。
-2. 上报 `work.partial`，包含 ArtifactRef 和 monotonic `partial_sequence`。
-3. Dispatcher 写 JobEvent。
-4. Client 订阅后按需下载。
+partial 必须先写 Storage。Agent 不在心跳中嵌入表格。
 
-日志：
+## 11. 取消与故障
 
-- 子进程 stdout/stderr 捕获到结构化日志。
-- 限制单 Attempt 日志量。
-- 完整日志可作为受控 Artifact。
-- 公共事件只包含摘要。
+### 11.1 取消
 
-## 13. 取消与检查点
+- Agent 在 lease renew 响应中收到 `cancel_requested`。
+- 先发送 cooperative cancellation 到子进程。
+- grace period 后强制终止子进程。
+- 清理未 committed upload session 和 workspace。
+- 向 Dispatcher 报告 cancelled。
 
-Agent 收到取消后：
+### 11.2 Agent 崩溃
 
-1. 设置共享 cancellation token。
-2. 能力在安全点检查。
-3. 若要求 checkpoint，Executor 写 checkpoint 输出。
-4. grace period 到期后终止子进程。
-5. Windows 使用 terminate/job object；Linux 可使用 process group/cgroup。
-6. 上报 cancelled 或 checkpointed。
+Lease 到期后 Dispatcher 重试。已上传但未通知的 Artifact 由 retention/GC 清理，或新 attempt 可按 digest 复用。
 
-首版不承诺对任意策略行级抢占。回测可在 bar 边界检查取消，但完整恢复需要序列化 Broker/Portfolio/Strategy 状态，延后实现。参数搜索和 Monte Carlo 在 item/batch 边界天然可恢复。
+### 11.3 子进程崩溃
 
-## 14. 安全与隔离
+Agent 捕获 exit code、资源指标和受控 stderr，生成诊断 Artifact，再报告分类错误。
 
-### 14.1 策略执行
+### 11.4 Storage 短暂失败
 
-- 只加载签名策略包。
-- 入口点和依赖 lock manifest 明确。
-- Worker trust policy 可禁用用户策略，只运行 builtins。
-- 包解压防 path traversal。
-- 禁止从控制消息反序列化 pickle。
+结果 upload/commit 在 lease 有效期内做有限重试，并继续 renew lease。超过 deadline 报 storage error，由 Dispatcher 决定重试 Unit。
 
-### 14.2 进程隔离
+## 12. 确定性
 
-首版最低要求：
+Worker 必须避免执行位置影响结果：
 
-- 独立子进程。
-- 受限工作目录。
-- 环境变量 allowlist。
-- CPU/memory/deadline 限制。
-- 非 root 容器运行。
-- 生产可使用容器/cgroup；Windows 使用 Job Objects。
+- random seed 来自 WorkUnit。
+- sample ID 映射固定。
+- 输入 partition 排序固定。
+- 参数 canonical 化。
+- merge 不依赖完成顺序。
+- 环境版本进入 result manifest。
+- BLAS 非确定性 operation 必须标记并设置容差。
 
-网络隔离按能力配置：普通回测/指标 Executor 默认不需要外网。
+## 13. 缓存
 
-### 14.3 Secret
+### 13.1 缓存对象
 
-策略任务默认无 secret。需要数据源凭证的 ingestion capability 通过短期 secret injection，日志和 result 不得回传 secret。
+- Dataset partitions。
+- StrategyBundle。
+- 模型 bundle。
+- 只读公共派生特征（可选）。
 
-## 15. 能力发现与版本
+### 13.2 淘汰
 
-Worker 启动时从显式配置或 entry points 加载能力。任何加载失败必须让该能力不注册并产生显式启动诊断，不能静默跳过。
+LRU + size quota，正在执行引用的 entry pin。digest 不匹配立即删除并重新下载。
 
-能力注册示例：
+### 13.3 调度提示
 
-```text
-finance.indicator.compute@1.0
-finance.timeseries.analyze@1.0
-finance.backtest.run@1.0
-finance.simulation.resample@1.0
-finance.experiment.search@1.0
-finance.experiment.batch@1.0
-finance.validation.walk_forward@1.0
-finance.data.ingest@1.0
+Worker 注册不上传完整缓存清单；可周期报告 Top-N 热数据 digest 或 Bloom filter。Scheduler 只将其作为软 affinity。
+
+## 14. Worker CLI
+
+```bash
+stockstat-worker run \
+  --dispatcher-url http://dispatcher:9000 \
+  --storage-url http://storage:8000 \
+  --alias cpu-node-a \
+  --pool cpu-small=4x2GB \
+  --pool cpu-large=1x16GB \
+  --cache-dir /var/cache/stockstat \
+  --workspace-dir /var/lib/stockstat-worker
 ```
 
-Reducer 是所属金融 capability 的内部 WorkUnit/Executor 角色，不额外暴露一个用户可提交的通用 `*.reduce` capability。Worker 注册每个 capability version 支持的 `executor_roles`。Worker 可同时安装多个 major 版本，但一个 WorkUnit 精确指定版本和 role。
+管理命令：
 
-## 16. 本地与远程一致性
+- `stockstat-worker capabilities`
+- `stockstat-worker self-test`
+- `stockstat-worker drain`
+- `stockstat-worker cache stats`
+- `stockstat-worker cache prune`
 
-Local Worker 与 Remote Worker 使用同一个 Agent/Supervisor/Kernel。区别：
+## 15. Worker 类型
 
-- ControlChannel 为 embedded 或 HTTP。
-- ArtifactStore 为 local filesystem 或 S3-compatible。
-- 资源规模不同。
+### 15.1 LocalWorker
 
-禁止新增“LocalExecutor 直接返回 Python 对象”路径。测试可在同进程启动 Agent，但 Executor 仍默认在 spawn 子进程中运行。
+与 SDK 同进程的 Agent 组合，但 operation 仍在子进程执行，可真实测试取消、资源隔离和序列化边界。
 
-## 17. 测试策略
+### 15.2 TrustedWorker
 
-### 17.1 Agent 单元测试
+只执行内置 capability，不接受用户 StrategyBundle，适合指标、统计和公共服务。
 
-- 注册 payload。
-- free resource reservation/release。
-- claim backpressure。
-- heartbeat/renew backoff。
-- drain 状态。
-- stale session 处理。
+### 15.3 StrategyWorker
 
-### 17.2 Process tests
+允许签名 StrategyBundle，使用更强隔离。
 
-- spawn 执行与结果文件。
-- child crash/segfault 模拟。
-- timeout kill。
-- memory limit。
-- cancellation grace。
-- BLAS thread env。
-- Windows/Linux 差异合同。
+### 15.4 Future GPU Worker
 
-### 17.3 Lease tests
+只在有真实 `ml.train`、option simulation 或 GPU operation 后增加，不为“可能使用 GPU”提前复杂化首期调度。
 
-- renew 成功。
-- 网络中断超过 TTL。
-- complete 重试。
-- 旧 token 被拒绝。
-- release 后重新分配。
+## 16. 测试要求
 
-### 17.4 Artifact tests
+### 16.1 单元与组件
 
-- cache 命中不重复下载。
-- digest mismatch。
-- partial download 清理。
-- mmap/Arrow batch 输入。
-- result upload 成功后 complete。
+- capability 扫描和缺依赖降级。
+- slot 上限和 pool 匹配。
+- snapshot cache 命中/校验/淘汰。
+- StrategyBundle 签名、入口和安全解压。
+- progress 节流。
+- result 两阶段提交。
 
-### 17.5 金融执行 parity
+### 16.2 进程与资源
 
-- 23 指标与旧实现 golden 对比。
-- 代表回测逐字段对比。
-- Grid/Monte Carlo 分片重试后结果不变。
-- 固定 seed 在 Worker 数变化时保持定义好的确定性。
+- CPU 任务真实使用多进程。
+- 任务超时终止。
+- 取消 grace + kill。
+- OOM/exit code 分类。
+- workspace 隔离和清理。
+- BLAS 线程不过度订阅。
 
-### 17.6 故障注入
+### 16.3 故障注入
 
-- 执行中 Agent 被 kill。
-- 子进程被 kill，Agent 仍存活。
-- Artifact Store 暂不可用。
-- Dispatcher complete 响应丢失。
-- 磁盘 cache 满。
-- capability package 加载失败。
+- Agent 被 kill，lease 回收。
+- 子进程完成后 Agent 在 complete 前崩溃。
+- Storage 上传中断。
+- stale attempt 晚到。
+- Dispatcher 响应丢失导致 complete 重发。
 
-## 18. 验收标准
+### 16.4 金融一致性
 
-- CPU 密集任务使用进程隔离，不使用线程池作为主要并行方式。
-- Worker 仅按空闲资源领取任务。
-- 所有工作受 Lease/fencing 保护。
-- 大数据通过 Artifact 下载和 cache，不通过 base64 JSON。
-- Worker 不直连可变 OHLCV 数据库。
-- 用户策略不通过 cloudpickle 跨网执行。
-- Local/Remote Worker 使用相同执行路径和能力包。
+- 同 WorkUnit 在 LocalWorker、单远程 Worker、多 Worker 上结果一致。
+- PAXG batch、grid、Monte Carlo、walk-forward 分片数改变时结果一致。
+
+## 17. 结论
+
+V3.1 Worker 以“租约执行 + 内容寻址数据 + 进程隔离 + 结果先入 Storage”为核心，把计算资源与调用、Dispatcher 和 Storage 真正分离。它仍然紧贴金融 operation，不演化为任意代码集群。

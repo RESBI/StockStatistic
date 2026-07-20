@@ -1,516 +1,462 @@
 # StockStat V3.1 Invocation 架构设计
 
-> 大模块：Python SDK、CLI、DSL 与调用网关
-> 日期：2026-07-20
-> 状态：V3.1 设计稿
-> 上位文档：[DESIGN_ARCH_V31.md](DESIGN_ARCH_V31.md)
-> 依赖文档：[DESIGN_ARCH_FOUNDATION_V31.md](DESIGN_ARCH_FOUNDATION_V31.md) | [DESIGN_PROT_V31.md](DESIGN_PROT_V31.md)
+> 大模块：Invocation（Python SDK、CLI、DSL 与管理入口）
+> 版本：V3.1 设计稿
+> 关联：[DESIGN_ARCH_V31.md](DESIGN_ARCH_V31.md)、[DESIGN_PROT_V31.md](DESIGN_PROT_V31.md)
 
-## 1. 模块职责
+## 1. 模块定位
 
-Invocation 将用户意图转换为类型化的 Storage 请求或金融 Job，并把异步任务、事件和 Artifact 还原成金融友好的 Python 结果。
+Invocation 向金融研究用户提供统一调用入口，把用户意图编译为类型化 JobSpec，并通过 Local 或 Remote Session 执行。它包含 Python SDK、CLI、可选 DSL 编译器和 Admin 查询入口，但不包含金融算法实现和服务端状态。
 
-Invocation 包含：
+V3.1 不保留 `StockStatClient` 与 `V2Client` 两套客户端，也不要求用户注入 `ComputeBackend`。统一入口为 `StockStat`/`Session`。
 
-- 公共 Python SDK。
-- 同步与异步任务句柄。
-- 金融命名空间 API。
-- CLI。
-- DSL 编译器。
-- Artifact 上传、下载与本地缓存。
-- 本地嵌入式拓扑装配入口。
-- 旧代码迁移工具和迁移报告。
+## 2. 设计目标
 
-Invocation 不包含：
+- 同一用户代码可选择本地组合部署或远程服务。
+- 同步便捷调用和异步 JobHandle 共用同一提交路径。
+- 数据表、快照、策略包和结果有明确类型。
+- 当前所有旧客户代码都有明确迁移写法。
+- SDK 不暴露 Dispatcher/Transport 实现细节。
+- SDK 不通过 `isinstance(LocalBackend)` 分叉业务行为。
 
-- 指标和回测算法实现。
-- 调度策略和任务状态持久化。
-- OHLCV 数据库访问实现。
-- Worker 线程池或进程池。
+## 3. 包结构
 
-## 2. 一个调用模型
+建议包名继续使用 `stockstat`，但内容完全重构：
 
-V3.1 删除以下分叉：
+```text
+packages/sdk/
+└── stockstat/
+    ├── __init__.py
+    ├── facade.py
+    ├── session.py
+    ├── jobs.py
+    ├── results.py
+    ├── tables.py
+    ├── strategy.py
+    ├── api/
+    │   ├── market.py
+    │   ├── features.py
+    │   ├── statistics.py
+    │   ├── backtests.py
+    │   ├── experiments.py
+    │   ├── simulations.py
+    │   ├── validation.py
+    │   ├── render.py
+    │   └── cluster.py
+    ├── transports/
+    │   ├── http.py
+    │   └── inprocess.py
+    ├── dsl/
+    │   ├── parser.py
+    │   └── compiler.py
+    ├── migrate/
+    │   ├── scanner.py
+    │   └── report.py
+    └── cli.py
+```
 
-- `StockStatClient` 与 `V2Client` 双客户端。
-- online/offline 两套方法实现。
-- `LocalComputeBackend` 直调金融核心。
-- `RemoteComputeBackend` 走 Dispatcher。
-- `AutoComputeBackend` 在客户端猜测任务规模。
-- `backtest()` 特判本地后端。
+## 4. 统一 Session
 
-统一入口为 `StockStat` Session：
+### 4.1 创建方式
 
 ```python
 from stockstat import StockStat
 
-# 嵌入式单机拓扑
-ss = StockStat.local(path="stockstat.db")
+# 本地一体化：本地 Storage + Dispatcher + Worker
+session = StockStat.local("./runtime")
 
-# 分离部署拓扑
-ss = StockStat.connect("https://dispatcher.example.com", token="...")
-```
-
-`local()` 与 `connect()` 返回相同接口。差异只在 Session 内部使用的 `ControlChannel` 和 `ArtifactChannel` Adapter。
-
-## 3. 同步与异步语义
-
-所有计算调用先构造 Job。同步 API 只是 `submit + wait + materialize` 的语法糖。
-
-```python
-# 同步
-ma = ss.indicators.ma(series, window=20)
-
-# 同一个能力的异步形式
-job = ss.indicators.submit(
-    "ma",
-    input=series,
-    window=20,
+# 远程：Dispatcher 和 Storage 可分别部署
+session = StockStat.connect(
+    dispatcher_url="https://dispatch.example.com",
+    storage_url="https://storage.example.com",
+    token="...",
 )
-ma = job.wait().as_series()
 ```
 
-内部链路必须相同：
-
-```mermaid
-sequenceDiagram
-    participant U as User
-    participant SDK as StockStat SDK
-    participant D as Dispatcher
-    participant W as Worker
-
-    U->>SDK: indicators.ma(...)
-    SDK->>SDK: build JobSpec
-    SDK->>D: job.submit
-    D->>W: WorkLease
-    W-->>D: work.complete + ArtifactRef
-    D-->>SDK: job.succeeded event
-    SDK->>SDK: download/materialize Artifact
-    SDK-->>U: pandas Series
-```
-
-同步调用不得绕过 Dispatcher 和 Worker Runtime，即使所有组件位于同一进程或同一台机器。
-
-## 4. SDK 包结构
-
-建议新建 `packages/sdk/`，发布名继续使用 `stockstat`，但代码为全新实现：
-
-```text
-packages/sdk/
-├── pyproject.toml
-└── stockstat/
-    ├── __init__.py
-    ├── session.py
-    ├── config.py
-    ├── channels/
-    │   ├── control.py
-    │   ├── artifacts.py
-    │   ├── http.py
-    │   └── embedded.py
-    ├── jobs/
-    │   ├── handle.py
-    │   ├── events.py
-    │   └── result.py
-    ├── data/
-    │   ├── api.py
-    │   ├── selectors.py
-    │   └── frames.py
-    ├── indicators/
-    │   └── api.py
-    ├── backtests/
-    │   └── api.py
-    ├── experiments/
-    │   └── api.py
-    ├── risk/
-    │   └── api.py
-    ├── portfolio/
-    │   └── api.py
-    ├── dsl/
-    │   ├── parser.py
-    │   ├── compiler.py
-    │   └── diagnostics.py
-    ├── artifacts/
-    │   ├── upload.py
-    │   ├── download.py
-    │   └── cache.py
-    ├── migration/
-    │   ├── scanner.py
-    │   ├── strategy_packager.py
-    │   └── report.py
-    └── cli/
-        ├── main.py
-        ├── data.py
-        ├── jobs.py
-        ├── cluster.py
-        └── migrate.py
-```
-
-## 5. 公共 API
-
-### 5.1 Data API
+本地与远程 Session 都实现相同内部接口：
 
 ```python
-bars = ss.data.ohlcv(
-    "BTC/USDT",
-    venue="binance",
+class SessionProtocol(Protocol):
+    jobs: JobService
+    storage: StorageService
+```
+
+### 4.2 资源 API
+
+```python
+session.market
+session.features
+session.statistics
+session.backtests
+session.experiments
+session.simulations
+session.validation
+session.render
+session.cluster
+```
+
+这些是金融领域 API，不是服务端对象的直接代理。
+
+## 5. 数据使用
+
+### 5.1 采集与查询
+
+```python
+session.market.ingest(
+    "crypto:binance:PAXG/USDT",
     timeframe="1h",
-    start="2024-01-01",
-    end="2025-01-01",
-)
+    start="2020-08-28",
+    end="2026-07-16",
+).wait()
 
-ingest_job = ss.data.ingest(
-    "BTC/USDT",
-    source="binance",
-    timeframe="1h",
-    start="2024-01-01",
-)
-ingest_job.wait()
-```
-
-现有数据管理功能的对应入口一并保留：
-
-```python
-frames = ss.data.ohlcv_batch(["BTC/USDT", "ETH/USDT"], timeframe="1h")
-instruments = ss.data.instruments(asset_class="crypto")
-sources = ss.data.sources()
-health = ss.data.health()
-
-# 仅面向数据采集的有限计划，不开放通用 DAG/cron 工作流。
-schedule = ss.data.schedule_ingest(
-    "BTC/USDT",
-    source="binance",
-    timeframe="1h",
-    interval="1h",
-    mode="incremental",
+snapshot = session.market.snapshot(
+    instruments=["crypto:binance:PAXG/USDT"],
+    timeframes=["1d", "1h"],
+    start="2020-08-28",
+    end="2026-07-16",
 )
 ```
 
-`IngestSchedule` 每次触发都创建普通的 `finance.data.ingest` Job；调度、事件、重试和审计与手工采集一致。它只支持 `manual`、`interval`、`cron` 三类 trigger；`incremental` 是采集范围模式，不是第四类 trigger。该接口不演化为通用任务编排器。
-
-小型查询可直接 materialize 为 DataFrame。大型查询默认返回 `DatasetHandle`：
+### 5.2 小数据本地读取
 
 ```python
-dataset = ss.data.dataset(selector)
-df = dataset.collect(limit=100_000)
-for batch in dataset.iter_batches():
-    ...
-```
-
-### 5.2 Indicator API
-
-支持本地对象和 Storage selector 两种输入：
-
-```python
-# 迁移友好的 Series 输入，SDK 上传为临时 Arrow Artifact
-rsi = ss.indicators.rsi(df["close"], window=14)
-
-# 避免数据先下载到 Client
-job = ss.indicators.submit(
-    "rsi",
-    input=ss.data.selector("BTC/USDT", timeframe="1h"),
-    column="close",
-    window=14,
+table = snapshot.read(
+    instrument="crypto:binance:PAXG/USDT",
+    timeframe="1d",
 )
 ```
 
-### 5.3 Backtest API
+`table` 是 `MarketTable` 包装，可通过 `.to_pandas()` 显式转换。避免所有 API 默认返回 pandas，从而保留 Arrow/schema 边界。
+
+### 5.3 临时内联数据
+
+用户已有 DataFrame 时：
 
 ```python
-strategy = ss.strategies.package(
-    "research.strategies:ma_cross",
-    config={"short": 5, "long": 20},
+market = session.market.from_pandas(
+    df,
+    instrument="crypto:binance:PAXG/USDT",
+    timeframe="1d",
+)
+```
+
+SDK 在本地或远程 Storage 中提交为临时 Artifact/Snapshot，再构造 Job。大 DataFrame 不直接塞进 Job JSON。
+
+## 6. 指标与统计 API
+
+### 6.1 本地即时与 Job 统一
+
+```python
+job = session.features.indicators(
+    snapshot,
+    specs=[
+        {"id": "trend.ma", "input": "close", "params": {"window": 20}, "output": "ma20"},
+        {"id": "oscillator.rsi", "input": "close", "params": {"window": 14}, "output": "rsi14"},
+    ],
 )
 
-job = ss.backtests.submit(
-    data=ss.data.selector("BTC/USDT", timeframe="1d"),
+features = job.wait().as_table()
+```
+
+便捷同步方法只是在内部立即 `wait`：
+
+```python
+features = session.features.indicators_sync(snapshot, specs=[...])
+```
+
+不会像 V3 一样本地路径直接调用、远程路径构造 TaskSpec，导致两套语义。
+
+### 6.2 统计研究
+
+```python
+tests = session.statistics.hypothesis(
+    feature_table,
+    tests=[
+        {"method": "pearson", "x": "x4_range", "y": "monday_range"},
+        {"method": "chi_square", "x": "signal_sign", "y": "path_up_first"},
+    ],
+).wait().as_table()
+```
+
+排列、自助、多重校正、survival、回归分别有独立 API，避免一个万能 `statistics.run(method, **kwargs)`。
+
+## 7. 策略 API
+
+### 7.1 本地模块策略
+
+```python
+strategy = session.strategies.from_module(
+    "strategies:WeekendRangeStrategy",
+    source_root="./research",
+    config={"k": 0.8},
+)
+```
+
+SDK 构建 StrategyBundle 并返回 `StrategyRef`。
+
+### 7.2 内置策略/组件
+
+```python
+strategy = session.strategies.ref("builtin.ma_cross@1", short=5, long=20)
+```
+
+### 7.3 禁止默认闭包序列化
+
+旧 `@strategy` 函数可以通过迁移工具生成模块文件或显式 trusted-local 包装。远程生产模式不默认 cloudpickle 任意闭包。
+
+## 8. 回测 API
+
+```python
+from stockstat_contracts import BacktestParameters, ComponentRef
+
+job = session.backtests.run(
+    snapshot,
     strategy=strategy,
-    initial_cash=10_000,
-    cost_model={"name": "binance_spot", "params": {}},
-    fill_model={"name": "next_open", "params": {}},
+    parameters=BacktestParameters(
+        initial_cash=10_000,
+        allow_short=True,
+        periods_per_year=52,
+        cost_model=ComponentRef(
+            id="cost.binance@1",
+            params={"venue": "futures", "bnb_discount": True},
+        ),
+        execution_policy=ComponentRef(
+            id="execution.intrabar@1",
+            params={"parent_tf": "1d", "intrabar_tf": "1h"},
+        ),
+    ),
 )
 
-result = job.wait().as_backtest()
+result = job.wait(timeout=600).as_backtest()
 print(result.metrics)
+equity = result.equity.to_pandas()
 ```
 
-`ss.backtests.run(...)` 提供同步语法糖，但仍经过完整 Job 链路。
+### 8.1 跨 session 和时间退出
 
-### 5.4 Experiment API
+V3.1 参数和策略上下文可以直接表达：
+
+- Friday close 入场，Monday open/close 退出。
+- 持仓跨 Monday-Wednesday。
+- fill 后六小时退出。
+- 第一小时结束后再决策。
+
+这消除 PAXG v5-v31 仍有 7 个策略无法原生迁移的问题。
+
+## 9. 实验 API
+
+### 9.1 Batch
 
 ```python
-search = ss.experiments.grid_search(
-    base_backtest={...},
-    parameters={"short": [3, 5, 8], "long": [10, 20, 30]},
+runs = [
+    {"run_id": "S1:F1", "strategy": s1, "parameters": p1},
+    {"run_id": "S1:F2", "strategy": s1, "parameters": p2},
+]
+job = session.experiments.batch(snapshot, runs=runs, batch_size=16)
+table = job.wait().as_table()
+```
+
+### 9.2 Grid Search
+
+```python
+job = session.experiments.grid_search(
+    snapshot,
+    base_backtest=base,
+    parameter_space={"short": [3, 5, 8], "long": [10, 20, 30]},
     objective={"metric": "sharpe", "direction": "maximize"},
 )
-result = search.wait().as_search_result()
 ```
 
-批量、费率扫描、Monte Carlo、Walk-forward 和 Optuna 使用明确的金融 API，不暴露任意 DAG 构造器。
-
-## 6. JobHandle
-
-`JobHandle` 只保存 `job_id`、Session 引用和最近状态缓存，不保存服务端 Python 对象。
-
-建议接口：
+### 9.3 Monte Carlo 和 Walk-forward
 
 ```python
-class JobHandle:
-    id: str
+session.simulations.bootstrap(
+    snapshot, base_backtest=base, n_samples=10_000, shards=32, random_seed=42
+)
 
-    def status(self) -> JobStatus: ...
-    def wait(self, timeout: float | None = None) -> JobResult: ...
-    def cancel(self, reason: str = "") -> CancelReceipt: ...
-    def events(self, after: int | None = None): ...
-    def result(self) -> JobResult: ...
-    def artifacts(self) -> list[ArtifactRef]: ...
+session.validation.walk_forward(
+    snapshot, base_backtest=base, windows=windows
+)
 ```
 
-语义：
+PAXG v7 的受控样本外预测验证通过 `session.validation.predictive(...)` 提交，模型只能引用服务端注册的 method ID 和类型化参数，不接受任意 estimator 或 pickle 模型。
 
-- `result()` 在未完成时抛 `JobNotReadyError`。
-- `wait()` 的客户端 timeout 不等于取消服务端 Job。
-- `cancel()` 是幂等命令，返回当前取消状态。
-- `events()` 使用 SSE 或 Embedded EventChannel，并支持从 sequence 续读。
-- 进度来自持久事件，不依赖内存列表。
+## 10. JobHandle
 
-## 7. JobResult 与惰性物化
-
-服务端结果始终是 Manifest + ArtifactRef。SDK 提供金融结果视图：
-
-| 视图 | 主要属性 |
-|---|---|
-| `IndicatorResult` | `series`、`metadata` |
-| `BacktestResult` | `equity`、`fills`、`trades`、`positions`、`metrics`、`config` |
-| `SearchResult` | `ranking`、`best_parameters`、`trial(job_id)` |
-| `BatchResult` | `summary`、`result_refs` |
-| `SimulationResult` | `quantiles`、`paths`、`statistics` |
-
-大表默认惰性下载。访问 `result.equity` 时 SDK 才获取相应 Artifact，避免 `wait()` 一次性下载全部回测明细。
-
-## 8. Artifact 输入处理
-
-### 8.1 小型 Python 输入
-
-当用户传入 Series/DataFrame：
-
-1. SDK 验证 index、时区和字段。
-2. 编码为 Arrow IPC。
-3. 计算 SHA-256。
-4. 请求上传 session。
-5. 上传 Artifact。
-6. JobSpec 只引用 ArtifactRef。
-
-### 8.2 策略输入
-
-远程策略不使用 cloudpickle。支持：
-
-| 类型 | 说明 |
-|---|---|
-| Builtin | 内核内置、版本化策略 ID |
-| Python package | wheel/source bundle + entrypoint + lock manifest |
-| Declarative | 受限策略表达式，由 SDK 编译为 schema |
-
-开发期 `StockStat.local()` 可提供显式 `unsafe_python_object` 调试功能，但该能力不进入远程协议、默认关闭，也不作为迁移验收路径。
-
-## 9. DSL 设计位置
-
-DSL 是 Invocation 编译器，而不是 Dispatcher 解释器。
-
-```mermaid
-flowchart LR
-    T[DSL Text] --> P[Parse AST]
-    P --> V[金融语义校验]
-    V --> C[编译为 Data Query 或 JobSpec]
-    C --> D[Dispatcher]
+```python
+job.id
+job.status()
+job.wait(timeout=...)
+job.cancel()
+job.events()
+job.partials()
+job.result()
 ```
 
-收益：
+### 10.1 事件消费
 
-- Dispatcher 不依赖 Lark。
-- DSL 与 Python API 产生相同 JobSpec。
-- 新能力通过 descriptor 暴露给 DSL 编译器。
-- 语法错误和类型错误在 Client 侧提供精确位置。
-- 不保留 V2 的硬编码 Evaluator 与 Registry Evaluator 双实现。
-
-## 10. Embedded Topology
-
-`StockStat.local()` 不等于直接调用 Kernel。它通过装配包启动真实模块：
-
-```mermaid
-graph LR
-    SDK[SDK] --> EC[Embedded Control Channel]
-    EC --> D[Dispatcher Library]
-    D --> S[SQLite + Local Artifact Store]
-    D --> W[Local Worker Agent]
-    W --> P[Spawn Process Pool]
+```python
+for event in job.events():
+    print(event.sequence, event.type, event.progress)
 ```
 
-建议装配包 `stockstat-local`，依赖 Dispatcher、Storage、Worker 和 Kernel。SDK 基础包不强依赖这些服务实现。
+远程使用 SSE，本地使用同一 event stream 接口。
 
-本地模式要求：
+### 10.2 结果视图
 
-- 使用相同 Job/Stage/WorkUnit/Attempt 状态机。
-- Worker 使用进程执行 CPU 密集任务。
-- Artifact 仍以 Arrow/Manifest 表达。
-- 可选跳过网络字节复制，但必须通过相同接口和合同。
-- 合同测试可启用“强制序列化模式”，验证本地对象在远程边界也可 round-trip。
+`JobResult` 按 manifest kind 提供：
 
-## 11. 调用网关
+- `.as_table()`
+- `.as_backtest()`
+- `.as_experiment()`
+- `.as_simulation()`
+- `.artifacts`
+- `.lineage()`
 
-公开 HTTP API 由 Dispatcher 的 Gateway 子模块提供。SDK 不直接访问 Dispatcher 数据库，也不直接调用 Worker。
+未匹配 kind 时拒绝转换，不返回任意 Python 对象。
 
-控制路径：
+## 11. DSL 定位
+
+DSL 保留为轻量前端，但不成为内核或协议：
+
+```sql
+SELECT close,
+       ma(close, 20) AS ma20,
+       rsi(close, 14) AS rsi14
+FROM market("crypto:binance:BTC/USDT", "1d")
+WHERE ts >= "2024-01-01"
+```
+
+流程：
 
 ```text
-SDK -> Gateway -> Command Handler -> Planner/Scheduler
+DSL text -> AST -> typed query/feature plan -> JobSpec
 ```
 
-数据路径：
+DSL 只支持公开金融 operation，不能执行 Python、shell 或任意 SQL。
 
-```text
-SDK -> Gateway 获取 upload/download session
-SDK <-> Storage/Artifact endpoint 传输 Arrow bytes
-```
+## 12. CLI
 
-Gateway 不代理大型二进制，避免重现 Storage/Dispatcher 带宽耦合。
-
-## 12. 自动路由的归属
-
-V3 的 `AutoComputeBackend` 在 Client 侧按粗略大小选择本地或远程。V3.1 删除该实现。
-
-新规则：
-
-- `StockStat.local()` 明确选择本地拓扑。
-- `StockStat.connect()` 明确选择远程拓扑。
-- 在远程集群内，任务大小、数据局部性和 Worker 选择由 Dispatcher Planner/Scheduler 决定。
-- SDK 可提供显式 `execution.target="local"|"cluster"` 给混合 Session，但不自行估算资源。
-
-## 13. CLI
-
-建议命令：
-
-```text
-stockstat data ingest
-stockstat data query
-stockstat job submit
-stockstat job status
-stockstat job events
-stockstat job cancel
-stockstat job result
+```bash
+stockstat market ingest crypto:binance:PAXG/USDT --tf 1h --start 2020-08-28
+stockstat market snapshot --instrument crypto:binance:PAXG/USDT --tf 1d --tf 1h
+stockstat job submit job.json
+stockstat job status <job-id>
+stockstat job watch <job-id>
+stockstat job cancel <job-id>
+stockstat result download <job-id> --member metrics
 stockstat cluster workers
 stockstat cluster capabilities
-stockstat artifact inspect
-stockstat strategy package
-stockstat migrate scan
-stockstat migrate verify
-stockstat local serve
+stockstat migrate scan ./research
 ```
 
-CLI 调用 SDK，不复制 HTTP 客户端逻辑。
+CLI 使用 SDK，不单独实现协议。
 
-## 14. 旧代码迁移
+## 13. Admin 与可视化
 
-### 14.1 客户端迁移映射
+### 13.1 Admin API/UI
 
-| 旧调用 | 新调用 | 迁移性质 |
-|---|---|---|
-| `StockStatClient(...)` | `StockStat.connect(...)` | 构造方式替换 |
-| `V2Client(mode="offline")` | `StockStat.local(...)` | 拓扑替换 |
-| `client.ohlcv(...)` | `ss.data.ohlcv(...)` | 命名空间迁移 |
-| `client.ingest(...)` | `ss.data.ingest(...).wait()` | 采集变为持久 Job |
-| `client.compute.ma(...)` | `ss.indicators.ma(...)` | 可机械迁移 |
-| `client.backtest(...)` | `ss.backtests.run(...)` | 同步语义保留 |
-| `client.compute.remote(...)` | 对应命名空间 `.submit(...)` | 弱类型入口改为类型化入口 |
-| `task.wait/result/cancel` | `JobHandle.wait/result/cancel` | 语义相近 |
-| `V2Client.run_dsl()` | `ss.dsl.execute()` | 单一编译器 |
-| `BacktestResult.render()` | `result.render()` 或 Admin | Artifact 惰性物化 |
+管理界面读取 Dispatcher 和 Storage 的公开管理资源：
 
-### 14.2 策略迁移
+- Job 列表、状态、耗时、失败。
+- Worker、capability、slot 和缓存。
+- Snapshot、Artifact、存储空间和 lineage。
+- 采集覆盖和数据质量。
 
-旧 `@strategy` 函数迁移要求：
+UI 不直接持有 Dispatcher 内部对象引用。
 
-- 函数位于可导入模块，不依赖 notebook 临时闭包。
-- 捕获变量改为显式 config。
-- 依赖通过 package manifest 声明。
-- 使用 `stockstat strategy package module:function` 生成签名 Artifact。
-- 本地和远程使用同一个 StrategyRef。
+### 13.2 图表
 
-Notebook 用户可由迁移工具生成模块模板；无法静态提取的动态闭包会给出明确诊断，不静默 cloudpickle。
-
-### 14.3 完全迁移的定义
-
-“旧客户代码能完全迁移”定义为：
-
-1. 每个公开功能有新 API 对应项。
-2. 代表性脚本可通过明确代码修改迁移，不要求旧 import 原样运行。
-3. 相同数据、参数、种子下满足结果等价策略。
-4. 旧策略可重构为受控策略包执行。
-5. 迁移工具可发现不支持的动态行为并生成报告。
-
-### 14.4 迁移期解释器隔离
-
-旧包和新 SDK 最终都使用 `import stockstat`，因此迁移期禁止把两个 distribution 安装在同一 Python 环境。仓库使用独立解释器：
-
-```text
-.venv-legacy  -> 当前 frontend/backend/worker，仅用于生成 oracle
-.venv-v31     -> packages/services 新实现
+```python
+chart = session.render.chart(
+    result,
+    profile="backtest.dashboard@1",
+    format="png",
+).wait()
 ```
 
-旧/新 parity 通过子进程、Arrow/JSON fixtures 和差异报告交换结果，不通过在同一进程中导入两套 `stockstat` 实现。P9 切换时新 SDK 才接管正式 distribution/import 名。
+小结果也可以本地 renderer 渲染。ChartSpec 本身是 Artifact，可在 Web/TUI 复用。
 
-## 15. 错误与诊断
+## 14. 旧客户代码迁移
 
-SDK 将协议错误映射为稳定异常：
+### 14.1 迁移原则
 
-```text
-StockStatError
-├── ValidationError
-├── DataNotFoundError
-├── CapabilityUnavailableError
-├── JobNotFoundError
-├── JobNotReadyError
-├── JobFailedError
-├── JobCancelledError
-├── DeadlineExceededError
-├── ArtifactIntegrityError
-└── AuthenticationError
+- 不保证原 import 路径继续运行。
+- 保证每个公共功能有新 API。
+- 提供 scanner、映射文档和结果 parity tests。
+- 迁移一次后不依赖兼容包。
+
+### 14.2 典型映射
+
+| 旧代码 | V3.1 |
+|---|---|
+| `StockStatClient(host, port)` | `StockStat.connect(dispatcher_url, storage_url)` |
+| `V2Client(mode="offline")` | `StockStat.local(runtime_dir)` |
+| `client.ingest(...)` | `session.market.ingest(...).wait()` |
+| `client.ohlcv(...)` | `snapshot.read(...).to_pandas()` |
+| `client.compute.ma(series, 20)` | 本地 kernel `ma` 或 `session.features.indicators(...)` |
+| `client.run_dsl(text)` | `session.query.run(text)` |
+| `client.backtest(data, strategy)` | `session.backtests.run(...).wait()` |
+| `client.compute.remote(...)` | 所有 API 默认返回 JobHandle |
+| `task.wait()` | `job.wait()` |
+| `task.stream_results()` | `job.events()` / `job.partials()` |
+| `client.compute.cluster_info()` | `session.cluster.info()` |
+
+### 14.3 自动扫描
+
+`stockstat migrate scan` 检测：
+
+- 旧 import。
+- `StockStatClient`/`V2Client`。
+- `ComputeBackend`。
+- `client.compute.remote`。
+- cloudpickle strategy_ref。
+- `BacktestEngine` 直接构造。
+- `StrategyBatchRunner`、`grid_search`、`walk_forward`。
+
+输出 CSV/Markdown 报告和建议，不自动修改复杂策略逻辑。
+
+## 15. 配置
+
+统一 TOML：
+
+```toml
+[profile.local]
+mode = "local"
+runtime_dir = "./.stockstat"
+
+[profile.lab]
+mode = "remote"
+dispatcher_url = "http://dispatch:9000"
+storage_url = "http://storage:8000"
+token_env = "STOCKSTAT_TOKEN"
 ```
 
-异常包含 `code`、`job_id`、`error_id`、`trace_id` 和可公开 details，不依赖服务端异常类路径。
+运行时通过 `StockStat.from_profile("lab")` 选择。配置不把 transport 类型暴露给金融 API。
 
-## 16. 测试策略
+## 16. 测试要求
 
-### 16.1 API contract tests
+### 16.1 SDK 契约
 
-- 每个金融 facade 生成预期 JobSpec golden fixture。
-- 同步和异步形式生成相同 operation/input/execution 语义。
-- Local 与 HTTP Channel 的响应模型一致。
+- local/remote Session 同一 JobSpec golden。
+- sync helper 等于 submit + wait。
+- DataFrame 临时上传和 Snapshot 引用。
+- JobHandle 状态、取消、SSE 恢复。
+- 结果 kind 安全转换。
 
-### 16.2 Artifact tests
+### 16.2 迁移
 
-- Series/DataFrame Arrow round-trip。
-- 时区、MultiIndex、NaN 策略和 dtype 测试。
-- 分块上传、断点重传和 SHA-256 校验。
-- 惰性下载确保未访问属性时不下载大 Artifact。
+- README/USAGE 中每个旧功能有新示例。
+- 代表性旧脚本手工迁移。
+- PAXG v1-v7 原生 V3.1 工作目录不 import 旧包。
+- scanner 对旧 API 发现率有 fixture。
 
-### 16.3 Migration tests
+### 16.3 CLI/DSL
 
-- 当前 README/USAGE 中所有 Python 示例建立 V3.1 对应版本。
-- PAXG 研究脚本至少选取代表性完整迁移。
-- 旧 23 指标、回测、批量、搜索、Monte Carlo、Walk-forward 均有迁移案例。
-- 扫描器能识别旧 imports、双客户端、cloudpickle 策略和本地数据库用法。
+- CLI 使用 fake Session 的单元测试。
+- DSL AST 到 JobSpec golden。
+- 禁止任意 SQL/Python 注入。
 
-### 16.4 Embedded/remote parity
+## 17. 结论
 
-同一 JobSpec 分别通过 Embedded Channel 和 HTTP Channel 执行，比较 Manifest、核心数值和 Artifact schema。
-
-## 17. 验收标准
-
-- 公共入口只有一个 `StockStat` Session。
-- 同步调用没有直调 Kernel 的隐藏路径。
-- SDK 不包含调度和金融算法实现。
-- DSL 与 Python facade 编译到同一 JobSpec。
-- 大对象不进入 JSON 控制消息。
-- 现有公开功能均有迁移映射和至少一个可运行迁移测试。
-- `StockStat.local()` 与 `StockStat.connect()` 除构造方式外使用同一 API。
+Invocation 通过一个 Session、一组金融领域 API 和统一 JobHandle 消除 V2/V3 的双客户端、双本地/远程路径和任意 TaskSpec 构造。旧客户代码需要迁移，但所有功能都有清晰目标，并能在本地与远程部署之间不改业务代码地切换。
