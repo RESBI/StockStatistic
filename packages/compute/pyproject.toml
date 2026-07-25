@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "stockstat-compute"
+version = "3.1.0"
+description = "StockStat V3.1 Compute: Worker + 47 handlers + BacktestEngine"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "stockstat-foundation>=3.1.0",
+    "pandas>=2.0",
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "httpx>=0.24",
+    "psutil>=5.9",
+    "click>=8.0",
+]
+
+[project.optional-dependencies]
+ml = ["scikit-learn>=1.4", "xgboost>=2.0"]
+signal = ["PyWavelets>=1.1"]
+nonlinear = ["nolds>=0.5"]
+gpu = ["torch>=2.0"]
+all = ["stockstat-compute[ml,signal,nonlinear]"]
+
+[project.scripts]
+stockstat-compute = "stockstat_compute.cli:cli"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["stockstat_compute*"]

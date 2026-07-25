@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "stockstat-foundation"
+version = "3.1.0"
+description = "StockStat V3.1 Foundation: protocol/transport/codec/contracts base layer"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "StockStat V3.1" }]
+dependencies = [
+    "httpx>=0.24",
+]
+
+[project.optional-dependencies]
+arrow = ["pyarrow>=14.0"]
+cloudpickle = ["cloudpickle>=3.0"]
+msgpack = ["msgpack>=1.0"]
+redis = ["redis>=5.0"]
+compute = ["stockstat-foundation[arrow,cloudpickle]"]
+distributed = ["stockstat-foundation[arrow,cloudpickle,msgpack,redis]"]
+all = ["stockstat-foundation[distributed]"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["stockstat_foundation*"]
+
+[tool.setuptools.package-data]
+stockstat_foundation = ["py.typed"]

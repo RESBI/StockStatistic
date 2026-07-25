@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "stockstat-dispatcher"
+version = "3.1.0"
+description = "StockStat V3.1 Dispatcher: task scheduling / data prefetch / sharding / merge"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "stockstat-foundation>=3.1.0",
+    "fastapi>=0.100",
+    "uvicorn>=0.20",
+    "httpx>=0.24",
+    "click>=8.0",
+]
+
+[project.optional-dependencies]
+redis = ["redis>=5.0"]
+all = ["stockstat-dispatcher[redis]"]
+
+[project.scripts]
+stockstat-dispatcher = "stockstat_dispatcher.cli:cli"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["stockstat_dispatcher*"]

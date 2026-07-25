@@ -1,0 +1,19 @@
+"""sample_entropy handler — 样本熵。"""
+from __future__ import annotations
+from typing import Any, Optional, Callable
+import numpy as np
+from stockstat_foundation import TaskSpec
+from .._base import register
+
+
+@register("sample_entropy")
+def handle_sample_entropy(spec: TaskSpec, data: Any, *, on_progress: Optional[Callable] = None) -> Any:
+    cs = spec.compute_spec
+    m = cs.params.get("m", 2)
+    r = cs.params.get("r")
+    x = np.asarray(data if data is not None else cs.params.get("x"), dtype=float)
+    if r is None:
+        r = 0.2 * np.std(x)
+    from ...indicators.nonlinear import sample_entropy
+    value = sample_entropy(x, m=m, r=r)
+    return {"sample_entropy": float(value), "m": m, "r": float(r)}

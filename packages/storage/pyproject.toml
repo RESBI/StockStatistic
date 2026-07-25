@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "stockstat-backend"
+version = "3.1.0"
+description = "StockStat V3.1 Storage: OHLCV persistence/query/ingest"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "stockstat-foundation>=3.1.0",
+    "sqlalchemy>=2.0",
+    "fastapi>=0.100",
+    "uvicorn>=0.20",
+    "httpx>=0.24",
+    "pandas>=2.0",
+    "pyarrow>=14.0",
+    "click>=8.0",
+]
+
+[project.optional-dependencies]
+postgres = ["psycopg2-binary>=2.9"]
+yfinance = ["yfinance>=0.2"]
+all = ["stockstat-backend[postgres,yfinance]"]
+
+[project.scripts]
+stockstat-backend = "stockstat_backend.cli:cli"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["stockstat_backend*"]
