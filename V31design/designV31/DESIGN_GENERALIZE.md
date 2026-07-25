@@ -1,378 +1,819 @@
-# StockStat V3.1 金融计算能力泛化边界
+# StockStat V3.1 金融计算任务通用化清单
 
-> 版本：V3.1 设计稿
-> 日期：2026-07-21
-> 状态：用于约束 V3.1 完全重构
-> 关联文档：[DESIGN_ARCH_V31.md](DESIGN_ARCH_V31.md)、[DESIGN_PROT_V31.md](DESIGN_PROT_V31.md)
+> **版本**：v3.1（设计稿）
+> **日期**：2026-07-24
+> **状态**：设计讨论
+> **目的**：紧贴 PAXG-Weekend-Monday-Law v1~v7 研究所需功能，列举量化研究中常见的、以及先进手段中需要用到的**与指标计算、回测同等级别的基础原子计算任务**，作为 V3.1 Compute 模块 handler 注册表的设计基线。
+> **原则**：
+> 1. 不 overgeneralize —— 仅列入量化金融研究中真实需要的原子任务
+> 2. 保留当前功能需求 —— PAXG v1~v7 全部功能必须有对应原子任务
+> 3. 预留未来扩展 —— 先进/前沿任务以"预留接口"形式列出，不强行实现
+> 4. 原子任务粒度 —— 一个 task_type 对应一个 handler，输入数据 + 参数 → 输出结果，可独立调度
 
-## 1. 文档目的
+---
 
-V3.1 需要在不丢失现有金融功能的前提下，为未来增加计算能力预留稳定边界。这里的“泛化”不是把 StockStat 做成任意代码执行平台、通用工作流引擎或通用 MapReduce 框架，而是把当前已经反复出现的金融研究步骤抽象成可组合、可调度、可复现的金融原子任务。
+## 目录
 
-本文件回答四个问题：
+1. [设计理念](#1-设计理念)
+2. [原子任务分级体系](#2-原子任务分级体系)
+3. [Tier 1 — 交易回测类（已实现，重构迁移）](#3-tier-1--交易回测类已实现重构迁移)
+4. [Tier 2 — 经典统计检验类（PAXG v1~v6 所需）](#4-tier-2--经典统计检验类paxg-v1v6-所需)
+5. [Tier 3 — 信号处理与频域分析（PAXG v7 W/E 路线）](#5-tier-3--信号处理与频域分析paxg-v7-we-路线)
+6. [Tier 4 — 非线性动力学与信息论（PAXG v7 N 路线）](#6-tier-4--非线性动力学与信息论paxg-v7-n-路线)
+7. [Tier 5 — 灰色系统与软计算（PAXG v7 G 路线）](#7-tier-5--灰色系统与软计算paxg-v7-g-路线)
+8. [Tier 6 — 机器学习与数据挖掘](#8-tier-6--机器学习与数据挖掘)
+9. [Tier 7 — 投资组合与风险管理（量化核心扩展）](#9-tier-7--投资组合与风险管理量化核心扩展)
+10. [Tier 8 — 前沿与预留（未来扩展）](#10-tier-8--前沿与预留未来扩展)
+11. [task_type 注册表汇总](#11-task_type-注册表汇总)
+12. [ComputeSpec 扩展策略](#12-computespec-扩展策略)
+13. [与 PAXG v1~v7 的映射矩阵](#13-与-paxg-v1v7-的映射矩阵)
 
-1. 哪些能力应成为 V3.1 的基础原子任务。
-2. 哪些能力只作为后续扩展点预留。
-3. 新能力通过什么标准接入共用底层。
-4. 哪些抽象明确禁止进入 V3.1 核心。
+---
 
-## 2. 来自当前项目的真实需求
+## 1. 设计理念
 
-### 2.1 已实现的用户功能
+### 1.1 为什么要"原子任务化"
 
-当前项目已经具备以下金融能力，V3.1 必须提供等价迁移目标：
+V2/V3 的计算调用是**方法级**的：`client.compute.ma()`、`client.backtest()`、`grid_search()`。这种方式在单进程下自然，但在分布式架构下有三个问题：
 
-| 能力域 | 现有功能 |
-|---|---|
-| 市场数据 | yfinance、Binance、Coinbase、Synthetic；OHLCV 采集、标准化、查询、离线读取 |
-| 指标与变换 | MA、EMA、MACD、RSI、KDJ、ATR、Bollinger、收益率、Beta、Sharpe、VaR 等 |
-| 信号处理 | CWT、Welch PSD、谱熵、灰色关联、GM(1,1) |
-| 非线性分析 | 互信息相关需求、传递熵、Hurst/DFA、样本熵、排列熵、简化 RQA |
-| 统计研究 | Pearson、Spearman、t 检验、Welch 检验、卡方、排列检验、自助法、Chow 检验、滚动统计、分位分组 |
-| 回测 | 多标的、多时间尺度、成本模型、成交模型、NextBar、intrabar、OCO、止盈止损、做空 |
-| 实验 | 批量策略、费率矩阵、网格搜索、Optuna、Monte Carlo、walk-forward |
-| 结果 | 指标表、资金曲线、fills、trades、图表、CSV/JSON/Arrow/Parquet 导出 |
-| 使用入口 | Python、CLI、DSL、TUI、Web Admin、本地/在线/离线/远程计算 |
+1. **粒度不均**：`ma()` 是毫秒级，`grid_search()` 是分钟级，无法用同一调度策略
+2. **序列化困难**：方法签名各异，策略闭包、DataFrame、参数字典混在一起，难以统一序列化
+3. **扩展无规可循**：新增一个"蒙特卡洛"方法需要改 Client/Engine/Worker 三处
 
-### 2.2 PAXG v1-v7 暴露的研究流程
+V3.1 的核心思路是**原子任务化**：所有计算调用最终归约为一个 `TaskSpec`，通过 `task_type` 路由到对应 handler。新增计算能力 = 新增一个 task_type + 一个 handler，**协议、传输、调度零改动**。
 
-PAXG 研究不是单一回测，而是一条完整的金融研究链：
+### 1.2 原子任务的判定标准
 
-```mermaid
-flowchart LR
-    A[采集并冻结市场数据] --> B[构造周末-周一配对]
-    B --> C[提取方向/波动率/路径特征]
-    C --> D[经典统计与假设检验]
-    D --> E[稳健性与多重检验]
-    E --> F[路径/频域/非线性分析]
-    F --> G[策略与执行模型]
-    G --> H[批量费率回测]
-    H --> I[参数搜索/Monte Carlo/walk-forward]
-    I --> J[结果表/图表/报告]
+一个计算能力是否值得作为独立 task_type，需满足：
+
+| 标准 | 说明 |
+|------|------|
+| **可独立调度** | 有明确的输入数据 + 参数 + 输出结果，可作为一个分片单元 |
+| **粒度相当** | 计算量与"一次回测""一次指标计算"相当（秒级~分钟级） |
+| **序列化清晰** | 输入输出可用 Arrow/cloudpickle/JSON 表达 |
+| **复用价值** | 至少被 2 个研究场景使用，或属于标准量化工具箱 |
+| **无状态或可 checkpoint** | 抢占后可恢复（或可重算） |
+
+毫秒级轻量指标（如 `ma(window=20)`）**不作为独立 task_type**，而是通过 `indicator` task_type 的 `params.indicator_name` 字段分发——它们共享同一个 handler，只是参数不同。这与 V3 的设计一致，避免了协议层被海量小任务淹没。
+
+### 1.3 与 V3 task_type 的关系
+
+V3 已有 6 个 task_type：`indicator` / `backtest` / `grid_search` / `batch_backtest` / `monte_carlo` / `custom`。
+
+V3.1 在此基础上**新增统计检验、信号处理、非线性动力学、灰色系统、机器学习、组合风险**等类别，使 task_type 总数从 6 扩展到 ~30，覆盖 PAXG v1~v7 全部功能 + 量化常见需求 + 先进手段预留。
+
+---
+
+## 2. 原子任务分级体系
+
+按"实现紧迫度 + 功能成熟度"分 8 个 Tier：
+
+| Tier | 主题 | 来源 | task_type 数 | V3.1 实现状态 |
+|------|------|------|-------------|--------------|
+| 1 | 交易回测类 | V2/V3 已实现 | 6 | 重构迁移 |
+| 2 | 经典统计检验 | PAXG v1~v6 | 8 | 新增 |
+| 3 | 信号处理与频域 | PAXG v7 W/E | 5 | 新增 |
+| 4 | 非线性动力学与信息论 | PAXG v7 N | 7 | 新增 |
+| 5 | 灰色系统与软计算 | PAXG v7 G | 3 | 新增 |
+| 6 | 机器学习与数据挖掘 | PAXG v7 F + 量化通用 | 7 | 新增 |
+| 7 | 投资组合与风险管理 | 量化核心扩展 | 6 | 新增（部分预留） |
+| 8 | 前沿与预留 | 未来扩展 | 5 | 接口预留 |
+| **合计** | | | **47** | |
+
+**说明**：47 个 task_type 中，Tier 1~6 共 36 个是 PAXG v1~v7 + 量化通用**必须实现**的；Tier 7~8 共 11 个是**预留接口**（协议层支持，handler 可后补）。
+
+---
+
+## 3. Tier 1 — 交易回测类（已实现，重构迁移）
+
+V2/V3 已实现的 6 个核心 task_type，V3.1 完全保留语义，仅重构 handler 位置（移至 Compute 模块）。
+
+### 3.1 `indicator` — 技术指标计算
+
+| 字段 | 值 |
+|------|-----|
+| **task_type** | `"indicator"` |
+| **输入** | `data_spec`（OHLCV）+ `params.indicator_name` + `params.{window, ...}` |
+| **输出** | `pd.Series` / `pd.DataFrame` / `float` |
+| **handler** | `compute.handlers.indicator_handler` |
+| **分片策略** | `none`（单次计算） |
+| **典型耗时** | 毫秒~秒级 |
+| **V2 对应** | `ComputeEngine.ma/rsi/macd/bollinger/atr/...`（40+ 方法） |
+
+**支持的指标族**（通过 `indicator_name` 路由）：
+- 趋势：MA/EMA/WMA/DEMA/TEMA/HMA/MACD/ADX/DPO/Trix
+- 振荡：RSI/KD/Williams%R/CCI/STOCH
+- 波动：Bollinger/ATR/Keltner/Donchian/StdDev
+- 成交量：OBV/VWAP/MFI/CMF/A/D Line
+- 统计：rolling_corr/rolling_beta/zscore/percentile
+
+**CloudpickleCodec 不需要**：指标参数均为 JSON 可序列化。
+
+### 3.2 `backtest` — 单次策略回测
+
+| 字段 | 值 |
+|------|-----|
+| **task_type** | `"backtest"` |
+| **输入** | `data_spec` + `compute_spec.strategy_ref`（cloudpickle）+ 回测参数 |
+| **输出** | `BacktestResult`（含 trades/equity/metrics） |
+| **handler** | `compute.handlers.backtest_handler` |
+| **分片策略** | `none` |
+| **典型耗时** | 秒级 |
+| **V2 对应** | `BacktestEngine(data, strategy, **kw).run()` |
+
+**关键参数**（`compute_spec`）：
+- `initial_cash`、`cost_model`、`fill_model`、`execution_model`
+- `trade_on`、`allow_short`、`periods_per_year`、`benchmark`
+
+### 3.3 `grid_search` — 参数网格搜索
+
+| 字段 | 值 |
+|------|-----|
+| **task_type** | `"grid_search"` |
+| **输入** | `data_spec` + `strategy_ref` + `param_grid` + `metric` |
+| **输出** | `pd.DataFrame`（每组参数 + 指标值） |
+| **handler** | `compute.handlers.grid_search_handler` |
+| **分片策略** | `param_wise`（推荐） |
+| **典型耗时** | 分钟~小时级 |
+| **V2 对应** | `grid_search(...)` |
+
+**分片**：1000 组参数 → N 个 chunk，每 Worker 处理一个 chunk，结果合并为完整 DataFrame。
+
+### 3.4 `batch_backtest` — 批量策略回测
+
+| 字段 | 值 |
+|------|-----|
+| **task_type** | `"batch_backtest"` |
+| **输入** | `data_spec` + `strategies`（多策略）+ `fee_models`（多费率） |
+| **输出** | `pd.DataFrame`（每策略 × 每费率一行） |
+| **handler** | `compute.handlers.batch_backtest_handler` |
+| **分片策略** | `param_wise`（按 strategy × fee_model 笛卡尔积） |
+| **典型耗时** | 分钟级 |
+| **V2 对应** | `batch_backtest(...)` |
+
+**PAXG v5-redo 直接对应**：33 策略 × 4 费率 = 132 次回测。
+
+### 3.5 `monte_carlo` — 蒙特卡洛模拟
+
+| 字段 | 值 |
+|------|-----|
+| **task_type** | `"monte_carlo"` |
+| **输入** | `data_spec` + `strategy_ref` + `n_simulations` + `seed` |
+| **输出** | `pd.DataFrame`（每次模拟的指标分布） |
+| **handler** | `compute.handlers.monte_carlo_handler` |
+| **分片策略** | `param_wise`（按 simulation index 切分） |
+| **典型耗时** | 分钟级 |
+| **V2 对应** | `MonteCarloEngine` |
+
+### 3.6 `walkforward` — 前向验证回测
+
+| 字段 | 值 |
+|------|-----|
+| **task_type** | `"walkforward"` |
+| **输入** | `data_spec` + `strategy_ref` + `train_window` + `test_window` + `step` |
+| **输出** | `pd.DataFrame`（每窗口的 train/test 表现） |
+| **handler** | `compute.handlers.walkforward_handler` |
+| **分片策略** | `time_wise`（按时间窗口切分） |
+| **典型耗时** | 分钟级 |
+| **V2 对应** | `WalkForward` |
+
+---
+
+## 4. Tier 2 — 经典统计检验类（PAXG v1~v6 所需）
+
+PAXG v1~v6 大量使用经典统计工具，V3.1 将其原子化为独立 task_type，避免每个研究脚本重新实现。
+
+### 4.1 `correlation` — 相关分析
+
+| 字段 | 值 |
+|------|-----|
+| **task_type** | `"correlation"` |
+| **输入** | `data_spec` 或内联数据 + `params.method` + `params.signals` + `params.targets` |
+| **输出** | `dict`（r / p / CI / n）或 `pd.DataFrame`（矩阵） |
+| **handler** | `compute.handlers.stats.correlation_handler` |
+| **支持方法** | `pearson` / `spearman` / `kendall` / `partial`（偏相关）/ `cross_corr`（互相关） |
+| **PAXG 对应** | v1（Pearson r=0.59）、v4（6×6 相关矩阵）、v7（偏相关 r(w_k, Range|x_4)） |
+
+### 4.2 `hypothesis_test` — 假设检验
+
+| 字段 | 值 |
+|------|-----|
+| **task_type** | `"hypothesis_test"` |
+| **输入** | 数据 + `params.test` + `params.{alpha, alternative, ...}` |
+| **输出** | `dict`（statistic / p_value / effect_size / CI） |
+| **handler** | `compute.handlers.stats.hypothesis_handler` |
+| **支持检验** | `t_test`（单样本/双样本/配对）/ `chi2_independence` / `chi2_goodness` / `ks_test` / `anderson_darling` / `f_test` / `levene` / `shapiro` / `mannwhitney` / `wilcoxon` |
+| **PAXG 对应** | v3（2×2 卡方）、v6（5 窗口卡方 + Cramér's V） |
+
+### 4.3 `bootstrap` — 自助法
+
+| 字段 | 值 |
+|------|-----|
+| **task_type** | `"bootstrap"` |
+| **输入** | 数据 + `params.stat_func`（cloudpickle）+ `params.n_resamples` + `params.ci_method` |
+| **输出** | `dict`（estimate / ci_lower / ci_upper / bias / se） |
+| **handler** | `compute.handlers.stats.bootstrap_handler` |
+| **支持 CI** | `percentile` / `bc`（偏差校正）/ `bca` |
+| **PAXG 对应** | v4-B（bootstrap 置信区间） |
+
+### 4.4 `permutation_test` — 排列检验
+
+| 字段 | 值 |
+|------|-----|
+| **task_type** | `"permutation_test"` |
+| **输入** | 数据 + `params.stat_func` + `params.n_permutations` + `params.alternative` |
+| **输出** | `dict`（observed_stat / null_distribution / p_value / effect_size） |
+| **handler** | `compute.handlers.stats.permutation_handler` |
+| **PAXG 对应** | v4-A（排列检验）、v7（MI 置换检验、TE 置换检验） |
+
+### 4.5 `chow_test` — Chow 断点检验
+
+| 字段 | 值 |
+|------|-----|
+| **task_type** | `"chow_test"` |
+| **输入** | 时序数据 + `params.breakpoint`（时间点或索引） |
+| **输出** | `dict`（F_stat / p_value / rss_before / rss_after） |
+| **handler** | `compute.handlers.stats.chow_handler` |
+| **PAXG 对应** | v4（Chow 断点检验稳定性） |
+
+### 4.6 `survival_analysis` — 生存分析
+
+| 字段 | 值 |
+|------|-----|
+| **task_type** | `"survival_analysis"` |
+| **输入** | `data_spec`（含 duration + event）+ `params.method` + `params.groups` |
+| **输出** | `dict`（survival_curve / median_survival / log_rank_p / HR / CI） |
+| **handler** | `compute.handlers.stats.survival_handler` |
+| **支持方法** | `kaplan_meier` / `log_rank` / `cox_ph` / `nelson_aalen` |
+| **PAXG 对应** | v6（Kaplan-Meier + log-rank + HR 森林图） |
+
+### 4.7 `ecdf` — 经验累积分布
+
+| 字段 | 值 |
+|------|-----|
+| **task_type** | `"ecdf"` |
+| **输入** | 数据 + `params.groups`（可选分组） |
+| **输出** | `pd.DataFrame`（x / ecdf / group） |
+| **handler** | `compute.handlers.stats.ecdf_handler` |
+| **PAXG 对应** | v6（Signal>0 vs Signal<0 的 ECDF + KS 检验） |
+
+### 4.8 `multiple_testing` — 多重检验校正
+
+| 字段 | 值 |
+|------|-----|
+| **task_type** | `"multiple_testing"` |
+| **输入** | `params.p_values`（list）+ `params.method` + `params.alpha` |
+| **输出** | `pd.DataFrame`（index / p_value / adjusted_p / reject） |
+| **handler** | `compute.handlers.stats.multiple_testing_handler` |
+| **支持方法** | `bonferroni` / `bh_fdr` / `by_fdr` / `holm` / `hochberg` |
+| **PAXG 对应** | v4（30+ 检验 Bonferroni）、v6（15 检验 BH-FDR）、v7（168 检验双轨） |
+
+---
+
+## 5. Tier 3 — 信号处理与频域分析（PAXG v7 W/E 路线）
+
+PAXG v7 的 W（小波）和 E（能量频谱）路线需要信号处理能力，V3.1 将其原子化。
+
+### 5.1 `spectral_analysis` — 频谱分析
+
+| 字段 | 值 |
+|------|-----|
+| **task_type** | `"spectral_analysis"` |
+| **输入** | 时序数据 + `params.method` + `params.{nperseg, noverlap, window}` |
+| **输出** | `dict`（frequencies / psd / total_energy / band_energies / spectral_centroid / peak_freq） |
+| **handler** | `compute.handlers.signal.spectral_handler` |
+| **支持方法** | `welch` / `fft` / `stft` / `periodogram` |
+| **PAXG 对应** | v7-E1（Welch PSD）、E4（交叉谱） |
+
+### 5.2 `wavelet` — 小波分析
+
+| 字段 | 值 |
+|------|-----|
+| **task_type** | `"wavelet"` |
+| **输入** | 时序数据 + `params.wavelet` + `params.scales` + `params.method` |
+| **输出** | `dict`（coefficients / power / band_energies / coherence / phase） |
+| **handler** | `compute.handlers.signal.wavelet_handler` |
+| **支持方法** | `cwt`（连续小波）/ `dwt`（离散小波）/ `coherence`（小波相干）/ `cross_spectrum` |
+| **依赖** | `PyWavelets>=1.1`（可选，fallback 自实现 Morlet） |
+| **PAXG 对应** | v7-W1（CWT 多尺度分解）、W3（小波相干）、W2（频带能量） |
+
+### 5.3 `spectral_entropy` — 谱熵
+
+| 字段 | 值 |
+|------|-----|
+| **task_type** | `"spectral_entropy"` |
+| **输入** | 时序数据 + `params.{nperseg, normalize}` |
+| **输出** | `float`（谱熵值） |
+| **handler** | `compute.handlers.signal.spectral_entropy_handler` |
+| **PAXG 对应** | v7-E2（谱熵作为路径复杂度度量） |
+
+### 5.4 `cross_spectrum` — 交叉谱分析
+
+| 字段 | 值 |
+|------|-----|
+| **task_type** | `"cross_spectrum"` |
+| **输入** | 两列时序数据 + `params.{nperseg, noverlap}` |
+| **输出** | `dict`（frequencies / csd / coherence / phase） |
+| **handler** | `compute.handlers.signal.cross_spectrum_handler` |
+| **PAXG 对应** | v7-E4（周末-周一收益率交叉谱相干） |
+
+### 5.5 `filter_design` — 滤波器设计与应用
+
+| 字段 | 值 |
+|------|-----|
+| **task_type** | `"filter_design"` |
+| **输入** | 时序数据 + `params.filter_type` + `params.{cutoff, order}` |
+| **输出** | `pd.Series`（滤波后数据） |
+| **handler** | `compute.handlers.signal.filter_handler` |
+| **支持类型** | `butterworth` / `kalman` / `savitzky_golay` / `hp_filter`（Hodrick-Prescott） |
+| **应用** | 趋势分离、噪声去除 |
+
+---
+
+## 6. Tier 4 — 非线性动力学与信息论（PAXG v7 N 路线）
+
+PAXG v7 的 N 路线（互信息、传递熵、Hurst、熵、RQA）是 V3.1 必须支持的核心能力。
+
+### 6.1 `mutual_information` — 互信息
+
+| 字段 | 值 |
+|------|-----|
+| **task_type** | `"mutual_information"` |
+| **输入** | 两列数据 + `params.{estimator, k, n_neighbors}` |
+| **输出** | `float`（MI 值，bits 或 nats） |
+| **handler** | `compute.handlers.nonlinear.mi_handler` |
+| **支持估计器** | `ksg`（Kraskov）/ `binning`（分箱）/ `sklearn`（封装） |
+| **PAXG 对应** | v7-N1（36 对 MI 检测非线性依赖） |
+
+### 6.2 `transfer_entropy` — 传递熵
+
+| 字段 | 值 |
+|------|-----|
+| **task_type** | `"transfer_entropy"` |
+| **输入** | 两列时序 + `params.{k, l, bins}` |
+| **输出** | `dict`（te_forward / te_backward / net_te / significance） |
+| **handler** | `compute.handlers.nonlinear.te_handler` |
+| **实现** | 自实现分箱估计器（~60 行 numpy），未来可替换为 KSG 变体 |
+| **PAXG 对应** | v7-N2（**关键假设**：周末→周一信息流向） |
+
+### 6.3 `hurst_exponent` — Hurst 指数
+
+| 字段 | 值 |
+|------|-----|
+| **task_type** | `"hurst_exponent"` |
+| **输入** | 时序数据 + `params.method` |
+| **输出** | `dict`（hurst / log_R / log_n / fit_r2） |
+| **handler** | `compute.handlers.nonlinear.hurst_handler` |
+| **支持方法** | `dfa`（去趋势波动分析）/ `rs`（重标极差） |
+| **依赖** | 自实现（~40 行 numpy），可选 `nolds` |
+| **PAXG 对应** | v7-N3（周末路径持久性） |
+
+### 6.4 `sample_entropy` — 样本熵
+
+| 字段 | 值 |
+|------|-----|
+| **task_type** | `"sample_entropy"` |
+| **输入** | 时序数据 + `params.{m, r}` |
+| **输出** | `float`（SampEn 值） |
+| **handler** | `compute.handlers.nonlinear.sample_entropy_handler` |
+| **依赖** | 自实现（~20 行），可选 `antropy` |
+| **PAXG 对应** | v7-N4（路径复杂度） |
+
+### 6.5 `permutation_entropy` — 排列熵
+
+| 字段 | 值 |
+|------|-----|
+| **task_type** | `"permutation_entropy"` |
+| **输入** | 时序数据 + `params.{m, tau}` |
+| **输出** | `float`（PE 值） |
+| **handler** | `compute.handlers.nonlinear.permutation_entropy_handler` |
+| **依赖** | 自实现（~15 行），可选 `antropy` |
+| **PAXG 对应** | v7-N4（路径复杂度） |
+
+### 6.6 `rqa` — 递归定量分析
+
+| 字段 | 值 |
+|------|-----|
+| **task_type** | `"rqa"` |
+| **输入** | 时序数据 + `params.{m, tau, epsilon}` |
+| **输出** | `dict`（RR / DET / LAM / ENTR / L_max / recurrence_plot） |
+| **handler** | `compute.handlers.nonlinear.rqa_handler` |
+| **依赖** | 自实现简化版（~80 行），可选 `PyRQA`（需 JVM） |
+| **PAXG 对应** | v7-N5（递归结构） |
+
+### 6.7 `recurrence_plot` — 递归图
+
+| 字段 | 值 |
+|------|-----|
+| **task_type** | `"recurrence_plot"` |
+| **输入** | 时序数据 + `params.{m, tau, epsilon}` |
+| **输出** | `np.ndarray`（2D 二值矩阵） |
+| **handler** | `compute.handlers.nonlinear.recurrence_plot_handler` |
+| **PAXG 对应** | v7-N5（3 个典型周末的递归图） |
+
+---
+
+## 7. Tier 5 — 灰色系统与软计算（PAXG v7 G 路线）
+
+PAXG v7 的 G 路线（灰色关联、GM(1,1)）需要灰色系统理论支持。
+
+### 7.1 `grey_relation` — 灰色关联分析
+
+| 字段 | 值 |
+|------|-----|
+| **task_type** | `"grey_relation"` |
+| **输入** | 参考序列 + 比较序列（list）+ `params.{rho, normalize}` |
+| **输出** | `dict`（relation_degrees / relation_matrix / rank） |
+| **handler** | `compute.handlers.grey.grey_relation_handler` |
+| **实现** | 自实现（< 50 行 numpy） |
+| **PAXG 对应** | v7-G1（307×307 灰色关联矩阵）、G2（与参考模式关联度）、G4（偏相关） |
+
+### 7.2 `gm11_predict` — GM(1,1) 灰色预测
+
+| 字段 | 值 |
+|------|-----|
+| **task_type** | `"gm11_predict"` |
+| **输入** | 时序数据 + `params.n_ahead` + `params.{alpha, ...}` |
+| **输出** | `dict`（predicted / params_a_b / mape / mae / rmse） |
+| **handler** | `compute.handlers.grey.gm11_handler` |
+| **实现** | 自实现（< 30 行 numpy） |
+| **PAXG 对应** | v7-G3（GM(1,1) 周一开盘预测） |
+
+### 7.3 `grey_cluster` — 灰色聚类
+
+| 字段 | 值 |
+|------|-----|
+| **task_type** | `"grey_cluster"` |
+| **输入** | 数据矩阵 + `params.n_clusters` + `params.linkage` |
+| **输出** | `dict`（labels / centroids / silhouette） |
+| **handler** | `compute.handlers.grey.grey_cluster_handler` |
+| **依赖** | 灰色关联 + `scipy.cluster.hierarchy` |
+| **PAXG 对应** | v7-G1（周末路径灰色关联聚类） |
+
+---
+
+## 8. Tier 6 — 机器学习与数据挖掘
+
+PAXG v7 的 F 路线（ML 融合）+ 量化通用 ML 需求。
+
+### 8.1 `ml_train` — 机器学习训练
+
+| 字段 | 值 |
+|------|-----|
+| **task_type** | `"ml_train"` |
+| **输入** | 特征矩阵 + 标签 + `params.model_type` + `params.{hyperparams, cv}` |
+| **输出** | `dict`（model_ref（cloudpickle）/ cv_scores / feature_importance / best_params） |
+| **handler** | `compute.handlers.ml.train_handler` |
+| **支持模型** | `random_forest` / `gbdt` / `xgboost` / `lightgbm` / `logistic` / `ridge` / `lasso` |
+| **PAXG 对应** | v7-F3（RF 回归前向验证） |
+
+### 8.2 `ml_predict` — 机器学习预测
+
+| 字段 | 值 |
+|------|-----|
+| **task_type** | `"ml_predict"` |
+| **输入** | 特征矩阵 + `model_ref`（cloudpickle） |
+| **输出** | `np.ndarray`（预测值/类别） |
+| **handler** | `compute.handlers.ml.predict_handler` |
+
+### 8.3 `feature_importance` — 特征重要性
+
+| 字段 | 值 |
+|------|-----|
+| **task_type** | `"feature_importance"` |
+| **输入** | 特征矩阵 + 标签 + `params.method` |
+| **输出** | `pd.DataFrame`（feature / importance / rank） |
+| **handler** | `compute.handlers.ml.feature_importance_handler` |
+| **支持方法** | `permutation` / `shap` / `gini` / `gain` / `mutual_info` |
+| **PAXG 对应** | v7-F3（特征重要性排序） |
+
+### 8.4 `walkforward_cv` — 前向验证交叉验证
+
+| 字段 | 值 |
+|------|-----|
+| **task_type** | `"walkforward_cv"` |
+| **输入** | 时序数据 + 模型 + `params.{train_size, test_size, step}` |
+| **输出** | `dict`（fold_scores / mean / std / oos_performance） |
+| **handler** | `compute.handlers.ml.walkforward_cv_handler` |
+| **PAXG 对应** | v7-F3（5-fold 前向验证，保持时间顺序） |
+
+### 8.5 `clustering` — 聚类分析
+
+| 字段 | 值 |
+|------|-----|
+| **task_type** | `"clustering"` |
+| **输入** | 数据矩阵 + `params.method` + `params.n_clusters` |
+| **输出** | `dict`（labels / centroids / silhouette / inertia） |
+| **handler** | `compute.handlers.ml.clustering_handler` |
+| **支持方法** | `kmeans` / `hierarchical` / `dbscan` / `gmms` |
+| **PAXG 对应** | v7-E3（频谱 K-means 聚类） |
+
+### 8.6 `dimension_reduction` — 降维
+
+| 字段 | 值 |
+|------|-----|
+| **task_type** | `"dimension_reduction"` |
+| **输入** | 数据矩阵 + `params.method` + `params.n_components` |
+| **输出** | `dict`（transformed / explained_variance / components） |
+| **handler** | `compute.handlers.ml.dim_reduction_handler` |
+| **支持方法** | `pca` / `ica` / `tsne` / `umap` / `kpca` |
+| **PAXG 对应** | v7-E3（t-SNE 频谱空间可视化） |
+
+### 8.7 `classification_metrics` — 分类评估
+
+| 字段 | 值 |
+|------|-----|
+| **task_type** | `"classification_metrics"` |
+| **输入** | y_true + y_pred + `params.{labels, average}` |
+| **输出** | `dict`（accuracy / precision / recall / f1 / roc_auc / confusion_matrix） |
+| **handler** | `compute.handlers.ml.classification_metrics_handler` |
+| **PAXG 对应** | v7-F4（ML 分类评估） |
+
+---
+
+## 9. Tier 7 — 投资组合与风险管理（量化核心扩展）
+
+量化研究通用能力，部分 PAXG 间接需要，部分为标准量化工具箱。
+
+### 9.1 `portfolio_optimization` — 投资组合优化
+
+| 字段 | 值 |
+|------|-----|
+| **task_type** | `"portfolio_optimization"` |
+| **输入** | 收益率矩阵 + `params.method` + `params.{target_return, risk_free}` |
+| **输出** | `dict`（weights / expected_return / volatility / sharpe） |
+| **handler** | `compute.handlers.portfolio.opt_handler` |
+| **支持方法** | `markowitz` / `black_litterman` / `risk_parity` / `min_variance` / `max_sharpe` |
+
+### 9.2 `risk_metrics` — 风险度量
+
+| 字段 | 值 |
+|------|-----|
+| **task_type** | `"risk_metrics"` |
+| **输入** | 收益率序列 + `params.{confidence, window}` |
+| **输出** | `dict`（var / cvar / max_drawdown / sharpe / sortino / calmar / information_ratio / volatility） |
+| **handler** | `compute.handlers.portfolio.risk_handler` |
+| **支持风险** | `historical_var` / `parametric_var` / `monte_carlo_var` / `cvar` |
+
+### 9.3 `factor_analysis` — 因子分析
+
+| 字段 | 值 |
+|------|-----|
+| **task_type** | `"factor_analysis"` |
+| **输入** | 收益率 + 因子矩阵 + `params.method` |
+| **输出** | `dict`（factor_returns / t_stats / r_squared / residuals） |
+| **handler** | `compute.handlers.portfolio.factor_handler` |
+| **支持方法** | `capm` / `fama_french_3` / `fama_french_5` / `carhart_4` / `custom` |
+
+### 9.4 `cointegration` — 协整检验
+
+| 字段 | 值 |
+|------|-----|
+| **task_type** | `"cointegration"` |
+| **输入** | 两列价格序列 + `params.method` |
+| **输出** | `dict`（test_stat / p_value / hedge_ratio / half_life / is_cointegrated） |
+| **handler** | `compute.handlers.portfolio.cointegration_handler` |
+| **支持方法** | `engle_granger` / `johansen` / `phillips_ouliaris` |
+| **应用** | 配对交易、统计套利 |
+
+### 9.5 `regime_detection` — 市场状态识别
+
+| 字段 | 值 |
+|------|-----|
+| **task_type** | `"regime_detection"` |
+| **输入** | 时序数据 + `params.method` + `params.n_regimes` |
+| **输出** | `dict`（labels / transition_matrix / regime_stats） |
+| **handler** | `compute.handlers.portfolio.regime_handler` |
+| **支持方法** | `hmm` / `change_point` / `markov_switching` |
+| **PAXG 对应** | v4-E（regime 切换分析） |
+
+### 9.6 `stress_test` — 压力测试
+
+| 字段 | 值 |
+|------|-----|
+| **task_type** | `"stress_test"` |
+| **输入** | 组合 + `params.scenarios` |
+| **输出** | `pd.DataFrame`（scenario / pnl / max_drawdown / var_breach） |
+| **handler** | `compute.handlers.portfolio.stress_handler` |
+| **支持场景** | `historical`（2008/2020/2022 等历史危机）/ `monte_carlo` / `parametric` |
+
+---
+
+## 10. Tier 8 — 前沿与预留（未来扩展）
+
+以下 task_type 在 V3.1 协议层**预留接口**（注册到 task_type 表），但 handler 可后补。预留的目的是确保未来新增时**协议零改动**。
+
+### 10.1 `bayesian_inference` — 贝叶斯推断
+
+| 字段 | 值 |
+|------|-----|
+| **task_type** | `"bayesian_inference"` |
+| **依赖** | `pymc` / `stan` / `numpyro` |
+| **应用** | 参数不确定性量化、贝叶斯回归、层次模型 |
+
+### 10.2 `deep_learning` — 深度学习
+
+| 字段 | 值 |
+|------|-----|
+| **task_type** | `"deep_learning"` |
+| **依赖** | `torch` / `tensorflow` |
+| **硬件** | GPU（Worker 注册时声明 `gpu.devices`） |
+| **应用** | LSTM/Transformer 时序预测、表示学习 |
+
+### 10.3 `reinforcement_learning` — 强化学习
+
+| 字段 | 值 |
+|------|-----|
+| **task_type** | `"reinforcement_learning"` |
+| **依赖** | `stable-baselines3` / `ray[rllib]` |
+| **应用** | 动态仓位管理、执行算法优化 |
+
+### 10.4 `order_flow` — 订单流分析
+
+| 字段 | 值 |
+|------|-----|
+| **task_type** | `"order_flow"` |
+| **依赖** | L2/L3 行情数据 |
+| **应用** | 微观结构、大单检测、流动性分析 |
+
+### 10.5 `agent_based_simulation` — 基于代理的仿真
+
+| 字段 | 值 |
+|------|-----|
+| **task_type** | `"agent_based_simulation"` |
+| **依赖** | `mesa` / 自实现 |
+| **应用** | 市场涌现行为、策略博弈、系统性风险仿真 |
+
+---
+
+## 11. task_type 注册表汇总
+
+| Tier | task_type | 类别 | 状态 | 分片策略 | PAXG 对应 |
+|------|-----------|------|------|---------|----------|
+| 1 | `indicator` | 回测 | 迁移 | none | v1~v7 |
+| 1 | `backtest` | 回测 | 迁移 | none | v5 |
+| 1 | `grid_search` | 回测 | 迁移 | param_wise | v5 |
+| 1 | `batch_backtest` | 回测 | 迁移 | param_wise | v5-redo |
+| 1 | `monte_carlo` | 回测 | 迁移 | param_wise | v5 |
+| 1 | `walkforward` | 回测 | 迁移 | time_wise | v5/v7 |
+| 2 | `correlation` | 统计 | 新增 | none | v1/v4/v7 |
+| 2 | `hypothesis_test` | 统计 | 新增 | none | v3/v6 |
+| 2 | `bootstrap` | 统计 | 新增 | param_wise | v4 |
+| 2 | `permutation_test` | 统计 | 新增 | param_wise | v4/v7 |
+| 2 | `chow_test` | 统计 | 新增 | none | v4 |
+| 2 | `survival_analysis` | 统计 | 新增 | none | v6 |
+| 2 | `ecdf` | 统计 | 新增 | none | v6 |
+| 2 | `multiple_testing` | 统计 | 新增 | none | v4/v6/v7 |
+| 3 | `spectral_analysis` | 信号 | 新增 | none | v7-E1 |
+| 3 | `wavelet` | 信号 | 新增 | none | v7-W1/W2/W3 |
+| 3 | `spectral_entropy` | 信号 | 新增 | none | v7-E2 |
+| 3 | `cross_spectrum` | 信号 | 新增 | none | v7-E4 |
+| 3 | `filter_design` | 信号 | 新增 | none | — |
+| 4 | `mutual_information` | 非线性 | 新增 | none | v7-N1 |
+| 4 | `transfer_entropy` | 非线性 | 新增 | none | v7-N2 |
+| 4 | `hurst_exponent` | 非线性 | 新增 | none | v7-N3 |
+| 4 | `sample_entropy` | 非线性 | 新增 | none | v7-N4 |
+| 4 | `permutation_entropy` | 非线性 | 新增 | none | v7-N4 |
+| 4 | `rqa` | 非线性 | 新增 | none | v7-N5 |
+| 4 | `recurrence_plot` | 非线性 | 新增 | none | v7-N5 |
+| 5 | `grey_relation` | 灰色 | 新增 | none | v7-G1/G2 |
+| 5 | `gm11_predict` | 灰色 | 新增 | none | v7-G3 |
+| 5 | `grey_cluster` | 灰色 | 新增 | none | v7-G1 |
+| 6 | `ml_train` | ML | 新增 | none | v7-F3 |
+| 6 | `ml_predict` | ML | 新增 | none | v7-F3 |
+| 6 | `feature_importance` | ML | 新增 | none | v7-F3 |
+| 6 | `walkforward_cv` | ML | 新增 | time_wise | v7-F3 |
+| 6 | `clustering` | ML | 新增 | none | v7-E3 |
+| 6 | `dimension_reduction` | ML | 新增 | none | v7-E3 |
+| 6 | `classification_metrics` | ML | 新增 | none | v7-F4 |
+| 7 | `portfolio_optimization` | 组合 | 预留 | none | — |
+| 7 | `risk_metrics` | 组合 | 新增 | none | 通用 |
+| 7 | `factor_analysis` | 组合 | 预留 | none | — |
+| 7 | `cointegration` | 组合 | 预留 | none | — |
+| 7 | `regime_detection` | 组合 | 新增 | none | v4-E |
+| 7 | `stress_test` | 组合 | 预留 | none | — |
+| 8 | `bayesian_inference` | 前沿 | 预留 | none | — |
+| 8 | `deep_learning` | 前沿 | 预留 | none | — |
+| 8 | `reinforcement_learning` | 前沿 | 预留 | none | — |
+| 8 | `order_flow` | 前沿 | 预留 | none | — |
+| 8 | `agent_based_simulation` | 前沿 | 预留 | none | — |
+
+---
+
+## 12. ComputeSpec 扩展策略
+
+V3.1 的 `ComputeSpec` 在 V3 基础上**扁平化**为 `task_type` + `params` 两层，避免为每个 task_type 新增专用字段：
+
+```python
+@dataclass
+class ComputeSpec:
+    task_type: str                    # 见 §11 注册表
+    strategy_ref: Optional[str] = None  # cloudpickle:base64...（回测类需要）
+    strategy_codec: str = "cloudpickle"
+    params: dict = field(default_factory=dict)  # 任务类型特定参数（JSON 可序列化）
+    # ── 回测类共用字段（从 V3 保留，便于 handler 直接读取）──
+    initial_cash: float = 1_000_000.0
+    cost_model: Optional[str] = None
+    fill_model: Optional[str] = None
+    execution_model: Optional[str] = None
+    benchmark: Optional[str] = None
+    trade_on: str = "open"
+    allow_short: bool = False
+    periods_per_year: Optional[int] = None
+    # ── 网格搜索/批量共用 ──
+    param_grid: Optional[dict] = None
+    metric: str = "sharpe"
+    maximize: bool = True
+    strategies: Optional[dict] = None
+    fee_models: Optional[list] = None
+    # ── 蒙特卡洛共用 ──
+    n_simulations: int = 1000
+    seed: int = 0
 ```
 
-这条链条要求平台不仅“能算”，还必须保留：
-
-- 输入数据版本和时间范围。
-- 每个派生数据集的来源与参数。
-- 随机算法的种子与分片规则。
-- 策略代码、成本模型、执行模型和运行环境版本。
-- 中间结果和最终结果的可追溯关系。
-- 本地与远程执行的一致语义。
-
-## 3. V3.1 的有限泛化原则
-
-### 3.1 原则一：围绕金融数据资产泛化
-
-V3.1 的输入输出不是任意 Python 对象，而是有限的金融资产类型：
-
-| 资产类型 | 典型内容 |
-|---|---|
-| `market_table` | OHLCV、quote、trade、order book 等标准市场数据 |
-| `feature_table` | 指标、信号、标签、横截面暴露、状态变量 |
-| `event_table` | 财报、宏观、公司行动、交易日历事件 |
-| `model_bundle` | 已注册模型或受控 Python 模块包 |
-| `backtest_result` | equity、returns、fills、orders、positions、metrics |
-| `experiment_table` | 参数、指标、状态、失败原因、排名 |
-| `simulation_table` | 情景、路径、分位数、风险统计 |
-| `chart_spec` | 与渲染器无关的金融图表规格 |
-| `report_bundle` | 表格、图表、元数据和报告清单 |
-
-### 3.2 原则二：围绕金融操作泛化
-
-每个任务必须有稳定的金融语义，例如“计算指标”“执行回测”“做排列检验”，而不是“调用任意函数”。
-
-### 3.3 原则三：组合发生在 Job 层，不发生在协议层
-
-协议只传递类型化 Job、WorkUnit 和 ArtifactRef。复杂研究流程由 Planner 把复合 Job 展开为原子任务 DAG，不在 Envelope 中嵌入通用脚本语言。
-
-### 3.4 原则四：扩展靠能力包，不靠核心字段膨胀
-
-V3 的 `ComputeSpec` 同时容纳回测、网格、批量、Monte Carlo 字段，继续扩展会形成大量互斥可选字段。V3.1 改为按操作定义独立参数模型：
-
-```text
-indicator.compute@1        -> IndicatorParameters
-statistics.hypothesis@1    -> HypothesisParameters
-backtest.run@1             -> BacktestParameters
-experiment.grid_search@1   -> GridSearchParameters
-validation.walk_forward@1  -> WalkForwardParameters
-```
-
-新操作新增自己的参数模型、执行器、分片器、合并器和结果模型，不修改其他操作。
-
-## 4. V3.1 首批基础原子任务
-
-### 4.1 数据准备原子任务
-
-| operation | 目的 | 主要输出 |
-|---|---|---|
-| `market.ingest@1` | 从受支持数据源采集并标准化市场数据 | 数据修订记录 |
-| `dataset.snapshot@1` | 按标的、时间尺度、范围和质量规则冻结数据 | `DatasetSnapshot` |
-| `dataset.align@1` | 时区、交易日历、频率和多标的时间轴对齐 | `market_table` |
-| `dataset.resample@1` | OHLCV 重采样和聚合 | `market_table` |
-| `dataset.join@1` | 受控的多表时间对齐连接 | `market_table`/`feature_table` |
-| `dataset.window@1` | 构造滚动窗口、事件窗口、周末-周一配对 | `feature_table` |
-| `dataset.quality@1` | 缺失、重复、跳变、覆盖和完整性检查 | 质量报告 |
-
-这些任务不是通用 ETL。它们只支持明确的金融时间序列规则、市场日历和受控连接语义。
-
-### 4.2 指标与特征原子任务
-
-| operation | 目的 | 当前映射 |
-|---|---|---|
-| `indicator.compute@1` | 单个或一组技术/统计指标 | MA、RSI、ATR、Beta、Sharpe 等 |
-| `feature.transform@1` | 收益率、对数收益、标准化、滞后、差分 | PAXG x1-x6 基础 |
-| `feature.path@1` | 极值顺序、时序、路径形态和窗口特征 | v3、v6 |
-| `feature.spectral@1` | CWT、PSD、频带能量、谱熵 | v7 W/E |
-| `feature.nonlinear@1` | TE、Hurst、熵、RQA、灰色关联 | v7 G/N |
-| `feature.cross_section@1` | 排名、分位数组、行业/资产内标准化 | 后续横截面研究 |
-
-### 4.3 统计推断原子任务
-
-| operation | 目的 | 说明 |
-|---|---|---|
-| `statistics.describe@1` | 描述统计、相关矩阵、分组汇总 | 必须记录样本数与缺失规则 |
-| `statistics.hypothesis@1` | t、Welch、卡方、KS、log-rank、Chow | 每种检验有独立参数 schema |
-| `statistics.regression@1` | OLS、稳健标准误、分段/滚动回归 | 输出系数、诊断和残差资产 |
-| `statistics.multiple_testing@1` | Bonferroni、BH-FDR 等 | 输入为检验结果表 |
-| `resampling.permutation@1` | 排列检验 | seed、次数、统计量必须固定 |
-| `resampling.bootstrap@1` | percentile/BCa 等自助法 | 支持可确定分片 |
-| `statistics.survival@1` | KM、log-rank、风险比 | 支撑 v6 类型分析 |
-
-统计任务与指标计算同等级：都是可独立执行、可缓存、可复用的金融研究原子。
-
-### 4.4 回测与执行原子任务
-
-| operation | 目的 | 输出 |
-|---|---|---|
-| `backtest.run@1` | 单策略、单配置确定性回测 | `backtest_result` |
-| `backtest.replay@1` | 事件流或订单簿回放 | `backtest_result` |
-| `backtest.analyze@1` | 从已有回测结果重新计算指标 | metrics/artifacts |
-| `backtest.compare@1` | 多结果对齐比较和基准比较 | comparison table |
-
-`backtest.run@1` 必须覆盖当前功能，包括：
-
-- 多标的和多时间尺度。
-- session 跨越持仓。
-- NextBar 和 intrabar 执行。
-- 精确时间退出和 time-in-force。
-- market、limit、stop、stop-limit、OCO 和 mutual OCO。
-- 成交时间、订单优先级、止盈止损、移动止损。
-- maker/taker、BNB 折扣、滑点、固定/比例/阶梯成本。
-- 做空、仓位管理、未来函数防护和确定性随机种子。
-
-### 4.5 实验与搜索原子任务
-
-| operation | 目的 | 分片维度 |
-|---|---|---|
-| `experiment.batch@1` | 策略 x 费率 x 标的 x 配置矩阵 | run |
-| `experiment.grid_search@1` | 笛卡尔参数搜索 | parameter combination |
-| `experiment.random_search@1` | 固定 seed 的随机搜索 | trial range |
-| `experiment.bayesian_search@1` | Optuna 类优化 | study/trial |
-| `experiment.rank@1` | 指标排名、Pareto 筛选 | table partition |
-
-搜索任务本身不直接运行策略逻辑。Planner 把它们展开为多个 `backtest.run@1`，再由合并单元产生排名结果。
-
-### 4.6 验证与稳健性原子任务
-
-| operation | 目的 |
-|---|---|
-| `validation.walk_forward@1` | 训练/验证窗口前向推进 |
-| `validation.purged_cv@1` | Purged K-Fold 与 embargo，避免时序泄漏 |
-| `validation.subperiod@1` | 子期间稳定性 |
-| `validation.regime@1` | 高低波动、趋势、流动性状态分层 |
-| `validation.sensitivity@1` | 参数、费率、滑点和数据质量敏感性 |
-| `validation.negative_control@1` | BTC 类阴性对照或 placebo 检验 |
-| `validation.predictive@1` | 注册模型族的时间前向预测验证，用于 v7 样本外增量检验 |
-
-### 4.7 模拟、风险与情景原子任务
-
-| operation | 目的 |
-|---|---|
-| `simulation.bootstrap_paths@1` | 收益重采样和资金路径 |
-| `simulation.order_shuffle@1` | 成交顺序重排 |
-| `simulation.monte_carlo@1` | 参数化或经验分布模拟 |
-| `risk.metrics@1` | VaR、CVaR、回撤、暴露、集中度 |
-| `risk.stress@1` | 费率、滑点、价格跳变、流动性冲击 |
-| `risk.scenario@1` | 预定义市场情景重放 |
-
-### 4.8 表达与导出原子任务
-
-| operation | 目的 |
-|---|---|
-| `render.chart@1` | 从结果资产生成 ChartSpec 或图片 |
-| `render.dashboard@1` | 组合多个图表与表格 |
-| `export.table@1` | CSV/JSON/Arrow/Parquet |
-| `report.assemble@1` | 生成包含引用和 lineage 的报告包 |
-
-渲染和报告任务可以部署到普通 CPU Worker，不应嵌入 Storage 或 Dispatcher。
-
-## 5. 未来常见量化能力预留
-
-以下能力与指标、统计推断、回测处于同一基础层级，但不要求 V3.1 首批全部实现。预留的是操作注册、输入输出模型和 Worker capability，不是预先加入空字段。
-
-### 5.1 横截面与组合
-
-| operation 候选 | 用途 |
-|---|---|
-| `factor.compute@1` | 因子暴露、IC、RankIC、分层收益 |
-| `factor.neutralize@1` | 行业、市值、Beta 中性化 |
-| `portfolio.optimize@1` | 均值方差、风险平价、最小方差、CVaR 优化 |
-| `portfolio.rebalance@1` | 调仓、换手和约束处理 |
-| `attribution.performance@1` | Brinson、因子归因、交易成本归因 |
-
-### 5.2 机器学习研究
-
-| operation 候选 | 用途 |
-|---|---|
-| `ml.dataset_split@1` | 时序安全的训练/验证/测试切分 |
-| `ml.train@1` | 受控模型族训练 |
-| `ml.predict@1` | 模型推理 |
-| `ml.evaluate@1` | 前向验证、校准、漂移和特征稳定性 |
-| `ml.explain@1` | permutation importance、SHAP 类解释 |
-
-机器学习任务必须强制记录数据快照、特征 schema、切分方法、随机种子和环境摘要，避免 v7 中样本内过拟合被误判为预测力。
-
-首批 `validation.predictive@1` 只迁移现有 v7 所需的 linear baseline、随机森林回归/分类和 chronological split。它输出验证结果，不建立可部署模型服务，也不接受任意 estimator；完整训练、模型资产和推理生命周期仍属于后续 `ml.*` operation。
-
-### 5.3 衍生品与波动率
-
-| operation 候选 | 用途 |
-|---|---|
-| `option.price@1` | Black-Scholes、树模型、Monte Carlo 定价 |
-| `option.greeks@1` | Delta/Gamma/Vega/Theta/Rho |
-| `volatility.surface@1` | 隐含波动率曲面拟合与插值 |
-| `option.strategy_backtest@1` | 跨式、宽跨式、价差等 |
-
-这类能力是 PAXG v4 波动率发现潜在经济变现路径，但需要期权数据模型后再落地。
-
-### 5.4 微观结构与高频
-
-| operation 候选 | 用途 |
-|---|---|
-| `microstructure.features@1` | spread、imbalance、order flow、impact |
-| `orderbook.replay@1` | L2/L3 订单簿回放 |
-| `execution.tca@1` | VWAP/TWAP/arrival price 成本分析 |
-| `execution.simulate@1` | 延迟、排队、部分成交模拟 |
-
-### 5.5 因果、事件与制度研究
-
-| operation 候选 | 用途 |
-|---|---|
-| `event_study.run@1` | 财报、政策、休市和上市事件窗口 |
-| `causal.did@1` | 双重差分 |
-| `causal.synthetic_control@1` | 合成控制 |
-| `causal.placebo@1` | placebo 与伪事件检验 |
-
-## 6. 新能力接入标准
-
-一个新 operation 进入核心目录前必须满足全部条件：
-
-1. 有明确的金融语义和用户场景。
-2. 输入可表达为 DatasetSnapshot、ArtifactRef 或小型 JSON 参数。
-3. 输出可表达为现有资产类型，或新增一个金融资产 schema。
-4. 参数模型独立、可校验、可版本化。
-5. 能声明资源需求、确定性、可分片性和合并规则。
-6. 有本地与远程执行一致性测试。
-7. 有至少一个真实金融 fixture 或研究用例。
-8. 不要求 Dispatcher 理解其业务算法。
-9. 不以任意 Python 对象序列化作为唯一互操作方式。
-
-能力描述建议如下：
-
-```json
-{
-  "operation": "statistics.hypothesis@1",
-  "input_kinds": ["feature_table"],
-  "output_kinds": ["experiment_table"],
-  "deterministic": true,
-  "splittable": false,
-  "merge_strategy": null,
-  "resource_classes": ["cpu-small"],
-  "implementation_version": "1.0.0"
-}
-```
-
-## 7. 明确禁止的过度泛化
-
-### 7.1 不做任意函数远程执行
-
-生产协议不提供 `custom(function_bytes, args)`。原因：
-
-- 无法稳定校验输入输出。
-- 无法规划分片和资源。
-- cloudpickle 与 Python/依赖版本强耦合。
-- 扩大远程代码执行和供应链风险。
-- 结果难以跨语言、跨版本和长期复现。
-
-开发环境可以提供受信任的 `python_bundle`，但必须是有 digest、入口点、依赖锁和安全策略的代码资产。
-
-### 7.2 不做任意 DAG 编排平台
-
-V3.1 的 DAG 只由已注册金融 operation 构成。用户不能提交 shell、SQL、HTTP 和 Python 任意节点混合的通用工作流。
-
-### 7.3 不做通用数据库代理
-
-Storage 服务暴露金融数据集和 Artifact API，不暴露任意 SQL。复杂查询通过类型化 DatasetQuery 表达。
-
-### 7.4 不预置所有未来算法字段
-
-不在 `JobSpec` 中加入 `gpu_required`、`model_name`、`option_type`、`factor_neutralize` 等未来字段。资源由 `ExecutionPolicy` 和 capability 约束表达，业务参数属于对应 operation schema。
-
-### 7.5 不承诺跨语言执行任意策略
-
-控制面和数据资产应跨语言可读，但 Python 策略执行仍可以是 Python Worker 专属 capability。跨语言 Worker 只执行它明确实现的 operation。
-
-## 8. 泛化边界图
-
-```mermaid
-flowchart TB
-    subgraph Core[稳定共用底层]
-        C1[Job/WorkUnit/Artifact 契约]
-        C2[DatasetSnapshot 与 lineage]
-        C3[租约/幂等/状态/事件]
-        C4[operation capability 注册]
-    end
-
-    subgraph Finance[金融原子任务]
-        F1[数据准备]
-        F2[指标与特征]
-        F3[统计推断]
-        F4[回测执行]
-        F5[实验搜索]
-        F6[验证模拟风险]
-        F7[渲染报告]
-    end
-
-    subgraph Future[按需增加]
-        X1[因子与组合]
-        X2[机器学习]
-        X3[期权与波动率]
-        X4[微观结构]
-        X5[因果与事件研究]
-    end
-
-    Core --> Finance
-    Finance --> Future
-    Future -.只能通过新 operation 接入.-> Core
-
-    Bad1[任意函数执行]:::bad
-    Bad2[任意 DAG]:::bad
-    Bad3[任意 SQL 代理]:::bad
-    Bad1 -.禁止.-> Core
-    Bad2 -.禁止.-> Core
-    Bad3 -.禁止.-> Core
-
-    classDef bad fill:#fee2e2,stroke:#b91c1c,color:#7f1d1d
-```
-
-## 9. 结论
-
-V3.1 的“通用”应理解为：
-
-- 同一套调用、分发、数据快照、结果资产和任务状态底层可以承载多个金融计算 operation。
-- 新金融能力通过独立参数 schema 和 capability 增量接入。
-- 复杂研究由原子任务组合而成。
-- 不把金融平台稀释成任意代码执行和通用工作流系统。
-
-这一边界既能覆盖当前 StockStat 和 PAXG v1-v7 的全部功能，也为因子、组合、机器学习、期权和微观结构预留了真实可实现的扩展路径。
+**新增 task_type 的扩展规则**：
+1. 优先将参数放入 `params` dict（如 `params.method="welch"`, `params.nperseg=24`）
+2. 仅当某字段被多个 task_type 共用且语义明确时，才提升为 ComputeSpec 顶层字段
+3. 所有新字段必须有默认值（前向兼容）
+4. handler 通过 `spec.compute_spec.params.get("method", "default")` 读取
+
+**`strategy_ref` 编码**：
+- `cloudpickle:base64...` — Python 闭包策略（默认）
+- `registry:ma_cross` — 注册表中的命名策略
+- `dsl:DSL表达式` — DSL 编译的策略
+- `none` — 无策略（统计/信号/非线性类任务）
+
+---
+
+## 13. 与 PAXG v1~v7 的映射矩阵
+
+下表验证 V3.1 的 task_type 完整覆盖 PAXG v1~v7 全部研究功能：
+
+| PAXG 版本 | 研究内容 | 使用的 task_type |
+|----------|---------|-----------------|
+| v1 | Pearson/Spearman 相关、t检验、CI、滚动 | `correlation` / `hypothesis_test` / `indicator`(rolling) |
+| v2 | 独立涨跌幅相关 | `correlation` |
+| v3 | 路径顺序 2×2 卡方 | `hypothesis_test`(chi2) / `ecdf` |
+| v4-A | 排列检验、bootstrap、子期 | `permutation_test` / `bootstrap` |
+| v4-B | 6×6 相关矩阵、Chow 断点 | `correlation`(matrix) / `chow_test` |
+| v4-D | 子期对比、滚动 | `correlation` / `indicator`(rolling) |
+| v4-E | regime 切换、decay | `regime_detection` |
+| v5 | 132 次回测（33 策略 × 4 费率） | `batch_backtest` / `backtest` |
+| v5-redo | 同上（用 BacktestEngine） | `batch_backtest` |
+| v6 | 多窗口卡方、生存分析、ECDF、HR | `hypothesis_test`(chi2) / `survival_analysis` / `ecdf` |
+| v7-W | CWT、小波相干、频带能量 | `wavelet` |
+| v7-E | Welch PSD、谱熵、交叉谱、K-means | `spectral_analysis` / `spectral_entropy` / `cross_spectrum` / `clustering` |
+| v7-G | 灰色关联、GM(1,1)、层次聚类 | `grey_relation` / `gm11_predict` / `grey_cluster` |
+| v7-N1 | 互信息（KSG） | `mutual_information` |
+| v7-N2 | 传递熵（信息流向） | `transfer_entropy` |
+| v7-N3 | Hurst 指数（DFA） | `hurst_exponent` |
+| v7-N4 | 样本熵、排列熵 | `sample_entropy` / `permutation_entropy` |
+| v7-N5 | 递归定量分析 | `rqa` / `recurrence_plot` |
+| v7-F1 | 28 信号相关矩阵 | `correlation`(matrix) |
+| v7-F2 | 逐步回归 | `ml_train`(linear) |
+| v7-F3 | 随机森林、前向验证、特征重要性 | `ml_train`(rf) / `walkforward_cv` / `feature_importance` |
+| v7-F4 | ML 分类评估 | `ml_train`(classifier) / `classification_metrics` |
+| v7-§12 | v7-S1~S4 策略回测 | `batch_backtest` / `backtest` |
+| v7-§13 | 多重检验校正、置换检验 | `multiple_testing` / `permutation_test` |
+
+**覆盖率验证**：PAXG v1~v7 全部研究功能均有对应 task_type，无遗漏。
+
+---
+
+## 14. 实现优先级
+
+| 优先级 | Tier | task_type | 理由 |
+|--------|------|-----------|------|
+| **P0** | 1 | 全部 6 个 | 回测是核心，PAXG v5 直接依赖 |
+| **P0** | 2 | `correlation` / `hypothesis_test` / `bootstrap` / `permutation_test` / `multiple_testing` | PAXG v1~v6 基础统计 |
+| **P1** | 2 | `survival_analysis` / `ecdf` / `chow_test` | PAXG v6 专属 |
+| **P1** | 3 | `spectral_analysis` / `wavelet` / `spectral_entropy` / `cross_spectrum` | PAXG v7 W/E |
+| **P1** | 4 | 全部 7 个 | PAXG v7 N 路线（含关键假设 H_N2） |
+| **P1** | 5 | 全部 3 个 | PAXG v7 G 路线 |
+| **P2** | 6 | 全部 7 个 | PAXG v7 F 路线 + 通用 ML |
+| **P2** | 7 | `risk_metrics` / `regime_detection` | 量化通用，PAXG v4 间接 |
+| **P3** | 7 | `portfolio_optimization` / `factor_analysis` / `cointegration` / `stress_test` | 预留接口，handler 后补 |
+| **P3** | 8 | 全部 5 个 | 前沿预留，协议支持即可 |
+
+---
+
+## 15. 总结
+
+V3.1 的金融计算任务体系以 **47 个原子 task_type** 覆盖：
+- PAXG v1~v7 全部研究功能（36 个必须实现）
+- 量化通用工具箱（组合/风险/ML，11 个预留）
+
+**核心设计原则**：
+1. **协议零感知业务** —— 新增 task_type 只需注册 handler，协议/传输/调度零改动
+2. **紧贴金融场景** —— 不 overgeneralize，每个 task_type 都有明确量化用途
+3. **预留扩展点** —— Tier 7~8 接口预留，未来新增不动协议
+4. **分片友好** —— 重型任务（grid_search/batch_backtest/monte_carlo/bootstrap/permutation_test/walkforward_cv）支持分片并行
+
+**与 V3 的差异**：
+- V3 的 6 个 task_type → V3.1 的 47 个（覆盖范围从"回测+指标"扩展到"量化全栈"）
+- 新增统计/信号/非线性/灰色/ML/组合 6 个新类别
+- `ComputeSpec.params` dict 统一承载新任务参数，避免字段爆炸
+
+---
+
+*本文件为 V3.1 Compute 模块 handler 注册表的设计基线。详细架构见 [DESIGN_ARCH_COMPUTE_V31.md](DESIGN_ARCH_COMPUTE_V31.md)。*

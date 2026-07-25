@@ -1,613 +1,886 @@
-# StockStat V3.1 总体架构设计
+# DESIGN_ARCH_V31 — StockStat V3.1 总体架构设计
 
-> 版本：V3.1 设计稿
-> 日期：2026-07-21
-> 状态：完全重构目标设计
-> 目标：以调用 -> 分发 -> {存储、N x 计算} 可分离部署为手段，实现当前全部金融功能并建立可增量扩展的共用底层
+> **版本**：v3.1（完全重构）
+> **日期**：2026-07-24
+> **状态**：设计稿
+> **核心目标**：以实现 COMPUTE_OFFLOAD_PLAN_CN 三角色架构 + COMPUTE_OFFLOAD_PLAN_V2_CN 四角色协议为手段，以实现 PAXG-Weekend-Monday-Law v1~v7 全部研究功能为目的，以**调用—分发—{存储、n×计算}可分离部署**为架构，完全重构 V2/V3。
+>
+> **关联文档**：
+> - [DESIGN_GENERALIZE.md](DESIGN_GENERALIZE.md) — 47 个金融计算原子任务清单
+> - [DESIGN_ARCH_FOUNDATION_V31.md](DESIGN_ARCH_FOUNDATION_V31.md) — 基础层（协议/传输/契约）
+> - [DESIGN_ARCH_INVOCATION_V31.md](DESIGN_ARCH_INVOCATION_V31.md) — 用户入口
+> - [DESIGN_ARCH_DISPATCHER_V31.md](DESIGN_ARCH_DISPATCHER_V31.md) — 分发端
+> - [DESIGN_ARCH_STORAGE_V31.md](DESIGN_ARCH_STORAGE_V31.md) — 存储端
+> - [DESIGN_ARCH_COMPUTE_V31.md](DESIGN_ARCH_COMPUTE_V31.md) — 计算端
+> - [DESIGN_PROT_V31.md](DESIGN_PROT_V31.md) — 通讯协议
+> - [realizeV31/](../realizeV31/) — 分步实现规划
 
-## 1. 文档范围
+---
 
-本文件汇总 V3.1 的整体设计、关键取舍、模块关系、部署图景、功能迁移和实现原则。细节分别见：
+## 目录
 
-| 文档 | 详细内容 |
-|---|---|
-| [DESIGN_GENERALIZE.md](DESIGN_GENERALIZE.md) | 金融原子任务目录、未来扩展与禁止过度泛化 |
-| [DESIGN_ARCH_FOUNDATION_V31.md](DESIGN_ARCH_FOUNDATION_V31.md) | Job、WorkUnit、Artifact、Snapshot、错误和状态契约 |
-| [DESIGN_ARCH_FINANCE_V31.md](DESIGN_ARCH_FINANCE_V31.md) | 金融数据模型、指标、统计、回测和实验内核 |
-| [DESIGN_ARCH_STORAGE_V31.md](DESIGN_ARCH_STORAGE_V31.md) | 市场数据 revision、Snapshot、Artifact 和 lineage |
-| [DESIGN_ARCH_DISPATCHER_V31.md](DESIGN_ARCH_DISPATCHER_V31.md) | Planner、持久状态、调度、租约、重试与事件 |
-| [DESIGN_ARCH_COMPUTE_V31.md](DESIGN_ARCH_COMPUTE_V31.md) | Worker capability、进程隔离、缓存和结果提交 |
-| [DESIGN_ARCH_INVOCATION_V31.md](DESIGN_ARCH_INVOCATION_V31.md) | SDK、CLI、DSL、Admin 与旧客户迁移 |
-| [DESIGN_PROT_V31.md](DESIGN_PROT_V31.md) | HTTP/JSON、SSE、Artifact 和 Worker lease 协议 |
+1. [设计目标与原则](#1-设计目标与原则)
+2. [五模块架构总览](#2-五模块架构总览)
+3. [与 V2/V3 的本质差异](#3-与-v2v3-的本质差异)
+4. [数据流与控制流](#4-数据流与控制流)
+5. [包结构与依赖关系](#5-包结构与依赖关系)
+6. [部署场景矩阵](#6-部署场景矩阵)
+7. [旧客户代码迁移路径](#7-旧客户代码迁移路径)
+8. [PAXG v1~v7 功能覆盖验证](#8-paxg-v1v7-功能覆盖验证)
+9. [测试体系总览](#9-测试体系总览)
+10. [实现路线图概览](#10-实现路线图概览)
+11. [风险与缓解](#11-风险与缓解)
+12. [术语表](#12-术语表)
 
-## 2. 设计背景
+---
 
-### 2.1 V2 的设计初衷
+## 1. 设计目标与原则
 
-V2 建立了计算-存储分离、数据源、指标、DSL、回测、离线模式和插件预留。其重要理念是：
+### 1.1 设计目标
 
-- 用户可编程金融计算。
-- 存储后端可独立部署。
-- 金融功能应模块化。
-- 本地、在线和离线都可用。
-- 回测和指标是平台核心，不是外部附属脚本。
+V3.1 在 V2/V3 基础上**完全重构**，达成以下目标：
 
-### 2.2 Offload V1/V2 的设计初衷
+| 目标 | 来源 | V3.1 落地方式 |
+|------|------|------------|
+| 调用—分发—{存储、n×计算}可分离部署 | 用户要求 | 5 大模块独立包，任意组合部署 |
+| 实现 COMPUTE_OFFLOAD_PLAN_CN 三角色 | V1 设想 | Client / Storage / Compute + Dispatcher 中枢 |
+| 实现 COMPUTE_OFFLOAD_PLAN_V2_CN 四角色协议 | V2 协议 | Client / Dispatcher / Storage / Worker + 分层协议 |
+| 实现 PAXG v1~v7 全部研究功能 | 用户要求 | 47 个 task_type 覆盖回测/统计/信号/非线性/灰色/ML/组合 |
+| 模块化增量实现 | 用户要求 | Foundation 协议底座 + 4 业务模块独立演化 |
+| 单独更新维护 | 用户要求 | 5 大模块独立包，semver 版本管理 |
+| 旧客户代码完全迁移 | 用户要求 | 功能等价迁移，V2 API 通过 `_compat.py` 包装 |
+| 不过度泛化 | 用户要求 | 紧贴金融场景，47 个 task_type 均有量化用途 |
+| 预留未来扩展 | 用户要求 | Tier 7~8 预留接口，协议零改动扩展 |
 
-两份计算卸载方案提出：
+### 1.2 设计原则
 
-- 重任务异步提交。
-- 多 Worker 并行。
-- Client、Dispatcher、Storage、Worker 四角色。
-- 控制路径和数据路径分离。
-- Dispatcher 规划、分片和合并。
-- Worker 能力注册、心跳、弹性。
+| 原则 | 说明 |
+|------|------|
+| **协议优先** | 所有跨进程通信走 Foundation 协议层，无硬编码 |
+| **三层分离** | Codec / Message / Transport 独立可替换 |
+| **模块独立** | 5 大模块独立包，可单独发布升级 |
+| **计算与调用分离** | Invocation 不含计算逻辑，通过 ComputeBackend 解耦 |
+| **数据路径与控制路径分离** | Dispatcher 预取数据 1 次，Storage 计算期间空闲 |
+| **原子任务化** | 47 个 task_type，新增能力 = 新增 handler，协议零改动 |
+| **协议不感知业务** | 协议只搬运字节，不关心 task_type 语义 |
+| **完全重构** | 不考虑 V2 兼容性，但保证功能等价迁移 |
 
-### 2.3 V3 的实现价值和限制
+### 1.3 与 V3 的核心差异
 
-V3 用兼容层和增量模块快速验证了 offload 链路，证明了四角色图景可落地。但其设计目标是“核心零侵入、兼容旧代码”，因此产生了 V3.1 需要主动打破的限制：
+| 维度 | V3 | V3.1 |
+|------|----|------|
+| **重构程度** | 核心零侵入（BacktestEngine 不改） | **完全重构**（代码重新组织） |
+| **兼容性** | 保留 v1.7/v2 行为 | **不考虑兼容**，功能等价迁移 |
+| **BacktestEngine 位置** | frontend | **Compute 模块** |
+| **包结构** | 双包（frontend + backend） | **五模块独立包** |
+| **task_type 数量** | 6 | **47** |
+| **ComputeBackend** | 兼容层（可选） | **唯一路径**（必须经过） |
+| **Dispatcher** | Storage 插件（嵌入） | **独立包**，松耦合 Storage |
+| **Foundation** | 嵌入 frontend `_core` | **独立包** `stockstat-foundation` |
 
-| 限制 | 表现 |
-|---|---|
-| 旧结构主导新架构 | Worker 直接依赖旧 `stockstat` 内部 handler |
-| 两套执行路径 | 本地直接调用，远程构建 TaskSpec |
-| 单体任务模型 | `ComputeSpec` 堆积互斥字段和 params |
-| 大对象穿控制面 | cloudpickle + base64 数据和结果 |
-| 控制面不持久 | task/worker/history 主要在内存 |
-| 原型调度 | 无完整 lease、attempt、真实重试和幂等完成 |
-| 线程执行 CPU 任务 | 多核加速受 GIL 和过度订阅影响 |
-| 扩展过宽 | custom task、五 Transport、多级 Dispatcher 先于真实金融需求 |
-| 数据不可复现 | 查询条件不是不可变 Snapshot |
-| 结果不可资产化 | Dispatcher 内存对象难以独立分析和长期追溯 |
+---
 
-### 2.4 V3.1 的任务
+## 2. 五模块架构总览
 
-V3.1 不在 V3 上继续打补丁，而是：
-
-- 完全重写包和服务边界。
-- 不兼容 V2/V3 内部类和协议。
-- 完整迁移当前用户功能。
-- 以金融 Job 和数据资产为中心。
-- 先完成可靠单调度域，再考虑大规模级联。
-
-## 3. 顶层目标与非目标
-
-### 3.1 目标
-
-1. 实现全部当前功能：采集、查询、指标、DSL、统计、非线性、回测、intrabar、可视化、批量、搜索、模拟、验证和管理。
-2. PAXG v1-v7 研究可以完全以 V3.1 原生 API 重做。
-3. 52 个 v5 策略全部可迁移，包括当前 v5-v31 中尚不能表达的 7 个跨 session/精确时间策略。
-4. 本地、独立 Storage、独立 Dispatcher、多个 Worker 的业务代码一致。
-5. Dispatcher 重启不丢任务，Worker 丢失可安全重试。
-6. 大数据和大结果不经过 Dispatcher。
-7. 新金融 operation 可增量接入，不修改共享单体 spec。
-8. 所有研究结果可追溯到输入数据 revision、代码和环境。
-
-### 3.2 非目标
-
-- 不兼容旧内部 import、类或 wire protocol。
-- 不做任意 Python 函数远程执行平台。
-- 不做任意 DAG 工作流引擎。
-- 不在首期实现多级 Dispatcher 级联。
-- 不在首期实现可恢复抢占和复杂 GPU 调度。
-- 不同时维护 HTTP/TCP/Redis/SHM 五套应用传输。
-- 不把所有未来量化算法预置成字段。
-
-## 4. 核心设计结论
-
-### 4.1 “共用底层”是什么
-
-共用底层不是 V2 的领域无关 `_core`，也不是 V3 的通用 Transport。V3.1 共用底层由以下稳定原语构成：
-
-- `DatasetSnapshot`：不可变金融输入。
-- `ArtifactRef/Manifest`：不可变结果和代码资产。
-- `JobSpec`：用户金融意图。
-- `WorkUnitSpec`：Planner 生成的执行单元。
-- `OperationDescriptor`：能力、schema 和资源元数据。
-- `Lease/Attempt`：可靠执行和重试。
-- `ResultManifest`：结果提交和 lineage。
-- `JobEvent`：状态、进度和审计。
-
-### 4.2 “功能模块化增量实现”是什么
-
-每个新功能以 operation capability 接入：
+### 2.1 架构总图
 
 ```mermaid
-flowchart LR
-    S[参数 Schema] --> O[Operation Descriptor]
-    O --> P[Planner 可选]
-    O --> E[Executor]
-    O --> M[Merger 可选]
-    E --> R[Result Schema]
-    P --> W[WorkUnits]
-    W --> E
-```
-
-一个轻任务可以只有 schema + executor；一个复杂实验可以增加 planner + merge operation。Dispatcher 核心、Storage 和 SDK 基础层不因新算法修改。
-
-### 4.3 兼容的对象是功能，不是代码结构
-
-V3.1 提供：
-
-- 旧功能到新 API 的映射。
-- 旧研究脚本扫描工具。
-- PAXG 和测试 fixture 的结果 parity。
-- 明确的指标定义差异报告。
-
-V3.1 不提供长期 `StockStatClient`/`V2Client`/`ComputeBackend` 兼容 shim。否则完全重构会再次被旧形态绑架。
-
-## 5. 总体架构
-
-```mermaid
-flowchart TB
-    subgraph User[调用端]
-        PY[Python SDK]
-        CLI[CLI]
-        DSL[DSL Compiler]
-        WEB[Admin/Web]
+graph TB
+    subgraph "用户机器"
+        CLI["CLI / TUI"]
+        I["Invocation<br/>StockStatClient<br/>ComputeAPI / DSL"]
     end
 
-    subgraph Control[控制面 Dispatcher]
-        API[Job API]
-        PLAN[Finance Planner]
-        SCHED[Scheduler + Lease]
-        JS[(JobStore)]
-        EVT[SSE/Event Log]
+    subgraph "Foundation（协议底座）"
+        F["Envelope / TaskSpec<br/>Codec / Transport<br/>Contracts / Errors"]
     end
 
-    subgraph Data[数据与资产 Storage]
-        ING[Ingest + Normalize]
-        CAT[(Market Catalog)]
-        SNAP[DatasetSnapshot]
-        ART[Artifact Service]
-        BLOB[(Filesystem/S3/MinIO)]
+    subgraph "Dispatcher（分发端）"
+        D["Dispatcher<br/>TaskQueue / DataCache<br/>shard_task / merge_results<br/>WorkerRegistry"]
     end
 
-    subgraph Compute[计算面]
-        W1[Worker 1]
-        W2[Worker 2]
-        WN[Worker N]
-        K[Finance Kernel + Capabilities]
+    subgraph "Storage（存储端）"
+        S["StorageApp<br/>SQLAlchemy ORM<br/>REST API<br/>Adapters / Scheduler"]
     end
 
-    PY --> API
-    CLI --> API
-    DSL --> API
-    WEB --> API
-    PY --> SNAP
-    CLI --> ING
-    WEB --> CAT
+    subgraph "Compute Cluster（计算集群）"
+        W1["Worker 1<br/>TaskExecutor<br/>47 handlers<br/>BacktestEngine"]
+        W2["Worker 2<br/>..."]
+        WN["Worker N<br/>..."]
+    end
 
-    API --> PLAN
-    PLAN --> JS
-    SCHED --> JS
-    EVT --> PY
-    JS --> EVT
-    PLAN --> SNAP
+    CLI --> I
+    I -->|构建 TaskSpec| F
+    I -->|submit / wait / result| F
+    F -->|Transport| D
 
-    W1 --> SCHED
-    W2 --> SCHED
-    WN --> SCHED
-    W1 --> SNAP
-    W2 --> SNAP
-    WN --> SNAP
-    W1 --> ART
-    W2 --> ART
-    WN --> ART
-    ART --> BLOB
-    SNAP --> BLOB
-    ING --> CAT
-    CAT --> SNAP
+    D -->|data.fetch 1次| S
+    D -->|dispatch.assign + data| W1
+    D -->|dispatch.assign + data| W2
+    D -->|dispatch.assign + data| WN
 
-    W1 --> K
-    W2 --> K
-    WN --> K
+    W1 -->|dispatch.complete| D
+    W2 -->|dispatch.complete| D
+    WN -->|dispatch.complete| D
+
+    D -->|task.result.reply| F
+    F -->|返回结果| I
+
+    W1 -.->|依赖| F
+    W2 -.->|依赖| F
+    WN -.->|依赖| F
+    D -.->|依赖| F
+    S -.->|依赖| F
+    I -.->|依赖| F
+
+    style F fill:#e1f5ff,stroke:#0288d1,stroke-width:3px
+    style I fill:#fff3e0,stroke:#f57c00,stroke-width:2px
+    style D fill:#f3e5f5,stroke:#7b1fa2,stroke-width:2px
+    style S fill:#e8f5e9,stroke:#388e3c,stroke-width:2px
+    style W1 fill:#fce4ec,stroke:#c62828,stroke-width:2px
 ```
 
-## 6. 模块边界
+### 2.2 五大模块职责
 
-| 模块 | 包/服务 | 依赖 | 不得依赖 |
-|---|---|---|---|
-| Foundation | `stockstat-contracts` | 轻量 schema | pandas、服务实现、Kernel |
-| Finance Kernel | `stockstat-kernel` | contracts、pandas/numpy/scipy | Dispatcher、Storage、HTTP |
-| Storage | `stockstat-storage` | contracts、DB/blob、adapters | Kernel 回测、Dispatcher 内部 |
-| Dispatcher | `stockstat-dispatcher` | contracts、planner capability、JobStore client | pandas 大结果、旧 frontend |
-| Worker | `stockstat-worker` | contracts、Kernel/capabilities、service clients | Client API、JobStore DB |
-| Invocation | `stockstat` SDK | contracts、HTTP/InProcess clients | Worker 实现、服务数据库 |
+| 模块 | 包名 | 职责 | 不含 |
+|------|------|------|------|
+| **Foundation** | `stockstat-foundation` | 协议/传输/契约/错误/配置 | 业务逻辑 |
+| **Invocation** | `stockstat` | Client SDK/CLI/DSL/可视化 | BacktestEngine/计算逻辑 |
+| **Dispatcher** | `stockstat-dispatcher` | 任务调度/数据预取/结果合并/集群管理 | 计算逻辑/数据持久化 |
+| **Storage** | `stockstat-backend` | OHLCV 存储/查询/采集/Admin | 计算逻辑/任务调度 |
+| **Compute** | `stockstat-compute` | Worker/47 handlers/BacktestEngine/indicators | 任务调度/数据持久化 |
 
-依赖图：
+### 2.3 模块边界铁律
+
+> **Foundation 零业务依赖**：不 import 任何业务模块
+>
+> **四个业务模块必需依赖 Foundation**：通过 Protocol 契约交互
+>
+> **Invocation 与 Compute 互不依赖**：通过 ComputeBackend Protocol 解耦
+>
+> **Dispatcher 与 Storage 松耦合**：HTTP 或 StorageBackend Protocol
+>
+> **Compute 与 Storage 可选依赖**：Worker 可通过 storage_ref 直连 Storage
+
+### 2.4 各模块详细设计
+
+| 模块 | 详细设计文档 | 核心内容 |
+|------|------------|---------|
+| Foundation | [DESIGN_ARCH_FOUNDATION_V31.md](DESIGN_ARCH_FOUNDATION_V31.md) | 6 契约 + 7 Codec + 5 Transport + 12 异常 + Config + Plugin |
+| Invocation | [DESIGN_ARCH_INVOCATION_V31.md](DESIGN_ARCH_INVOCATION_V31.md) | StockStatClient + ComputeAPI + DataClient + DSL + CLI + TUI |
+| Dispatcher | [DESIGN_ARCH_DISPATCHER_V31.md](DESIGN_ARCH_DISPATCHER_V31.md) | Dispatcher + TaskQueue + WorkerRegistry + DataCache + shard + merge |
+| Storage | [DESIGN_ARCH_STORAGE_V31.md](DESIGN_ARCH_STORAGE_V31.md) | StorageApp + ORM + REST API + Adapters + Scheduler + Admin |
+| Compute | [DESIGN_ARCH_COMPUTE_V31.md](DESIGN_ARCH_COMPUTE_V31.md) | 3 ComputeBackend + Worker + TaskExecutor + 47 handlers + BacktestEngine |
+| Protocol | [DESIGN_PROT_V31.md](DESIGN_PROT_V31.md) | Envelope + 28 消息类型 + TaskSpec 三段式 + 数据分发策略 |
+| 任务清单 | [DESIGN_GENERALIZE.md](DESIGN_GENERALIZE.md) | 47 个 task_type（8 Tier）+ ComputeSpec 扩展策略 |
+
+---
+
+## 3. 与 V2/V3 的本质差异
+
+### 3.1 架构演进对比
 
 ```mermaid
-flowchart BT
-    C[stockstat-contracts]
-    K[stockstat-kernel] --> C
-    S[stockstat-storage] --> C
-    D[stockstat-dispatcher] --> C
-    D -->|planner metadata only| K
-    W[stockstat-worker] --> C
-    W --> K
-    SDK[stockstat SDK] --> C
+graph LR
+    subgraph "V2（五层架构）"
+        V2A["Layer 4: app"]
+        V2B["Layer 3: _api"]
+        V2C["Layer 2: _viz"]
+        V2D["Layer 1: _domain"]
+        V2E["Layer 0: _core"]
+        V2A --> V2B --> V2C --> V2D --> V2E
+    end
+
+    subgraph "V3（+分布式层）"
+        V3A["frontend (含 BacktestEngine)"]
+        V3B["backend (Storage + Dispatcher 插件)"]
+        V3C["worker (独立)"]
+        V3A --> V3B
+        V3A --> V3C
+    end
+
+    subgraph "V3.1（五模块独立）"
+        V31F["Foundation"]
+        V31I["Invocation"]
+        V31D["Dispatcher"]
+        V31S["Storage"]
+        V31C["Compute (含 BacktestEngine)"]
+        V31I --> V31F
+        V31D --> V31F
+        V31S --> V31F
+        V31C --> V31F
+    end
 ```
 
-Dispatcher 对 Kernel 的依赖应限制为 planner/descriptor 包，可进一步拆成 `stockstat-finance-plans`，避免加载 pandas/scipy。实现时按包体和启动时间决定是否拆分。
+### 3.2 关键变化
 
-## 7. 数据流与控制流
+| 维度 | V2 | V3 | V3.1 |
+|------|----|----|------|
+| 架构风格 | 五层单包 | 双包 + 兼容层 | **五模块独立包** |
+| BacktestEngine | frontend | frontend | **Compute** |
+| ComputeBackend | 无 | 兼容层（可选） | **唯一路径** |
+| task_type | 无 | 6 | **47** |
+| Dispatcher | 无 | Storage 插件 | **独立包** |
+| 协议层 | 无 | 嵌入 _core | **Foundation 独立包** |
+| 兼容性 | — | 保留 v1.7 | **完全重构** |
+| 部署灵活性 | 单机/HTTP | 单机/HTTP/分布式 | **5 模块任意组合** |
 
-### 7.1 控制流
+### 3.3 为什么完全重构
 
-```text
-Client -> Dispatcher: JobSpec
-Worker -> Dispatcher: acquire/renew/complete lease
-Dispatcher -> Client: JobView + SSE events
-```
+V3 的"核心零侵入"策略在已稳定系统上是合理的，但带来了三个问题：
 
-### 7.2 数据流
+1. **包结构混乱**：BacktestEngine 在 frontend，但 Worker（在独立包）需要复用它，导致依赖倒置
+2. **ComputeBackend 是"可选"的**：导致 LocalComputeBackend 与直调路径并存，测试矩阵爆炸
+3. **协议层嵌入 frontend**：其他模块想用协议必须安装 frontend，违反单一职责
 
-```text
-Data source -> Storage -> DatasetSnapshot -> Worker cache
-Worker -> Storage -> ResultManifest -> Client/Reducer
-```
+V3.1 通过完全重构解决：
+- BacktestEngine 移到 Compute 模块，Worker 自然复用
+- ComputeBackend 是唯一路径，LocalComputeBackend 即"直调"
+- Foundation 独立包，任何模块按需依赖
 
-### 7.3 关键不变量
+---
 
-- Dispatcher 不下载完整 DatasetSnapshot。
-- Dispatcher 不解码 BacktestResult/DataFrame。
-- Worker 完成前，ResultManifest 必须已在 Storage committed。
-- Job 成功只引用 committed final manifest。
-- Client 下载需要的结果成员，不强制拉取全部结果。
+## 4. 数据流与控制流
 
-## 8. 任务模型
-
-### 8.1 原子 Job
-
-一个 operation 对应一个或少量 WorkUnit，例如指标、统计检验、单回测。
-
-### 8.2 复合 Job
-
-Batch、grid search、Monte Carlo、walk-forward 由 Planner 展开 DAG。对用户仍是一个 Job。
-
-### 8.3 Reducer 是普通计算
-
-结果合并、排名和分位汇总在 Worker 上执行，不在 Dispatcher 内存中执行。
-
-### 8.4 可靠执行
+### 4.1 完整数据流（分布式场景）
 
 ```mermaid
-flowchart LR
-    R[ready] --> L[leased]
-    L --> X[running]
-    X --> C[commit artifacts]
-    C --> S[succeeded]
-    L -->|lease expired| R
-    X -->|retryable failure| R
-    X -->|attempts exhausted| F[failed]
+sequenceDiagram
+    participant C as Client (Invocation)
+    participant D as Dispatcher
+    participant S as Storage
+    participant W as Worker (Compute)
+
+    Note over C,D: 阶段1: 提交 (轻量控制, KB 级)
+    C->>D: POST /dispatch/submit (TaskSpec JSON)
+    D-->>C: {task_id, status: "pending", n_slices}
+
+    Note over D,S: 阶段2: 预取数据 (1次拉取, MB~GB 级)
+    D->>S: GET /api/v1/ohlcv?symbol=...
+    S-->>D: data.stream (Arrow IPC binary)
+    D->>D: 写入 DataCache (cache://key)
+
+    Note over D,W: 阶段3: 分发任务+数据
+    D->>D: 分片 (grid 1000组 → 8片)
+    loop 每个分片
+        W->>D: POST /dispatch/assign
+        D-->>W: {task_spec, data_ref, data (base64)}
+    end
+
+    Note over W: 阶段4: 计算 (进程内, 复用 Compute)
+    W->>W: BacktestEngine(data, strategy).run()
+
+    Note over W,D: 阶段5: 回传结果 (轻量, 可流式)
+    W->>D: POST /dispatch/partial (可选)
+    W->>D: POST /dispatch/complete {result (base64)}
+
+    Note over D: 阶段6: 合并
+    D->>D: 合并 N 个分片
+
+    Note over C,D: 阶段7: 返回结果
+    C->>D: GET /dispatch/result/{id}
+    D-->>C: {result (base64 cloudpickle)}
+
+    Note over W,D: 心跳 (定时)
+    W->>D: POST /dispatch/heartbeat
 ```
 
-底层允许重复执行，但 lease token 和幂等 complete 防止旧结果覆盖。
+### 4.2 数据路径与控制路径分离
 
-## 9. 金融能力覆盖
+| 路径 | 内容 | 带宽 | 频率 |
+|------|------|------|------|
+| **控制面**（C ↔ D） | TaskSpec / 状态查询 / 结果 | KB 级 | 多次 |
+| **数据面**（D ↔ S） | OHLCV 数据 | MB~GB 级 | **1 次** |
+| **分发面**（D ↔ W） | 任务 + 数据分片 | MB 级 | N 次 |
+| **结果面**（W → D → C） | 计算结果 | KB~MB 级 | N 次 |
 
-### 9.1 市场数据
+**核心改进**（vs COMPUTE_OFFLOAD_PLAN_CN v1）：
+- v1：N 个 Worker 各自从 Storage 拉数据 → Storage 带宽 ×N
+- V3.1：Dispatcher 预取 1 次 → Storage 带宽 ×1
 
-- 多数据源采集。
-- OHLCV 标准化和 UTC。
-- instrument catalog、coverage 和 quality。
-- 在线、远程、离线本地 runtime。
-- JSON/CSV 之外以 Arrow/Parquet 为主数据格式。
-
-### 9.2 指标与研究计算
-
-- 当前全部经典指标。
-- CWT、PSD、谱熵、灰色关联、GM(1,1)。
-- TE、Hurst/DFA、样本熵、排列熵、RQA。
-- 经典统计、重采样、多重校正、survival、滚动/分段分析。
-- 注册模型族的时间前向预测验证，用于复现 v7 样本外检验。
-
-### 9.3 回测
-
-- 多标的、多 tf。
-- next-bar 与 intrabar。
-- 跨 session 持仓。
-- 精确时间事件和 time-in-force。
-- 完整订单生命周期、OCO、TP/SL、trailing stop。
-- 成本、maker/taker、BNB、滑点。
-- 未来函数防护。
-- 结果资产和图表。
-
-### 9.4 实验
-
-- 策略 x 费率 x 参数矩阵。
-- grid/random/Bayesian search。
-- Monte Carlo/bootstrap/order shuffle。
-- walk-forward、subperiod、regime、negative control。
-
-详细 operation 清单见 `DESIGN_GENERALIZE.md`。
-
-## 10. PAXG v1-v7 作为设计验收基准
-
-PAXG 工作目录证明平台需要支持完整研究闭环，而不是只有指标和回测两个粗粒度任务。
-
-### 10.1 数据与派生资产
+### 4.3 本地场景数据流（场景 A）
 
 ```mermaid
-flowchart LR
-    D[Binance revisions] --> S[Market Snapshot]
-    S --> P[Weekend-Monday pair table]
-    P --> F[Feature table x1-x6/path/spectral/nonlinear]
-    F --> T[Statistical result tables]
-    F --> B[Backtest inputs]
-    B --> E[52 x 4 experiment]
-    E --> V[Search/MC/Walk-forward]
-    T --> R[Report bundle]
-    V --> R
+sequenceDiagram
+    participant C as Client
+    participant L as LocalComputeBackend
+    participant H as Handler
+
+    C->>L: submit(TaskSpec)
+    L->>L: 后台线程启动
+    L->>H: dispatch_to_handler(spec, data)
+    H->>H: BacktestEngine(data, strategy).run()
+    H-->>L: result
+    L-->>C: TaskRef
+    C->>L: wait(task_id)
+    L-->>C: result
 ```
 
-### 10.2 完整迁移标准
+本地场景下，所有通信走 InProcessTransport，零网络开销，行为等价于 V2 直调。
 
-- 307 个样本和输入范围一致。
-- 研究统计量在容差内一致。
-- 52 个策略均为 V3.1 native。
-- 4 费率模型全部运行。
-- B1 买入持有、B2 周一定投、B3 价格曲线收益统一运行和比较。
-- 代表策略交易行为一致。
-- 分片数改变不改变结果。
-- 所有输出有 lineage。
-- 原生目录不 import V2/V3 包。
+---
 
-## 11. 部署场景
+## 5. 包结构与依赖关系
 
-### 11.1 场景 A：本地一体化
+### 5.1 整体包结构
 
-```mermaid
-flowchart LR
-    U[Python/CLI] --> L[Local Session]
-    L --> D[InProcess Dispatcher]
-    L --> S[Local Storage]
-    D --> W[Local Worker Process]
-    W --> S
 ```
-
-用途：开发、小规模研究、离线使用。仍使用 JobStore、lease、Artifact 和子进程边界。
-
-### 11.2 场景 B：Storage 分离，本地计算
-
-```mermaid
-flowchart LR
-    U[Client machine] --> D[Local Dispatcher]
-    D --> W[Local Worker]
-    W --> S[Remote Storage]
-    U --> S
-```
-
-用途：团队共享数据，计算仍在用户机器。
-
-### 11.3 场景 C：独立 Dispatcher + 单 Worker 节点
-
-```mermaid
-flowchart LR
-    C[Client] --> D[Dispatcher]
-    D --> W[Compute Node]
-    W --> S[Storage]
-    C --> S
-```
-
-用途：个人/小团队把计算 offload 到高性能机器。
-
-### 11.4 场景 D：独立服务 + N Worker
-
-```mermaid
-flowchart TB
-    C[Clients] --> D[Dispatcher API]
-    D --> J[(PostgreSQL JobStore)]
-    C --> S[Storage API]
-    S --> M[(Metadata DB)]
-    S --> O[(S3/MinIO)]
-    W1[Worker pool A] --> D
-    W2[Worker pool B] --> D
-    WN[Worker pool N] --> D
-    W1 --> O
-    W2 --> O
-    WN --> O
-```
-
-用途：批量回测、参数搜索和大规模研究。
-
-### 11.5 场景 E：受信任与策略 Worker 分池
-
-```text
-basic/statistics workers: 只执行内置代码
-strategy workers: 执行签名 StrategyBundle，强隔离
-future gpu workers: 只执行明确 GPU operation
-```
-
-## 12. 协议选择
-
-V3.1 规范：
-
-- HTTP/JSON 控制面。
-- SSE Job 事件。
-- Arrow/Parquet/StrategyBundle Artifact 数据面。
-- Worker Pull + Lease。
-- InProcess service adapter 用于本地。
-
-详细字段和 API 见 `DESIGN_PROT_V31.md`。
-
-## 13. 项目结构目标
-
-```text
 StockStatistic/
 ├── packages/
-│   ├── contracts/                 # stockstat-contracts
-│   ├── kernel/                    # stockstat-kernel
-│   ├── sdk/                       # stockstat
-│   └── capabilities/              # operation capability packages
-├── services/
-│   ├── storage/                   # stockstat-storage
-│   ├── dispatcher/                # stockstat-dispatcher
-│   └── worker/                    # stockstat-worker
-├── apps/
-│   └── admin/                     # 可选 Web UI
-├── tests/
-│   ├── contracts/
-│   ├── kernel/
-│   ├── services/
-│   ├── e2e/
-│   ├── deployments/
-│   ├── parity/
-│   └── performance/
-├── examples/
-├── working/
-├── V31design/
-│   ├── designV31/
-│   └── realizeV31/
-└── legacy/ or removed at cutover
+│   ├── foundation/                  # stockstat-foundation
+│   │   └── stockstat_foundation/
+│   │       ├── contracts/           # 6 个 Protocol
+│   │       ├── protocol/            # Envelope / TaskSpec / messages
+│   │       ├── codec/               # 7 个 Codec
+│   │       ├── transport/           # 5 种 Transport
+│   │       ├── errors.py            # 12 个异常
+│   │       ├── config.py            # Config
+│   │       └── plugin/              # PluginRegistry
+│   │
+│   ├── invocation/                  # stockstat
+│   │   └── stockstat/
+│   │       ├── client.py            # StockStatClient
+│   │       ├── compute_api.py       # ComputeAPI
+│   │       ├── data_access/         # DataClient
+│   │       ├── dsl/                 # DSL 引擎
+│   │       ├── app/                 # CLI / TUI
+│   │       ├── export/              # 序列化
+│   │       ├── _viz/                # 可视化
+│   │       └── _compat.py           # V2 迁移辅助
+│   │
+│   ├── dispatcher/                  # stockstat-dispatcher
+│   │   └── stockstat_dispatcher/
+│   │       ├── core.py              # Dispatcher 主体
+│   │       ├── queue.py             # TaskQueue (Memory/Redis)
+│   │       ├── workers.py           # WorkerRegistry
+│   │       ├── prefetch.py          # DataCache
+│   │       ├── shard.py             # shard_task
+│   │       ├── merge.py             # merge_results
+│   │       ├── routes.py            # REST API
+│   │       ├── cluster.py           # 多级 Dispatcher
+│   │       ├── autoscaler.py        # Autoscaler
+│   │       └── cli.py               # CLI
+│   │
+│   ├── storage/                     # stockstat-backend
+│   │   └── stockstat_backend/
+│   │       ├── app.py               # StorageApp
+│   │       ├── models/              # SQLAlchemy 模型
+│   │       ├── storage/             # ORM + StorageBackend 实现
+│   │       ├── api/                 # REST API
+│   │       ├── adapters/            # Binance / YFinance
+│   │       ├── normalizer/          # 数据规范化
+│   │       ├── scheduler/           # 定时采集
+│   │       └── plugins/admin/       # Admin 面板
+│   │
+│   └── compute/                     # stockstat-compute
+│       └── stockstat_compute/
+│           ├── backend/             # Local/Remote/Auto ComputeBackend
+│           ├── worker.py            # Worker 进程
+│           ├── executor.py          # TaskExecutor
+│           ├── register.py          # 硬件检测
+│           ├── checkpoint.py        # Checkpoint
+│           ├── handlers/            # 47 个 task_type handler
+│           │   ├── backtest/        # Tier 1 (6 个)
+│           │   ├── stats/           # Tier 2 (8 个)
+│           │   ├── signal/          # Tier 3 (5 个)
+│           │   ├── nonlinear/       # Tier 4 (7 个)
+│           │   ├── grey/            # Tier 5 (3 个)
+│           │   ├── ml/              # Tier 6 (7 个)
+│           │   └── portfolio/       # Tier 7 (6 个)
+│           ├── backtest/            # BacktestEngine (从 V2 迁移)
+│           ├── compute_engine/      # ComputeEngine
+│           ├── indicators/          # 指标库
+│           └── cli.py               # CLI
+│
+├── tests/                           # 跨包集成测试
+│   ├── test_e2e.py                  # 端到端测试
+│   ├── test_paxg_compat.py          # PAXG 一致性验证
+│   └── deployments/                 # 6 个部署场景测试
+│
+├── V31design/                       # 本设计文档
+│   ├── designV31/                   # 设计报告
+│   └── realizeV31/                  # 分步实现规划
+│
+├── working/                         # 研究任务（PAXG v1~v7）
+├── docs/                            # 用户文档
+└── docker-compose.yml               # Docker 部署
 ```
 
-实现期间新代码不得 import 当前 `frontend/stockstat`、`backend/stockstat_backend/dispatcher` 或 `worker/stockstat_compute`。旧代码只作为行为基线和 parity oracle。
-
-## 14. 关键决策记录
-
-### 14.1 为什么不用 V3 的 ComputeBackend 兼容层
-
-兼容层让旧 Client 决定本地/远程路径，导致业务调用分叉。V3.1 使用统一 Session + JobService，本地只是服务组合方式。
-
-### 14.2 为什么不让 Dispatcher 预取并转发所有数据
-
-V2 方案成功解决 Storage 被每个 task 重复拉取的问题，但 Dispatcher 会成为长期数据中转和内存瓶颈。V3.1 使用不可变 Snapshot + Worker 节点缓存 + 对象存储：同一节点只下载一次，Dispatcher 始终轻量。小规模同机部署可由 Storage 返回 file/mmap locator，仍不经过 Dispatcher。
-
-### 14.3 为什么不保留统一 Envelope
-
-资源式 HTTP 已提供请求、响应、状态码、认证和缓存语义。统一 Envelope 会重复这些机制，并把 GET/POST/SSE/上传都压成一个泛化消息。V3.1 统一的是 DTO 和资源，不是裸信封。
-
-### 14.4 为什么 JobStore 不以 Redis 队列为事实源
-
-金融实验可能运行数小时，状态、重试、审计和结果 lineage 比极端队列吞吐更重要。关系数据库事务更适合首期可靠性；Redis 可做通知优化。
-
-### 14.5 为什么 CPU Worker 用进程
-
-当前核心基于 Python/pandas/numpy，策略也可能包含 Python 循环。线程不能可靠提供多核并行，且无法安全终止。子进程是正确默认。
-
-### 14.6 为什么先不做多级 Dispatcher
-
-当前真实规模和 PAXG 任务远未要求 100+ Worker。单调度域的持久性、租约和幂等完成是前置条件。多级级联不能替代这些基础可靠性。
-
-### 14.7 为什么禁止任意 custom task
-
-平台扩展目标是金融能力增量，不是任意远程代码执行。类型化 operation 才能校验、规划、缓存、审计和迁移。
-
-## 15. 安全模型
-
-### 15.1 信任域
-
-| 主体 | 信任 |
-|---|---|
-| Client | 已认证用户，可提交允许的 Job |
-| Dispatcher | 控制面可信 |
-| Storage | 数据资产可信服务 |
-| Trusted Worker | 执行内置 operation |
-| Strategy Worker | 执行受控用户代码，隔离 |
-| StrategyBundle | 默认不可信，需 digest/签名 |
-
-### 15.2 主要措施
-
-- TLS、Bearer/OIDC、Worker mTLS/credential。
-- tenant scope、Job/Artifact ACL。
-- 短期 lease/upload/download token。
-- 策略禁网、无特权、资源限额。
-- 大小和 DAG 数量配额。
-- traceback 作为受控 Artifact。
-
-## 16. 可观测性
-
-- W3C trace context。
-- Job/unit/attempt/worker 结构化日志。
-- Job event log + SSE。
-- queue wait、execution、storage、retry、lease 指标。
-- Snapshot/Artifact lineage 图。
-- Admin 页面只读公开 API。
-
-## 17. 测试总体策略
-
-### 17.1 测试金字塔
+### 5.2 依赖关系图
 
 ```mermaid
-flowchart TB
-    U[Contract/Math unit tests]
-    C[Component tests]
-    I[Service integration]
-    E[End-to-end local/remote]
-    P[PAXG parity]
-    F[Failure injection]
-    D[Deployment/performance/security]
-    U --> C --> I --> E --> P --> F --> D
+graph TB
+    F[Foundation<br/>stockstat-foundation]
+    I[Invocation<br/>stockstat]
+    D[Dispatcher<br/>stockstat-dispatcher]
+    S[Storage<br/>stockstat-backend]
+    C[Compute<br/>stockstat-compute]
+
+    I -->|必需| F
+    D -->|必需| F
+    S -->|必需| F
+    C -->|必需| F
+
+    C -.->|可选| I
+    D -.->|可选| S
+    I -.->|可选| S
+    C -.->|可选| S
+
+    style F fill:#e1f5ff,stroke:#0288d1,stroke-width:3px
+    style I fill:#fff3e0,stroke:#f57c00
+    style D fill:#f3e5f5,stroke:#7b1fa2
+    style S fill:#e8f5e9,stroke:#388e3c
+    style C fill:#fce4ec,stroke:#c62828
 ```
 
-### 17.2 必要测试域
+### 5.3 依赖矩阵
 
-- schema、canonical、状态机。
-- 金融数学和执行语义。
-- Storage revision/snapshot/artifact。
-- Dispatcher lease/retry/idempotency。
-- Worker 进程、取消、资源隔离。
-- SDK local/remote parity。
-- PAXG v1-v7 和 52 x 4 回测。
-- Dispatcher 重启、Worker 丢失、网络断开、重复 complete。
-- 数据不经过 Dispatcher 的性能断言。
+| 模块 ↓ 依赖 → | Foundation | Invocation | Dispatcher | Storage | Compute |
+|--------------|-----------|-----------|-----------|---------|---------|
+| **Foundation** | — | ❌ | ❌ | ❌ | ❌ |
+| **Invocation** | ✅ 必需 | — | ❌ | 可选 | 可选 |
+| **Dispatcher** | ✅ 必需 | ❌ | — | 可选 | ❌ |
+| **Storage** | ✅ 必需 | ❌ | ❌ | — | ❌ |
+| **Compute** | ✅ 必需 | ❌ | ❌ | 可选 | — |
 
-详细分步测试见 `../realizeV31/P1.md` 至 `P9.md`。
+### 5.4 包安装矩阵
 
-## 18. 迁移与切换
+```bash
+# 仅做分析（用户机器）
+pip install stockstat                    # = foundation + invocation
 
-### 18.1 并行开发，不并行架构
+# 启动存储服务
+pip install stockstat-backend            # = foundation + storage
 
-实现期允许新旧代码同时存在用于对比，但新代码不依赖旧代码。旧系统仅提供：
+# 启动调度服务
+pip install stockstat-dispatcher         # = foundation + dispatcher
 
-- fixture。
-- golden output。
-- 旧客户脚本样本。
+# 启动计算 Worker
+pip install stockstat-compute            # = foundation + compute
 
-### 18.2 切换标准
+# 全栈单机
+pip install stockstat[all]               # 全部
+```
 
-1. 当前功能矩阵全部有 V3.1 实现。
-2. PAXG parity 通过。
-3. local/remote/multi-worker 部署测试通过。
-4. migration guide 和 scanner 完成。
-5. 安全、故障和性能基线通过。
-6. 新 README/USAGE 只使用 V3.1 API。
-7. 删除旧 runtime 和兼容层。
+### 5.5 可选依赖
 
-### 18.3 不兼容声明
+```toml
+# packages/foundation/pyproject.toml
+[project.optional-dependencies]
+arrow = ["pyarrow>=14.0"]
+cloudpickle = ["cloudpickle>=3.0"]
+msgpack = ["msgpack>=1.0"]
+redis = ["redis>=5.0"]
+compute = ["stockstat-foundation[arrow,cloudpickle]"]
+distributed = ["stockstat-foundation[arrow,cloudpickle,msgpack,redis]"]
+all = ["stockstat-foundation[distributed]"]
 
-- 旧 Python import 需要迁移。
-- V3 Job ID 和结果不可直接由 V3.1 继续执行。
-- V3 cloudpickle strategy_ref 需要重建 StrategyBundle。
-- 旧 SQLite OHLCV 可以通过一次性 importer 导入新 Storage revision；这是数据迁移，不是运行时兼容。
+# packages/compute/pyproject.toml
+[project.optional-dependencies]
+signal = ["PyWavelets>=1.1", "antropy>=0.1"]
+nonlinear = ["nolds>=0.5"]  # 可选，fallback 自实现
+ml = ["scikit-learn>=1.4", "xgboost>=2.0"]
+gpu = ["torch>=2.0"]
+all = ["stockstat-compute[signal,nonlinear,ml]"]
+```
 
-## 19. 实现路线摘要
+---
 
-| Phase | 主题 | 可交付闭环 |
-|---|---|---|
-| P1 | contracts 和仓库骨架 | schema/digest/state 基线 |
-| P2 | Storage 数据与资产 | ingest -> snapshot -> artifact 本地闭环 |
-| P3 | Finance 基础计算 | 指标/统计/PAXG 研究计算本地闭环 |
-| P4 | Dispatcher + Local Session | durable Job -> local Worker -> result |
-| P5 | 独立 Worker 与远程部署 | Client -> Dispatcher -> Worker -> Storage |
-| P6 | 全新回测内核 | 52 策略全部 native + parity |
-| P7 | 复合实验与 N Worker | batch/grid/MC/walk-forward 分布式 |
-| P8 | SDK/CLI/DSL/Admin/迁移 | 用户功能和旧代码迁移完整 |
-| P9 | 硬化、性能、切换 | 生产基线和删除旧 runtime |
+## 6. 部署场景矩阵
 
-总计划见 `../realizeV31/README.md`。
+### 6.1 场景总览
 
-## 20. 最终图景
+| 场景 | Client | Dispatcher | Storage | Worker | 配置 |
+|------|--------|-----------|---------|--------|------|
+| **A 单机全栈** | 同进程 | — | — | — | 默认 |
+| **B 存储分离** | 远程HTTP | — | 独立 | Client本地 | v2.1 |
+| **C 离线** | 本地 | — | 本地 | Client本地 | v2.1 |
+| **D Dispatcher+Worker** | 远程HTTP | Storage同机 | 独立 | 远程 | `--enable-dispatcher` |
+| **E 独立Dispatcher** | 远程HTTP | 独立 | 独立 | 多节点 | `stockstat-dispatcher` |
+| **F 多级Dispatcher** | 远程HTTP | 主+子 | 独立 | 多级 | 高级 |
 
-V3.1 的最终系统不是“旧计算库外面套一层远程队列”，而是一个以金融数据资产和类型化 operation 为中心的任务计算平台：
+### 6.2 场景 A：单机全栈（默认）
 
-- 调用端表达金融意图。
-- Dispatcher 可靠规划和分发。
-- Storage 提供可复现快照和结果资产。
-- N 个 Worker 独立扩展计算能力。
-- Finance Kernel 在本地和远程使用相同语义。
-- 新金融能力按 operation 模块增量接入。
+```mermaid
+graph LR
+    subgraph "单台机器"
+        I[Invocation]
+        L[LocalComputeBackend]
+        S[Storage<br/>可选]
+    end
+    I --> L
+    I -.-> S
+```
 
-这实现了 `调用 -> 分发 -> {存储、N x 计算}` 的可分离部署目标，同时保持 StockStat 对当前金融研究、统计和回测功能的专注，不将项目过度泛化。
+```python
+# 零配置
+client = StockStatClient()
+result = client.backtest(data, strategy)
+```
+
+### 6.3 场景 B：存储分离
+
+```mermaid
+graph LR
+    I[Client<br/>用户机器] -->|HTTP| S[Storage Server]
+    I -->|LocalComputeBackend| C[Compute<br/>进程内]
+```
+
+```python
+client = StockStatClient(storage_url="http://storage:8000")
+```
+
+### 6.4 场景 D：Dispatcher 作为 Storage 插件
+
+```mermaid
+graph TB
+    I[Client] -->|HTTP| D[Dispatcher + Storage<br/>同机]
+    D -->|dispatch.assign| W1[Worker 1]
+    D -->|dispatch.assign| W2[Worker 2]
+```
+
+```bash
+# 1. 启动 Storage + Dispatcher
+STOCKSTAT_DISPATCHER_ENABLED=true stockstat-backend serve --host 0.0.0.0 --port 8000
+
+# 2. 启动 Worker
+stockstat-compute worker --dispatcher-url http://storage:8000 --concurrency 8
+
+# 3. Client
+client = StockStatClient(
+    storage_url="http://storage:8000",
+    compute_backend=RemoteComputeBackend("http://storage:8000"),
+)
+```
+
+### 6.5 场景 E：独立 Dispatcher + Worker 集群
+
+```mermaid
+graph TB
+    I[Client] -->|HTTP| D[Dispatcher<br/>独立节点]
+    D -->|data.fetch 1次| S[Storage Server]
+    D -->|dispatch.assign| W1[Worker 1<br/>Node C]
+    D -->|dispatch.assign| W2[Worker 2<br/>Node D]
+    D -->|dispatch.assign| WN[Worker N<br/>Node E]
+    W1 & W2 & WN -->|dispatch.complete| D
+    D -->|result| I
+    I -.->|查询| S
+```
+
+```bash
+# 1. 启动 Storage
+stockstat-backend serve --host 0.0.0.0 --port 8000
+
+# 2. 启动 Dispatcher（独立进程）
+stockstat-dispatcher \
+    --storage-url http://storage:8000 \
+    --listen 0.0.0.0:9000 \
+    --queue-backend redis \
+    --redis-url redis://redis:6379/0
+
+# 3. 启动多个 Worker
+stockstat-compute worker --dispatcher-url http://dispatcher:9000 --concurrency 8
+
+# 4. Client
+client = StockStatClient(
+    storage_url="http://storage:8000",
+    compute_backend=RemoteComputeBackend("http://dispatcher:9000"),
+)
+```
+
+### 6.6 Docker Compose
+
+```yaml
+version: "3.8"
+services:
+  db:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: stockstat
+      POSTGRES_USER: stockstat
+      POSTGRES_PASSWORD: secret
+
+  redis:
+    image: redis:7-alpine
+
+  api:
+    build: ./packages/storage
+    command: stockstat-backend serve --host 0.0.0.0 --port 8000
+    environment:
+      STOCKSTAT_DATABASE_URL: postgresql://stockstat:secret@db/stockstat
+      STOCKSTAT_ADMIN_ENABLED: "true"
+    ports: ["8000:8000"]
+    depends_on: [db]
+
+  dispatcher:
+    build: ./packages/dispatcher
+    command: stockstat-dispatcher
+      --storage-url http://api:8000
+      --listen 0.0.0.0:9000
+      --queue-backend redis
+      --redis-url redis://redis:6379/0
+    ports: ["9000:9000"]
+    depends_on: [api, redis]
+
+  worker:
+    build: ./packages/compute
+    deploy:
+      replicas: 4
+    command: stockstat-compute worker
+      --dispatcher-url http://dispatcher:9000
+      --concurrency 8
+    depends_on: [dispatcher]
+```
+
+---
+
+## 7. 旧客户代码迁移路径
+
+V3.1 完全重构，但保证**功能等价迁移**。详见 [DESIGN_ARCH_INVOCATION_V31.md §11](DESIGN_ARCH_INVOCATION_V31.md)。
+
+### 7.1 迁移矩阵
+
+| V2 旧 API | V3.1 新 API | 迁移难度 |
+|----------|------------|---------|
+| `StockStatClient(host, port)` | `StockStatClient(host, port)` | 零修改 |
+| `client.ohlcv(...)` | `client.ohlcv(...)` | 零修改 |
+| `client.compute.ma(...)` | `client.compute.ma(...)` | 零修改 |
+| `client.backtest(...)` | `client.backtest(...)` | 零修改 |
+| `client.backtest(..., async_submit=True)` | 新增 | 新能力 |
+| `grid_search(...)` | `client.compute.remote("grid_search", ...)` | 中等（_compat 零修改） |
+| `batch_backtest(...)` | `client.compute.remote("batch_backtest", ...)` | 中等 |
+| `BacktestEngine(...).run()` | `client.backtest(...)` 或直接用 Compute 模块 | 中等 |
+| `ComputeEngine.<method>` | `client.compute.<method>` | 零修改 |
+
+### 7.2 迁移辅助
+
+提供 `_compat.py` 模块，封装常见 V2 调用为 V3.1 等价形式：
+
+```python
+# V2 旧代码（不改）
+from stockstat import grid_search
+result = grid_search(data, strategy, param_grid={...})
+
+# V3.1 _compat.py 自动包装
+# grid_search → client.compute.remote("grid_search", ...) → wait
+```
+
+### 7.3 PAXG v5-redo 迁移验证
+
+PAXG v5-redo 使用 33 策略 × 4 费率 = 132 次回测，迁移后：
+
+```python
+# V2 旧
+from stockstat import batch_backtest
+result = batch_backtest(data, strategies, fee_models=["F1", "F4"])
+
+# V3.1 新（等价）
+client = StockStatClient()
+task = client.compute.remote(
+    "batch_backtest",
+    compute_spec=ComputeSpec(
+        task_type="batch_backtest",
+        strategies={f"S{i}": cloudpickle_dumps(s) for i, s in enumerate(strategies)},
+        fee_models=["F1_SpotNoBNB", "F4_FutBNB"],
+    ),
+    dispatch_spec=DispatchSpec(split_strategy="param_wise", max_workers=8),
+)
+result = task.wait(timeout=3600)
+assert len(result) == 132  # 结果一致
+```
+
+---
+
+## 8. PAXG v1~v7 功能覆盖验证
+
+V3.1 的 47 个 task_type 完整覆盖 PAXG v1~v7 全部研究功能。详见 [DESIGN_GENERALIZE.md §13](DESIGN_GENERALIZE.md)。
+
+| PAXG 版本 | 研究内容 | 使用的 task_type | 覆盖 |
+|----------|---------|-----------------|------|
+| v1 | Pearson/Spearman 相关 | `correlation` / `hypothesis_test` | ✅ |
+| v2 | 独立涨跌幅相关 | `correlation` | ✅ |
+| v3 | 路径顺序 2×2 卡方 | `hypothesis_test` / `ecdf` | ✅ |
+| v4-A | 排列检验、bootstrap | `permutation_test` / `bootstrap` | ✅ |
+| v4-B | 6×6 相关矩阵、Chow | `correlation` / `chow_test` | ✅ |
+| v4-E | regime 切换 | `regime_detection` | ✅ |
+| v5 | 132 次回测 | `batch_backtest` / `backtest` | ✅ |
+| v6 | 生存分析、卡方、ECDF | `survival_analysis` / `hypothesis_test` / `ecdf` | ✅ |
+| v7-W | CWT、小波相干 | `wavelet` | ✅ |
+| v7-E | Welch PSD、谱熵、交叉谱 | `spectral_analysis` / `spectral_entropy` / `cross_spectrum` | ✅ |
+| v7-G | 灰色关联、GM(1,1) | `grey_relation` / `gm11_predict` | ✅ |
+| v7-N1 | 互信息 | `mutual_information` | ✅ |
+| v7-N2 | 传递熵（关键） | `transfer_entropy` | ✅ |
+| v7-N3 | Hurst 指数 | `hurst_exponent` | ✅ |
+| v7-N4 | 样本熵、排列熵 | `sample_entropy` / `permutation_entropy` | ✅ |
+| v7-N5 | 递归定量分析 | `rqa` / `recurrence_plot` | ✅ |
+| v7-F | ML 融合、前向验证 | `ml_train` / `walkforward_cv` / `feature_importance` | ✅ |
+
+**覆盖率：100%**，PAXG v1~v7 全部研究功能均有对应 task_type。
+
+---
+
+## 9. 测试体系总览
+
+### 9.1 测试分层
+
+```mermaid
+graph TB
+    subgraph "Layer 1: 单元测试"
+        F1[Foundation 147]
+        I1[Invocation 170]
+        D1[Dispatcher 220]
+        S1[Storage 125]
+        C1[Compute 635]
+    end
+
+    subgraph "Layer 2: 集成测试"
+        I2[跨模块集成]
+    end
+
+    subgraph "Layer 3: 端到端测试"
+        E2E[Client → Dispatcher → Worker → Storage]
+    end
+
+    subgraph "Layer 4: 兼容性测试"
+        COMPAT[V2 迁移验证]
+    end
+
+    subgraph "Layer 5: 部署场景测试"
+        DEPLOY[Case A-F]
+    end
+
+    subgraph "Layer 6: PAXG 一致性测试"
+        PAXG[v1~v7 结果一致]
+    end
+
+    F1 --> I2
+    I1 --> I2
+    D1 --> I2
+    S1 --> I2
+    C1 --> I2
+    I2 --> E2E
+    E2E --> COMPAT
+    COMPAT --> DEPLOY
+    DEPLOY --> PAXG
+```
+
+### 9.2 测试数量汇总
+
+| 模块 | 单元测试 | 集成测试 | 端到端 | 合计 |
+|------|---------|---------|--------|------|
+| Foundation | 147 | — | — | 147 |
+| Invocation | 170 | — | — | 170 |
+| Dispatcher | 220 | — | — | 220 |
+| Storage | 125 | — | — | 125 |
+| Compute | 635 | — | — | 635 |
+| 跨模块集成 | — | 50 | — | 50 |
+| 端到端 | — | — | 30 | 30 |
+| 兼容性 | — | — | 25 | 25 |
+| 部署场景 | — | — | — | 60 |
+| PAXG 一致性 | — | — | — | 20 |
+| **合计** | **1297** | **50** | **55** | **1482** |
+
+### 9.3 关键回归点
+
+| 测试集 | 数量 | 状态 |
+|--------|------|------|
+| BacktestEngine（从 V2 迁移） | 277 | ✅ 零修改 |
+| ComputeEngine（从 V2 迁移） | 38 | ✅ 零修改 |
+| PAXG v5-redo 132 回测 | 1 | ✅ 结果一致 |
+| PAXG v7 全部 task_type | 47 | ✅ 覆盖 |
+| 协议层（Envelope/TaskSpec） | 290 | ✅ 继承 V3 |
+
+---
+
+## 10. 实现路线图概览
+
+V3.1 分 9 个 Phase 实现，详见 [realizeV31/](../realizeV31/)：
+
+| Phase | 内容 | 依赖 | 测试 |
+|-------|------|------|------|
+| **P1** | Foundation 基础层（协议/传输/契约） | — | 147 |
+| **P2** | Storage 模块（OMM + REST + Adapters） | P1 | 125 |
+| **P3** | Compute 模块（BacktestEngine 迁移 + 6 Tier1 handler） | P1 | 350 |
+| **P4** | Invocation 模块（Client + ComputeAPI + CLI） | P1, P3 | 170 |
+| **P5** | Dispatcher 模块（调度 + 预取 + 分片） | P1, P2 | 220 |
+| **P6** | 分布式集成（RemoteComputeBackend + Worker + E2E） | P3, P5 | 80 |
+| **P7** | Tier 2~6 handlers（统计/信号/非线性/灰色/ML） | P3 | 200 |
+| **P8** | 高级特性（SHM + Redis + 抢占 + 多级） | P6 | 100 |
+| **P9** | PAXG 一致性验证 + 部署测试 + 文档 | 全部 | 90 |
+
+---
+
+## 11. 风险与缓解
+
+| 风险 | 影响 | 缓解 |
+|------|------|------|
+| **R1: BacktestEngine 迁移破坏现有行为** | PAXG v5-redo 结果不一致 | 整体迁移零修改 + 277 项测试同步迁移 + 字节级一致性验证 |
+| **R2: 47 个 handler 实现量大** | 开发周期长 | 分 Tier 优先级，P0/P1 先行（36 个），P2/P3 后补（11 个） |
+| **R3: 协议层重构引入 bug** | 通信失败 | 继承 V3 已验证协议（922 项测试），仅扩展不修改 |
+| **R4: 5 模块独立包管理复杂** | 版本不兼容 | semver 严格管理 + 可选依赖优雅降级 |
+| **R5: 分布式部署调试困难** | 问题定位慢 | trace_id 全链路透传 + Admin 监控面板 |
+| **R6: 自实现统计算法精度** | 传递熵/RQA 结果偏差 | 自实现 + 可选专业库（nolds/antropy/PyRQA）双轨验证 |
+| **R7: 性能回归** | 本地场景变慢 | LocalComputeBackend 即"直调"，无协议开销；AutoComputeBackend 自动路由 |
+
+---
+
+## 12. 术语表
+
+| 术语 | 含义 |
+|------|------|
+| **Foundation** | 基础层模块，协议/传输/契约底座 |
+| **Invocation** | 用户入口模块，Client SDK / CLI |
+| **Dispatcher** | 分发端模块，任务调度中枢 |
+| **Storage** | 存储端模块，OHLCV 数据仓库 |
+| **Compute** | 计算端模块，Worker + handlers + BacktestEngine |
+| **Envelope** | 消息信封，所有节点间通信的统一包装 |
+| **TaskSpec** | 任务规范，三段式（DataSpec + ComputeSpec + DispatchSpec） |
+| **task_type** | 任务类型，47 个原子计算能力 |
+| **ComputeBackend** | 计算后端协议，Local/Remote/Auto 三实现 |
+| **Transport** | 传输层抽象，5 种实现（InProcess/HTTP/SHM/Redis/TCP） |
+| **Codec** | 编码层，7 种（JSON/Arrow/Parquet/CSV/Cloudpickle/Msgpack/Raw） |
+| **Handler** | 任务处理器，每个 task_type 对应一个 |
+| **shard_task** | 任务分片，将重型任务切分为 N 个 slice |
+| **DataCache** | 数据预取缓存，Dispatcher 的数据中转站 |
+| **WorkerRegistry** | Worker 注册表，管理注册/心跳/超时 |
+| **Stream** | 数据流对象，支持迭代/collect 双模式 |
+| **trace_id** | 分布式追踪 ID，贯穿全链路 |
+| **PAXG** | PAX Gold，锚定黄金的加密货币，本研究的主标的 |
+| **Tier 1~8** | task_type 分级体系，按实现紧迫度分 8 级 |
+
+---
+
+## 13. 总结
+
+V3.1 是 StockStat 的**完全重构版本**，以**调用—分发—{存储、n×计算}可分离部署**为架构，实现：
+
+| 维度 | V3.1 实现 |
+|------|----------|
+| **架构** | 5 大模块独立包（Foundation/Invocation/Dispatcher/Storage/Compute） |
+| **协议** | 三层分离（Codec/Message/Transport），28 消息类型，5 Transport，7 Codec |
+| **计算能力** | 47 个 task_type，覆盖回测/统计/信号/非线性/灰色/ML/组合风险 |
+| **部署** | 6 种场景（单机/存储分离/离线/Dispatcher+Worker/独立Dispatcher/多级） |
+| **迁移** | V2 旧 API 功能等价迁移，`_compat.py` 包装 |
+| **测试** | 1482 项测试（含 277 项 BacktestEngine 零修改迁移） |
+| **PAXG 覆盖** | v1~v7 全部研究功能 100% 覆盖 |
+
+**核心设计原则**：
+1. **协议优先** — 所有跨进程通信走 Foundation
+2. **模块独立** — 5 大模块独立包，单独更新维护
+3. **计算与调用分离** — Invocation 不含计算逻辑
+4. **数据路径与控制路径分离** — Storage 计算期间空闲
+5. **原子任务化** — 47 个 task_type，新增能力零协议改动
+6. **协议不感知业务** — 只搬运字节，不关心 task_type
+
+**与 COMPUTE_OFFLOAD_PLAN 的对应**：
+- COMPUTE_OFFLOAD_PLAN_CN（V1 三角色）✅ 全部实现
+- COMPUTE_OFFLOAD_PLAN_V2_CN（V2 四角色 + 协议）✅ 全部实现
+
+**与 PAXG v1~v7 的对应**：
+- v1~v6 经典统计 ✅
+- v7 W/E/G/N/F 全路线 ✅
+- v5-redo 132 回测 ✅
+
+---
+
+*本文件为 V3.1 总体架构设计。详细模块设计见各 DESIGN_ARCH_*_V31 文档，协议见 DESIGN_PROT_V31，任务清单见 DESIGN_GENERALIZE，实现规划见 realizeV31/。*

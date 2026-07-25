@@ -1,398 +1,867 @@
-# StockStat V3.1 Storage 架构设计
+# DESIGN_ARCH_STORAGE_V31 — 存储端架构设计
 
-> 大模块：Storage（市场数据、快照与结果资产服务）
-> 版本：V3.1 设计稿
-> 关联：[DESIGN_ARCH_FOUNDATION_V31.md](DESIGN_ARCH_FOUNDATION_V31.md)、[DESIGN_PROT_V31.md](DESIGN_PROT_V31.md)
+> **模块**：Storage（存储端）
+> **版本**：v3.1
+> **日期**：2026-07-24
+> **状态**：设计稿
+> **关联**：
+> - [DESIGN_ARCH_V31.md](DESIGN_ARCH_V31.md) — 总设计
+> - [DESIGN_ARCH_FOUNDATION_V31.md](DESIGN_ARCH_FOUNDATION_V31.md) — 基础层
+>
+> **核心使命**：提供 OHLCV 数据的**持久化、查询、采集**能力，作为 V3.1 四角色架构的"数据仓库"。Storage 在计算期间**完全空闲**（仅被 Dispatcher 预取 1 次），不参与计算调度。
 
-## 1. 模块定位
+---
 
-Storage 是 V3.1 唯一负责持久化金融数据和计算资产的服务。它同时服务两类数据：
+## 目录
 
-1. 可更新的市场数据目录和源修订。
-2. 不可变的 DatasetSnapshot、StrategyBundle、ResultManifest、图表和报告 Artifact。
+1. [模块定位与边界](#1-模块定位与边界)
+2. [内部结构](#2-内部结构)
+3. [数据模型](#3-数据模型)
+4. [StorageBackend 实现](#4-storagebackend-实现)
+5. [REST API](#5-rest-api)
+6. [数据采集 Adapters](#6-数据采集-adapters)
+7. [数据规范化 Normalizer](#7-数据规范化-normalizer)
+8. [调度器 Scheduler](#8-调度器-scheduler)
+9. [Admin 管理面板](#9-admin-管理面板)
+10. [缓存层](#10-缓存层)
+11. [部署形态](#11-部署形态)
+12. [测试体系](#12-测试体系)
 
-Storage 不调度 Worker、不执行回测、不合并实验结果，也不承担 Job 状态机。Dispatcher 只持有资源 ID 和小型元数据，不存放大块数据。
+---
 
-## 2. 从 V3 暴露的问题出发
+## 1. 模块定位与边界
 
-当前实现的问题：
+### 1.1 Storage 是什么
 
-- OHLCV 查询直接返回大 JSON，Arrow 能力没有成为主路径。
-- Dispatcher DataCache 使用进程内 dict，重启丢失。
-- 同进程查询路径与 repository 返回类型存在脆弱耦合。
-- Worker assignment 将数据 cloudpickle + base64 内联。
-- 结果由 Dispatcher 内存保存并再次 cloudpickle。
-- 任务历史只保留内存最近 1000 条。
-- 数据快照没有 source revision，研究无法证明输入未变化。
+Storage 是 V3.1 的**数据仓库**，承载：
 
-V3.1 将数据和结果统一建模为可寻址资产，消除 Dispatcher 的数据中转职责。
+- **OHLCV 持久化**：SQLAlchemy + SQLite/PostgreSQL
+- **数据查询**：REST API `/api/v1/ohlcv`
+- **数据采集**：Binance / YFinance 适配器
+- **数据规范化**：不同源的字段映射、时区对齐
+- **定时采集**：Scheduler 定时拉取最新数据
+- **管理面板**：Admin Web UI
+- **StorageBackend 实现**：供 Dispatcher/Compute 直连访问
 
-## 3. 服务内部结构
+### 1.2 Storage 不是什么
 
-建议独立服务包：`stockstat-storage`。
+| 不是 | 理由 |
+|------|------|
+| 不含计算逻辑 | 无 BacktestEngine/indicators |
+| 不含任务调度 | 由 Dispatcher 负责 |
+| 不含用户接口 | 无 Client SDK（Invocation 负责） |
+| 不感知 task_type | 只存取 OHLCV 数据 |
 
-```text
-services/storage/
-└── stockstat_storage/
-    ├── api/
-    │   ├── market.py
-    │   ├── snapshots.py
-    │   ├── artifacts.py
-    │   └── admin.py
-    ├── catalog/
-    │   ├── instruments.py
-    │   ├── revisions.py
-    │   ├── datasets.py
-    │   └── lineage.py
-    ├── ingest/
-    │   ├── adapters.py
-    │   ├── normalizer.py
-    │   ├── planner.py
-    │   └── quality.py
-    ├── blobs/
-    │   ├── base.py
-    │   ├── filesystem.py
-    │   ├── s3.py
-    │   └── signed_urls.py
-    ├── metadata/
-    │   ├── models.py
-    │   └── repository.py
-    └── app.py
+### 1.3 与 V3 的关键差异
+
+| 维度 | V3 | V3.1 |
+|------|----|------|
+| 包归属 | `backend/stockstat_backend/` | **独立包 `stockstat-backend`** |
+| 与 Dispatcher 关系 | Dispatcher 嵌入 backend | Dispatcher 独立包，松耦合 |
+| StorageBackend | 无 | **新增 Protocol 实现**，供 Dispatcher 直连 |
+| Admin | 嵌入 backend | 保留，可独立启用 |
+
+### 1.4 核心设计原则
+
+> **Storage 在计算期间完全空闲**：
+> - Dispatcher 一次性预取数据（`data.fetch` 1 次）
+> - Worker 不直接访问 Storage（除非 `storage_ref` 策略）
+> - 用户查询与 Worker 数据拉取不竞争带宽
+>
+> **数据路径与控制路径分离**（COMPUTE_OFFLOAD_PLAN_V2_CN §1.2）
+
+---
+
+## 2. 内部结构
+
+```
+packages/storage/stockstat_backend/
+├── __init__.py                  # 导出 StorageApp, StorageBackend
+├── app.py                       # StorageApp（FastAPI 应用工厂）
+├── config.py                    # 存储配置
+├── models/                      # SQLAlchemy 模型
+│   ├── __init__.py
+│   └── ohlcv.py                 # OHLCV 模型
+├── storage/                     # 存储层
+│   ├── __init__.py
+│   ├── backend.py               # StorageBackend 实现（Foundation Protocol）
+│   ├── orm.py                   # SQLAlchemy ORM 封装
+│   └── cache.py                 # 查询缓存
+├── api/                         # REST API 路由
+│   ├── __init__.py
+│   ├── ohlcv.py                 # /api/v1/ohlcv
+│   ├── symbols.py               # /api/v1/symbols
+│   ├── health.py                # /health
+└── ingest.py                    # /api/v1/ingest
+├── adapters/                    # 数据源适配器
+│   ├── __init__.py
+│   ├── base.py                  # DataSource Protocol
+│   ├── binance.py               # Binance 适配器
+│   └── yfinance.py              # YFinance 适配器
+├── normalizer/                  # 数据规范化
+│   ├── __init__.py
+│   └── schema.py                # 字段映射 / 时区对齐
+├── scheduler/                   # 定时采集
+│   ├── __init__.py
+│   └── collector.py             # 定时采集器
+├── plugins/
+│   └── admin/                   # Admin 管理面板
+│       ├── __init__.py
+│       ├── router.py            # /admin/api/*
+│       └── static/              # Admin SPA 静态文件
+└── cli.py                       # stockstat-backend CLI
 ```
 
-## 4. 逻辑数据分层
+### 2.1 依赖关系
 
 ```mermaid
-flowchart TB
-    S[外部数据源] --> R[Raw Revision]
-    R --> N[Normalized Partition]
-    N --> C[Market Catalog]
-    C --> Q[Dataset Query]
-    Q --> SS[Immutable DatasetSnapshot]
-    SS --> W[Compute Worker]
-    W --> A[Immutable Result Artifacts]
-    A --> M[Result/Report Manifest]
+graph TB
+    subgraph "Storage（本模块）"
+        APP[StorageApp]
+        ORM[ORM Layer]
+        BE[StorageBackend]
+        API[REST API]
+        ADP[Adapters]
+        NORM[Normalizer]
+        SCH[Scheduler]
+        ADM[Admin Panel]
+    end
+
+    subgraph "Foundation"
+        F[StorageBackend Protocol<br/>ArrowCodec]
+    end
+
+    subgraph "Dispatcher"
+        D[Dispatcher]
+    end
+
+    subgraph "Invocation"
+        C[Client DataClient]
+    end
+
+    subgraph "外部数据源"
+        BIN[Binance API]
+        YF[YFinance API]
+    end
+
+    APP --> ORM
+    APP --> API
+    APP --> ADM
+    ORM --> BE
+    BE -->|实现| F
+    API --> ORM
+    ADP --> BIN
+    ADP --> YF
+    ADP --> NORM
+    NORM --> ORM
+    SCH --> ADP
+
+    D -.->|data.fetch / Protocol| BE
+    C -.->|HTTP /api/v1/ohlcv| API
+
+    style APP fill:#e8f5e9,stroke:#388e3c,stroke-width:3px
+    style F fill:#e1f5ff,stroke:#0288d1
+    style D fill:#f3e5f5,stroke:#7b1fa2
+    style C fill:#fff3e0,stroke:#f57c00
 ```
 
-### 4.1 Raw Revision
+---
 
-每次采集产生源修订记录：
+## 3. 数据模型
 
-- source、instrument、timeframe。
-- 请求范围和实际范围。
-- adapter version。
-- 原始响应摘要或分页摘要。
-- ingest 时间和幂等键。
-- 规范化输出分区列表。
+### 3.1 OHLCV 模型
 
-### 4.2 Normalized Partition
+```python
+# models/ohlcv.py
+from sqlalchemy import Column, String, DateTime, Float, Integer, Index
+from sqlalchemy.orm import DeclarativeBase
 
-按 `instrument/timeframe/date-range/revision` 分区，默认 Parquet + ZSTD。市场数据表推荐 Arrow schema，便于 Python、Rust、Java 等读取。
 
-### 4.3 DatasetSnapshot
+class Base(DeclarativeBase):
+    pass
 
-Snapshot 只引用已存在的 normalized partitions，不复制时可使用 manifest；必要时可生成合并或重分区的物化文件。
 
-### 4.4 Artifact
+class OHLCV(Base):
+    """OHLCV K 线数据模型。
 
-Artifact 是不可变 blob + metadata。重复 digest 可去重，但不同 artifact_id 可以引用同一 blob，以保留不同 lineage 和权限。
+    主键：(symbol, timeframe, timestamp) 复合主键，避免重复插入。
+    """
+    __tablename__ = "ohlcv"
 
-## 5. 存储后端
+    symbol = Column(String(32), primary_key=True)
+    timeframe = Column(String(8), primary_key=True)
+    timestamp = Column(DateTime, primary_key=True)
+    open = Column(Float, nullable=False)
+    high = Column(Float, nullable=False)
+    low = Column(Float, nullable=False)
+    close = Column(Float, nullable=False)
+    volume = Column(Float, nullable=False)
 
-### 5.1 元数据存储
+    __table_args__ = (
+        Index("ix_ohlcv_symbol_tf_ts", "symbol", "timeframe", "timestamp"),
+        Index("ix_ohlcv_ts", "timestamp"),
+    )
 
-| 环境 | 建议 |
-|---|---|
-| 本地/测试 | SQLite |
-| 单机生产 | PostgreSQL |
-| 集群 | PostgreSQL HA |
 
-元数据包含 instrument catalog、source revision、snapshot、artifact、lineage、retention 和 ACL，不存大 DataFrame。
+class SymbolMetadata(Base):
+    """标的元数据。"""
+    __tablename__ = "symbol_metadata"
 
-### 5.2 Blob 存储
-
-| 环境 | 实现 |
-|---|---|
-| 本地 | content-addressed filesystem |
-| Docker/局域网 | MinIO/S3 compatible |
-| 云 | S3/OSS/COS 等适配器 |
-
-逻辑路径示例：
-
-```text
-blobs/sha256/8a/1f/8a1f...
+    symbol = Column(String(32), primary_key=True)
+    name = Column(String(128))
+    exchange = Column(String(32))
+    asset_class = Column(String(32))  # crypto/stock/forex/commodity
+    first_seen = Column(DateTime)
+    last_updated = Column(DateTime)
+    metadata_json = Column(String)  # JSON 字符串
 ```
 
-不使用用户输入文件名作为真实路径。
+### 3.2 数据库选择
 
-## 6. 市场数据采集
+| 数据库 | 适用 | 配置 |
+|--------|------|------|
+| SQLite | 单机、≤10 并发用户、开发 | `sqlite:///stockstat.db`（默认） |
+| PostgreSQL | 多用户、高并发、生产 | `postgresql://user:pass@host/db` |
+| MySQL | 兼容性需求 | `mysql+pymysql://user:pass@host/db` |
 
-### 6.1 支持范围
-
-V3.1 首批保留当前数据源：
-
-- Yahoo Finance。
-- Binance via ccxt。
-- Coinbase via ccxt。
-- Synthetic。
-
-### 6.2 采集流程
-
-```mermaid
-sequenceDiagram
-    participant D as Dispatcher
-    participant S as Storage
-    participant A as Adapter
-    participant X as External Source
-
-    D->>S: create ingest request (idempotency key)
-    S->>A: fetch pages
-    A->>X: source API
-    X-->>A: raw market data
-    A-->>S: frames + source metadata
-    S->>S: normalize + quality checks
-    S->>S: write immutable partitions
-    S->>S: commit source revision
-    S-->>D: revision id + coverage
+**WAL 模式**（SQLite）：
+```python
+# 启用 WAL 提升并发读
+engine = create_engine("sqlite:///stockstat.db",
+                       connect_args={"check_same_thread": False})
+@event.listens_for(engine, "connect")
+def set_wal(dbapi_conn, conn_record):
+    cursor = dbapi_conn.cursor()
+    cursor.execute("PRAGMA journal_mode=WAL")
+    cursor.close()
 ```
 
-采集可以是 Storage 内部异步作业，也可以由具有 `market.ingest@1` capability 的专用 ingest Worker 执行。V3.1 首期为了减少组件数量，优先由 Storage 执行；协议仍使用资源式 ingest request，未来可外置。
+---
 
-### 6.3 幂等与增量
+## 4. StorageBackend 实现
 
-- upsert 不再逐行查询。
-- 以分区或数据库原生批量写入完成。
-- 相同 idempotency key 返回已有 ingest request。
-- 增量采集基于已提交 revision 的最大时间戳。
-- 数据源回补或修订生成新 revision，不覆盖旧 revision。
+### 4.1 实现 Foundation 的 StorageBackend Protocol
 
-## 7. 数据质量
+```python
+# storage/backend.py
+from stockstat_foundation import StorageBackend
+from stockstat_foundation.protocol.task import DataSpec
 
-Snapshot 创建前可指定 `quality_policy`：
 
-| 检查 | 示例 |
-|---|---|
-| schema | OHLCV 字段和类型 |
-| uniqueness | instrument + timeframe + ts 唯一 |
-| monotonicity | 时间单调 |
-| completeness | 按日历计算缺失 bar |
-| price consistency | low <= open/close <= high |
-| nonnegative | volume >= 0 |
-| outlier | 可配置跳变标记，不默认删除 |
-| timezone | 必须 UTC |
+class StorageBackendImpl:
+    """StorageBackend Protocol 实现 — 供 Dispatcher 直连访问。
 
-质量结果写入 manifest，策略可以选择拒绝、警告或允许带 flag 的数据。
+    当 Dispatcher 与 Storage 同进程部署时，Dispatcher 可直接调用此实现，
+    绕过 HTTP，零网络开销。
+    """
+    name = "sqlalchemy"
 
-## 8. Snapshot 创建
+    def __init__(self, session_factory):
+        self._session_factory = session_factory
 
-### 8.1 DatasetQuery
+    def fetch_ohlcv(self, symbols: list[str], timeframe: str,
+                    start: Optional[str] = None, end: Optional[str] = None,
+                    source: Optional[str] = None) -> Any:
+        """查询 OHLCV 数据，返回 DataFrame。"""
+        import pandas as pd
+        from ..models.ohlcv import OHLCV
 
-DatasetQuery 支持金融范围，不支持任意 SQL：
+        with self._session_factory() as session:
+            query = session.query(OHLCV).filter(
+                OHLCV.symbol.in_(symbols),
+                OHLCV.timeframe == timeframe,
+            )
+            if start:
+                query = query.filter(OHLCV.timestamp >= start)
+            if end:
+                query = query.filter(OHLCV.timestamp <= end)
+            query = query.order_by(OHLCV.symbol, OHLCV.timestamp)
+            rows = query.all()
 
-```json
-{
-  "instruments": ["crypto:binance:PAXG/USDT", "crypto:binance:BTC/USDT"],
-  "timeframes": ["1d", "1h"],
-  "start": "2020-08-28T00:00:00Z",
-  "end": "2026-07-16T00:00:00Z",
-  "fields": ["open", "high", "low", "close", "volume"],
-  "revision_policy": "latest_before_snapshot",
-  "adjustment": "raw",
-  "timezone": "UTC",
-  "quality_policy": "research_strict@1"
+        if not rows:
+            return pd.DataFrame()
+
+        # 转换为 DataFrame
+        df = pd.DataFrame([
+            {"symbol": r.symbol, "timestamp": r.timestamp,
+             "open": r.open, "high": r.high, "low": r.low,
+             "close": r.close, "volume": r.volume}
+            for r in rows
+        ])
+        # 多 symbol 时返回 dict
+        if len(symbols) > 1:
+            return {sym: df[df.symbol == sym].drop("symbol", axis=1)
+                    for sym in symbols}
+        return df.drop("symbol", axis=1)
+
+    def ingest_ohlcv(self, symbol: str, timeframe: str, data: Any) -> int:
+        """写入 OHLCV 数据，返回写入行数。"""
+        from ..models.ohlcv import OHLCV
+        import pandas as pd
+
+        if isinstance(data, pd.DataFrame):
+            records = []
+            for _, row in data.iterrows():
+                records.append(OHLCV(
+                    symbol=symbol, timeframe=timeframe,
+                    timestamp=row["timestamp"],
+                    open=row["open"], high=row["high"],
+                    low=row["low"], close=row["close"],
+                    volume=row["volume"],
+                ))
+        else:
+            records = data
+
+        with self._session_factory() as session:
+            for r in records:
+                session.merge(r)  # upsert
+            session.commit()
+        return len(records)
+
+    def list_symbols(self) -> list[str]:
+        from ..models.ohlcv import SymbolMetadata
+        with self._session_factory() as session:
+            rows = session.query(SymbolMetadata.symbol).all()
+            return [r[0] for r in rows]
+
+    def get_metadata(self, symbol: str) -> dict:
+        from ..models.ohlcv import SymbolMetadata
+        with self._session_factory() as session:
+            row = session.query(SymbolMetadata).filter_by(symbol=symbol).first()
+            if row is None:
+                return {}
+            import json
+            return {
+                "symbol": row.symbol,
+                "name": row.name,
+                "exchange": row.exchange,
+                "asset_class": row.asset_class,
+                "first_seen": row.first_seen.isoformat() if row.first_seen else None,
+                "last_updated": row.last_updated.isoformat() if row.last_updated else None,
+                "metadata": json.loads(row.metadata_json) if row.metadata_json else {},
+            }
+```
+
+---
+
+## 5. REST API
+
+### 5.1 路由表
+
+| 端点 | 方法 | 说明 |
+|------|------|------|
+| `/api/v1/ohlcv` | GET | 查询 OHLCV（Arrow 响应） |
+| `/api/v1/ohlcv` | POST | 写入 OHLCV（Arrow 请求体） |
+| `/api/v1/symbols` | GET | 列出所有标的 |
+| `/api/v1/symbols/{symbol}` | GET | 标的元数据 |
+| `/api/v1/ingest` | POST | 从数据源采集并写入 |
+| `/health` | GET | 健康检查 |
+| `/admin/api/*` | GET | Admin 面板 API |
+
+### 5.2 OHLCV 查询实现
+
+```python
+# api/ohlcv.py
+from fastapi import APIRouter, Query, Response, HTTPException
+from stockstat_foundation import ArrowCodec
+
+router = APIRouter()
+
+
+@router.get("/api/v1/ohlcv")
+async def get_ohlcv(
+    symbol: str = Query(..., description="标的符号，逗号分隔多标的"),
+    timeframe: str = Query("1d"),
+    start: str = Query(None),
+    end: str = Query(None),
+    source: str = Query(None),
+):
+    """查询 OHLCV 数据，返回 Arrow IPC 二进制。"""
+    from ..storage.backend import StorageBackendImpl
+    backend = StorageBackendImpl(get_session_factory())
+    symbols = [s.strip() for s in symbol.split(",")]
+    df = backend.fetch_ohlcv(symbols, timeframe, start, end, source)
+    if df.empty:
+        raise HTTPException(404, "No data found")
+    arrow_bytes = ArrowCodec().encode(df)
+    return Response(content=arrow_bytes,
+                    media_type="application/vnd.apache.arrow.file")
+
+
+@router.post("/api/v1/ohlcv")
+async def post_ohlcv(
+    req: Request,
+    x_symbol: str = Header(...),
+    x_timeframe: str = Header(...),
+):
+    """写入 OHLCV 数据，请求体为 Arrow IPC。"""
+    from ..storage.backend import StorageBackendImpl
+    body = await req.body()
+    df = ArrowCodec().decode(body)
+    backend = StorageBackendImpl(get_session_factory())
+    rows = backend.ingest_ohlcv(x_symbol, x_timeframe, df)
+    return {"rows_written": rows}
+```
+
+---
+
+## 6. 数据采集 Adapters
+
+### 6.1 DataSource Protocol
+
+```python
+# adapters/base.py
+from typing import Protocol, runtime_checkable
+
+
+@runtime_checkable
+class DataSource(Protocol):
+    """数据源协议。"""
+    name: str
+
+    def fetch_ohlcv(self, symbol: str, timeframe: str,
+                    start: Optional[str] = None,
+                    end: Optional[str] = None) -> "pd.DataFrame": ...
+```
+
+### 6.2 Binance 适配器
+
+```python
+# adapters/binance.py
+class BinanceAdapter:
+    """Binance 行情数据适配器。"""
+    name = "binance"
+
+    def __init__(self, *, api_key: str = "", api_secret: str = "",
+                 testnet: bool = False):
+        self._base_url = "https://testnet.binance.vision" if testnet else "https://api.binance.com"
+        self._api_key = api_key
+        self._api_secret = api_secret
+
+    def fetch_ohlcv(self, symbol: str, timeframe: str,
+                    start: Optional[str] = None,
+                    end: Optional[str] = None) -> "pd.DataFrame":
+        """从 Binance 拉取 K 线数据。"""
+        import httpx
+        import pandas as pd
+        from datetime import datetime
+
+        params = {"symbol": symbol, "interval": timeframe, "limit": 1000}
+        if start:
+            params["startTime"] = int(pd.Timestamp(start).timestamp() * 1000)
+        if end:
+            params["endTime"] = int(pd.Timestamp(end).timestamp() * 1000)
+
+        resp = httpx.get(f"{self._base_url}/api/v3/klines", params=params)
+        resp.raise_for_status()
+        data = resp.json()
+
+        df = pd.DataFrame(data, columns=[
+            "timestamp", "open", "high", "low", "close", "volume",
+            "close_time", "quote_volume", "trades",
+            "taker_buy_base", "taker_buy_quote", "ignore"
+        ])
+        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
+        for col in ["open", "high", "low", "close", "volume"]:
+            df[col] = df[col].astype(float)
+        return df[["timestamp", "open", "high", "low", "close", "volume"]]
+
+
+ADAPTERS = {
+    "binance": BinanceAdapter,
+    "yfinance": YFinanceAdapter,
 }
 ```
 
-### 8.2 创建算法
+### 6.3 YFinance 适配器
 
-1. 校验 query。
-2. 解析 instrument 与 revision。
-3. 检查覆盖范围。
-4. 计算 canonical query digest。
-5. 若相同 query + revisions 已有 snapshot，直接返回。
-6. 生成 partition manifest，必要时物化。
-7. 写入 lineage 和 digest。
-8. 原子提交 snapshot metadata。
+```python
+# adapters/yfinance.py
+class YFinanceAdapter:
+    """YFinance 适配器 — 股票/ETF 数据。"""
+    name = "yfinance"
 
-### 8.3 一致读取
+    def fetch_ohlcv(self, symbol: str, timeframe: str,
+                    start: Optional[str] = None,
+                    end: Optional[str] = None) -> "pd.DataFrame":
+        import yfinance as yf
+        import pandas as pd
 
-Worker 获取 Snapshot 时必须先读取 manifest，再按 manifest 下载分区。Storage 在 snapshot 提交后不得改变成员列表。
-
-## 9. Worker 数据访问
-
-### 9.1 控制面与数据面
-
-Dispatcher assignment 只包含 `snapshot_id` 和 artifact refs。Worker 向 Storage 请求：
-
-- manifest 元数据。
-- 分区下载 URL 或本地解析信息。
-- 结果 upload session。
-
-### 9.2 数据本地化
-
-Worker 维护内容寻址本地缓存：
-
-```text
-worker-cache/
-└── sha256/<digest>
+        # timeframe 映射：1d → 1d, 1h → 60m, 5m → 5m
+        interval = timeframe
+        ticker = yf.Ticker(symbol)
+        df = ticker.history(start=start, end=end, interval=interval)
+        df = df.reset_index()
+        df = df.rename(columns={"Date": "timestamp", "Datetime": "timestamp"})
+        return df[["timestamp", "Open", "High", "Low", "Close", "Volume"]].rename(
+            columns={"Open": "open", "High": "high", "Low": "low",
+                     "Close": "close", "Volume": "volume"}
+        )
 ```
 
-下载前检查 digest，下载后校验 digest。多个 Job 使用同一 snapshot 时零重复下载。
+---
 
-### 9.3 同机优化
+## 7. 数据规范化 Normalizer
 
-当 Storage 与 Worker 同机：
+### 7.1 字段映射
 
-- 仍通过 ArtifactRef 表达。
-- Storage 可以返回受控 `file` locator。
-- Worker 只读 mmap/Arrow，不复制到 Dispatcher。
-- 不把共享内存 ID 写入跨机持久协议。
+```python
+# normalizer/schema.py
+class Normalizer:
+    """数据规范化 — 不同源的字段映射、时区对齐。"""
 
-共享内存是运行时优化，不是数据模型。
+    SCHEMA_MAP = {
+        "binance": {
+            "timestamp": "timestamp",
+            "open": "open", "high": "high",
+            "low": "low", "close": "close", "volume": "volume",
+        },
+        "yfinance": {
+            "timestamp": "timestamp",
+            "Open": "open", "High": "high",
+            "Low": "low", "Close": "close", "Volume": "volume",
+        },
+    }
 
-## 10. 结果写入协议
-
-### 10.1 两阶段提交
-
-Worker 不直接宣告成功后再上传结果。顺序必须是：
-
-```mermaid
-sequenceDiagram
-    participant W as Worker
-    participant S as Storage
-    participant D as Dispatcher
-
-    W->>S: create upload session
-    S-->>W: upload targets
-    W->>S: upload artifacts
-    W->>S: commit manifest + digests
-    S-->>W: committed ResultManifest ref
-    W->>D: complete attempt(manifest ref)
-    D->>S: verify manifest metadata
-    D->>D: mark unit succeeded
+    def normalize(self, df, source: str) -> "pd.DataFrame":
+        """规范化 DataFrame。"""
+        mapping = self.SCHEMA_MAP.get(source, {})
+        df = df.rename(columns=mapping)
+        # 时区对齐：统一为 UTC
+        if df["timestamp"].dt.tz is None:
+            df["timestamp"] = df["timestamp"].dt.tz_localize("UTC")
+        else:
+            df["timestamp"] = df["timestamp"].dt.tz_convert("UTC")
+        # 去重
+        df = df.drop_duplicates(subset=["timestamp"])
+        return df
 ```
 
-这样 Dispatcher 永远不会记录指向未完成上传的“成功结果”。
+---
 
-### 10.2 部分结果
+## 8. 调度器 Scheduler
 
-长任务可以提交 `partial manifest`：
+### 8.1 定时采集
 
-- 每个 partial 有递增 `sequence`。
-- partial Artifact 不可变。
-- 最终 manifest 引用或汇总所有 partial。
-- 进度事件只携带 partial ref，不携带大结果。
+```python
+# scheduler/collector.py
+import threading
+import time
 
-## 11. Lineage
 
-每个派生资产记录：
+class ScheduledCollector:
+    """定时数据采集器。"""
 
-- parent snapshot/artifact refs。
-- operation 和参数 digest。
-- Job/WorkUnit/attempt。
-- code bundle digest。
-- kernel/environment digest。
-- 创建时间和创建主体。
+    def __init__(self, storage_backend, adapters: dict, interval: int = 3600):
+        self._storage = storage_backend
+        self._adapters = adapters
+        self._interval = interval
+        self._subscriptions: list[dict] = []
+        self._thread = None
+        self._running = False
 
-PAXG 的 `signals.parquet`、统计汇总、180/208 次回测表、Monte Carlo 和 walk-forward 结果都可以沿 lineage 回到原始 Binance revision。
+    def subscribe(self, symbol: str, timeframe: str, source: str = "binance"):
+        """订阅定时采集。"""
+        self._subscriptions.append({
+            "symbol": symbol, "timeframe": timeframe, "source": source,
+        })
 
-## 12. 保留与垃圾回收
+    def start(self):
+        self._running = True
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
 
-### 12.1 引用计数不是唯一依据
+    def stop(self):
+        self._running = False
 
-Job 删除不应立即删除共享快照。GC 使用：
-
-- retention policy。
-- manifest 引用图。
-- pin 标记。
-- legal/research hold。
-- 最近访问时间。
-
-### 12.2 默认策略
-
-| 资产 | 默认 |
-|---|---|
-| 原始市场 revision | 长期保留或显式归档 |
-| DatasetSnapshot | 90 天，无引用后可 GC |
-| 中间 partial | Job 结束后 7 天 |
-| 最终结果 | 30 天，可配置 |
-| chart/report | 跟随结果 manifest |
-| 失败诊断 | 14 天，受权限控制 |
-
-## 13. 权限与安全
-
-- Artifact 下载需要 token 或短期 signed URL。
-- StrategyBundle 与市场数据 ACL 分开。
-- Worker 只能访问其 lease 所需的 refs。
-- file locator 仅同机可信部署启用。
-- 上传 session 限制大小、media type 和 digest。
-- 防止 zip slip、路径穿越和超大解压。
-- 敏感 traceback 和代码资产不向普通只读用户暴露。
-
-## 14. 部署模式
-
-### 14.1 本地一体化
-
-```text
-SQLite metadata + local blob filesystem
+    def _loop(self):
+        while self._running:
+            for sub in self._subscriptions:
+                try:
+                    adapter = self._adapters[sub["source"]]()
+                    df = adapter.fetch_ohlcv(sub["symbol"], sub["timeframe"])
+                    self._storage.ingest_ohlcv(sub["symbol"], sub["timeframe"], df)
+                except Exception as e:
+                    # 记录错误，继续下一次
+                    pass
+            time.sleep(self._interval)
 ```
 
-### 14.2 单独 Storage
+---
 
-```text
-Storage API + PostgreSQL + local/S3 blob
+## 9. Admin 管理面板
+
+### 9.1 Admin 路由
+
+```python
+# plugins/admin/router.py
+from fastapi import APIRouter
+
+router = APIRouter(prefix="/admin/api")
+
+
+@router.get("/symbols")
+async def list_symbols():
+    """列出所有标的（含元数据）。"""
+    ...
+
+
+@router.get("/ohlcv/stats")
+async def ohlcv_stats():
+    """OHLCV 数据统计（每个 symbol+timeframe 的行数、时间范围）。"""
+    ...
+
+
+@router.get("/ingest/history")
+async def ingest_history(limit: int = 100):
+    """采集历史记录。"""
+    ...
+
+
+@router.get("/health")
+async def health():
+    """系统健康检查。"""
+    ...
+
+
+@router.get("/dispatcher/cluster")
+async def dispatcher_cluster():
+    """Dispatcher 集群拓扑（若 Dispatcher 插件启用）。"""
+    ...
+
+
+@router.get("/dispatcher/tasks")
+async def dispatcher_tasks(limit: int = 100, state: str = None):
+    """Dispatcher 任务历史。"""
+    ...
 ```
 
-### 14.3 集群
+### 9.2 Admin SPA
 
-```text
-N Storage API replicas + PostgreSQL HA + S3/MinIO
+Admin 前端为静态 SPA（可选）：
+- 标的列表 + 元数据
+- OHLCV 数据预览
+- 采集任务管理
+- Dispatcher 集群监控（若启用）
+- 任务历史 + 统计
+
+---
+
+## 10. 缓存层
+
+### 10.1 查询缓存
+
+```python
+# storage/cache.py
+class QueryCache:
+    """查询缓存 — 减少 Storage 数据库压力。"""
+    def __init__(self, max_size_mb: int = 128):
+        self._cache: dict[str, Any] = {}
+        self._max_size = max_size_mb * 1024 * 1024
+        self._current_size = 0
+        self._lock = threading.Lock()
+
+    def get(self, key: str) -> Optional[Any]:
+        with self._lock:
+            return self._cache.get(key)
+
+    def put(self, key: str, value: Any):
+        with self._lock:
+            # 简化：按 key 数量限制
+            if len(self._cache) > 100:
+                self._cache.clear()
+            self._cache[key] = value
 ```
 
-Storage API 应尽量无状态，采集任务的协调状态放元数据库。
+---
 
-## 15. API 边界摘要
+## 11. 部署形态
 
-详细字段见 `DESIGN_PROT_V31.md`，Storage 资源包括：
+### 11.1 独立 Storage 服务（场景 B/C/D）
 
-- `/v31/instruments`
-- `/v31/ingests`
-- `/v31/revisions`
-- `/v31/snapshots`
-- `/v31/artifacts`
-- `/v31/upload-sessions`
-- `/v31/lineage/{resource_id}`
+```bash
+# 启动 Storage
+stockstat-backend serve --host 0.0.0.0 --port 8000
 
-## 16. 测试要求
+# 环境变量
+STOCKSTAT_DATABASE_URL=postgresql://user:pass@db/stockstat
+STOCKSTAT_ADMIN_ENABLED=true
+```
 
-### 16.1 功能测试
+### 11.2 Storage + Dispatcher 同机（场景 C）
 
-- 四数据源采集和标准化。
-- 增量采集、回补和 revision。
-- Snapshot 幂等创建。
-- 多标的/多 tf manifest。
-- Artifact upload/commit/download。
-- digest 错误拒绝。
-- lineage 完整性。
-- retention/GC。
+```bash
+# 启动 Storage + Dispatcher 插件
+STOCKSTAT_DISPATCHER_ENABLED=true \
+STOCKSTAT_DISPATCHER_QUEUE=memory \
+stockstat-backend serve --host 0.0.0.0 --port 8000
 
-### 16.2 并发与故障
+# Dispatcher 直接使用 StorageBackendImpl（绕过 HTTP）
+```
 
-- 同一 ingest key 并发提交只执行一次。
-- 上传中断不生成 committed manifest。
-- Storage 重启后 snapshot 和 artifact 可读。
-- 多 Worker 同时下载同一资产。
-- PostgreSQL 和 blob 短暂不可达后的安全恢复。
+### 11.3 Storage + Dispatcher + Admin
 
-### 16.3 性能基线
+```bash
+STOCKSTAT_DISPATCHER_ENABLED=true \
+STOCKSTAT_ADMIN_ENABLED=true \
+stockstat-backend serve --host 0.0.0.0 --port 8000
+```
 
-目标不是先追求极限，而是消除 V3 的结构性浪费：
+### 11.4 StorageApp 工厂
 
-- 控制面响应不含 base64 大数据。
-- 相同 snapshot 第二次 Worker 使用命中本地缓存。
-- 50MB 数据不经过 Dispatcher 进程。
-- Parquet/Arrow 读取结果与 JSON 基线数值一致。
+```python
+# app.py
+class StorageApp:
+    """Storage FastAPI 应用工厂。"""
 
-## 17. 结论
+    @staticmethod
+    def create(config: Optional[Config] = None) -> "FastAPI":
+        from fastapi import FastAPI
+        config = config or Config.from_env()
 
-V3.1 Storage 通过 revision、snapshot、artifact 和 lineage 把“数据库查询结果”提升为可复现的金融数据资产。Dispatcher 因此可以保持轻量控制面，Worker 可以直接复用数据和结果，Storage、计算节点和调用端也能真正分离部署。
+        app = FastAPI(title="StockStat Storage")
+        # 数据库引擎
+        engine = create_engine(config.database_url)
+        SessionFactory = sessionmaker(bind=engine)
+        Base.metadata.create_all(engine)
+
+        # StorageBackend 实现
+        backend = StorageBackendImpl(SessionFactory)
+        app.state.storage_backend = backend
+
+        # 路由
+        from .api.ohlcv import router as ohlcv_router
+        from .api.symbols import router as symbols_router
+        from .api.health import router as health_router
+        app.include_router(ohlcv_router)
+        app.include_router(symbols_router)
+        app.include_router(health_router)
+
+        # 可选：Dispatcher 插件
+        if config.dispatcher_enabled:
+            from stockstat_dispatcher import DispatcherPlugin
+            DispatcherPlugin.mount(app, storage_app=app,
+                                   queue_backend=config.dispatcher_queue,
+                                   redis_url=config.redis_url)
+            # Dispatcher 直连 StorageBackend
+            app.state.dispatcher._storage_backend = backend
+
+        # 可选：Admin 面板
+        if config.admin_enabled:
+            from .plugins.admin.router import router as admin_router
+            app.include_router(admin_router)
+
+        # 可选：定时采集
+        if config.scheduler_enabled:
+            from .scheduler.collector import ScheduledCollector
+            collector = ScheduledCollector(backend, ADAPTERS)
+            app.state.collector = collector
+            collector.start()
+
+        return app
+```
+
+### 11.5 Docker
+
+```yaml
+services:
+  db:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: stockstat
+      POSTGRES_USER: stockstat
+      POSTGRES_PASSWORD: secret
+
+  api:
+    build: ./packages/storage
+    command: stockstat-backend serve --host 0.0.0.0 --port 8000
+    environment:
+      STOCKSTAT_DATABASE_URL: postgresql://stockstat:secret@db/stockstat
+      STOCKSTAT_ADMIN_ENABLED: "true"
+      STOCKSTAT_DISPATCHER_ENABLED: "true"
+    ports: ["8000:8000"]
+    depends_on: [db]
+```
+
+---
+
+## 12. 测试体系
+
+### 12.1 测试分层
+
+| 测试文件 | 测试数 | 覆盖 |
+|---------|--------|------|
+| `test_models.py` | 15 | OHLCV 模型 / 复合主键 / 索引 |
+| `test_storage_backend.py` | 25 | fetch_ohlcv / ingest / list_symbols / metadata |
+| `test_api_ohlcv.py` | 20 | GET/POST /api/v1/ohlcv / Arrow 编解码 |
+| `test_api_symbols.py` | 10 | /api/v1/symbols |
+| `test_adapters.py` | 15 | Binance / YFinance 适配器（mock） |
+| `test_normalizer.py` | 10 | 字段映射 / 时区对齐 |
+| `test_scheduler.py` | 8 | 定时采集 / 订阅 |
+| `test_admin.py` | 12 | Admin 路由 |
+| `test_app.py` | 10 | StorageApp 工厂 / 插件加载 |
+| **合计** | **125** | |
+
+### 12.2 关键测试场景
+
+```python
+# OHLCV 写入查询
+backend = StorageBackendImpl(session_factory)
+df = pd.DataFrame({
+    "timestamp": pd.date_range("2024-01-01", periods=10, freq="D"),
+    "open": range(10), "high": range(10),
+    "low": range(10), "close": range(10), "volume": range(10),
+})
+backend.ingest_ohlcv("BTC/USDT", "1d", df)
+result = backend.fetch_ohlcv(["BTC/USDT"], "1d")
+assert len(result) == 10
+
+# Arrow API roundtrip
+client = TestClient(app)
+resp = client.get("/api/v1/ohlcv", params={"symbol": "BTC/USDT", "timeframe": "1d"})
+df = ArrowCodec().decode(resp.content)
+assert len(df) == 10
+
+# Binance 适配器（mock）
+with patch("httpx.get") as mock_get:
+    mock_get.return_value.json.return_value = [...]
+    adapter = BinanceAdapter()
+    df = adapter.fetch_ohlcv("BTC/USDT", "1d")
+    assert len(df) > 0
+
+# StorageBackend Protocol 检查
+from stockstat_foundation import StorageBackend
+assert isinstance(backend, StorageBackend)  # runtime_checkable
+```
+
+---
+
+## 13. 总结
+
+Storage 是 V3.1 的**数据仓库**，承载：
+
+| 能力 | 实现 |
+|------|------|
+| OHLCV 持久化 | SQLAlchemy + SQLite/PostgreSQL |
+| 数据查询 | REST API + Arrow 响应 |
+| 数据采集 | Binance / YFinance 适配器 |
+| 数据规范化 | 字段映射 + 时区对齐 |
+| 定时采集 | ScheduledCollector |
+| StorageBackend | Foundation Protocol 实现（供 Dispatcher 直连） |
+| Admin 面板 | Web UI + REST API |
+| 查询缓存 | QueryCache |
+
+**核心设计原则**：
+1. **计算期间完全空闲** — Storage 只被 Dispatcher 预取 1 次
+2. **松耦合 Dispatcher** — HTTP 或 StorageBackend Protocol
+3. **独立部署** — 可单独运行，也可加载 Dispatcher 插件
+4. **数据规范化** — 统一多源数据格式
+
+**与 V3 的关键差异**：
+- V3 嵌入 backend + Dispatcher → V3.1 Storage **独立包**，Dispatcher 松耦合
+- V3 无 StorageBackend Protocol → V3.1 **新增**，支持 Dispatcher 直连
+- V3 的 Admin 嵌入 → V3.1 保留，可独立启用
+
+---
+
+*本文件定义 Storage 模块的完整架构。Dispatcher 集成见 [DESIGN_ARCH_DISPATCHER_V31.md](DESIGN_ARCH_DISPATCHER_V31.md)，整体架构见 [DESIGN_ARCH_V31.md](DESIGN_ARCH_V31.md)。*
