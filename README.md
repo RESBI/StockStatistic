@@ -533,3 +533,7 @@ Copyright (C) 2026 RESBI
 ## Disclaimer
 
 This software is for **educational and research purposes only** and does **not** constitute any financial, investment, or trading advice. Users are solely responsible for their own investment decisions and should consult a qualified financial professional before making any investment.
+
+## Acknowledgements
+
+The development of this project was assisted by **GLM-5.2** (provided by Zhipu AI), including code implementation, architecture design, and documentation. The final content has been reviewed and is maintained by the author.
