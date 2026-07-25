@@ -1,1486 +1,1488 @@
-# StockStat V3.1 通讯协议设计
+# DESIGN_PROT_V31 — StockStat V3.1 通讯协议设计
 
-> 协议版本：3.1
-> 日期：2026-07-20
-> 状态：V3.1 设计稿
-> 关联：[DESIGN_ARCH_V31.md](DESIGN_ARCH_V31.md) | [DESIGN_ARCH_FOUNDATION_V31.md](DESIGN_ARCH_FOUNDATION_V31.md)
+> **版本**：v3.1
+> **日期**：2026-07-24
+> **状态**：设计稿
+> **关联**：
+> - [DESIGN_ARCH_V31.md](DESIGN_ARCH_V31.md) — 总设计
+> - [DESIGN_ARCH_FOUNDATION_V31.md](DESIGN_ARCH_FOUNDATION_V31.md) — 基础层
+> - [COMPUTE_OFFLOAD_PLAN_V2_CN.md](../../reports/COMPUTE_OFFLOAD_PLAN_V2_CN.md) — V2 协议设想
+>
+> **核心使命**：忠实落地 COMPUTE_OFFLOAD_PLAN_V2_CN §12~§13 的协议设计——**传输无关、语言无关、可扩展、可组合**。V3.1 协议在 V3 基础上扩展 task_type 至 47 个，但**消息格式零改动**。
 
-## 1. 目标与范围
+---
 
-V3.1 协议服务于一个明确的金融任务架构：
+## 目录
 
-```text
-调用 Client -> 分发 Dispatcher -> {Storage, N x Worker}
-```
+1. [协议总览](#1-协议总览)
+2. [Envelope 信封](#2-envelope-信封)
+3. [消息类型表](#3-消息类型表)
+4. [TaskSpec 三段式](#4-taskspec-三段式)
+5. [Codec 编码层](#5-codec-编码层)
+6. [Transport 传输层](#6-transport-传输层)
+7. [数据分发策略](#7-数据分发策略)
+8. [Worker 注册与心跳](#8-worker-注册与心跳)
+9. [任务生命周期](#9-任务生命周期)
+10. [错误处理与重试](#10-错误处理与重试)
+11. [协议优化](#11-协议优化)
+12. [版本协商](#12-版本协商)
+13. [HTTP 路径映射](#13-http-路径映射)
+14. [异常类](#14-异常类)
+15. [协议测试覆盖](#15-协议测试覆盖)
 
-协议目标：
+---
 
-| 目标 | V3.1 方式 |
-|---|---|
-| 调用与部署解耦 | HTTP Channel 与 Embedded Channel 使用同一 Contracts |
-| 控制/事件/数据分离 | JSON 控制、SSE 事件、Arrow/Artifact 字节流 |
-| 大数据不穿控制队列 | 控制消息只携带 ArtifactRef |
-| 可靠重试 | WorkUnit/Attempt 分离，Lease + fencing token |
-| 幂等 | submit、upload commit、complete 均有稳定幂等键 |
-| 金融任务可扩展 | capability ID/version + 独立参数 schema |
-| 可复现 | DatasetSnapshot、策略/Kernel 版本、seed 全量记录 |
-| 可观察 | trace、JobEvent sequence、结构化错误 |
-| 安全 | 无跨网 pickle；策略包签名；Client/Worker 独立身份 |
+## 1. 协议总览
 
-不在首版协议范围内：
+### 1.1 设计目标
 
-- 任意用户 DAG 协议。
-- 任意 Python 函数 RPC。
-- 多级 Dispatcher 原样消息转发。
-- Redis pub/sub 作为公开节点协议。
-- 共享内存 URI 作为跨机合同。
-- 自动猜测 JSON/MessagePack 编码。
+| 目标 | 说明 | V3.1 落地 |
+|------|------|----------|
+| 传输无关 | 同一套消息可在 HTTP/TCP/SHM/Redis/InProcess 上传输 | 5 种 Transport 实现 |
+| 语言无关 | 控制面 JSON；数据面 Arrow / cloudpickle | JSON + Arrow + cloudpickle |
+| 可扩展 | 新增任务类型/消息类型/Codec/Transport 零协议改动 | 47 个 task_type，协议不变 |
+| 可组合 | 多级 Dispatcher 级联时消息原样转发 | 子 Dispatcher 注册 + 拓扑聚合 |
+| 高效 | MessagePack 可选，比 JSON 节省 15-30% 带宽 | MsgpackCodec |
+| 可观测 | trace_id / headers.priority / data_ref 全程透传 | Headers 字段 |
 
-## 2. 协议平面
+### 1.2 三层协议栈
 
 ```mermaid
 graph TB
-    C[Client SDK / CLI / Admin]
-    D[Dispatcher Gateway]
-    S[Storage Control API]
-    A[Artifact Data Endpoint]
-    W1[Worker Agent 1]
-    WN[Worker Agent N]
+    subgraph "Layer 3: 传输层 Transport"
+        T_HTTP["HttpTransport<br/>REST + JSON"]
+        T_TCP["TcpTransport<br/>length-prefixed binary"]
+        T_MEM["InProcessTransport<br/>queue.Queue"]
+        T_SHM["SharedMemoryTransport<br/>mmap 零拷贝"]
+        T_REDIS["RedisTransport<br/>LPUSH/BRPOP"]
+    end
 
-    C -->|External Control: JSON/HTTPS| D
-    D -->|Job Events: SSE| C
-    D -->|Storage Control: JSON/HTTPS| S
-    D -->|Worker Control: JSON/HTTPS long-poll| W1
-    D -->|Worker Control: JSON/HTTPS long-poll| WN
-    C <-->|Artifact bytes: Arrow/HTTP| A
-    W1 <-->|Artifact bytes: Arrow/HTTP| A
-    WN <-->|Artifact bytes: Arrow/HTTP| A
-    S -->|publish snapshots| A
+    subgraph "Layer 2: 消息层 Message"
+        M_ENV["Envelope<br/>protocol/version/type/id/reply_to/headers/payload"]
+    end
+
+    subgraph "Layer 1: 编码层 Codec"
+        C_JSON["JsonCodec<br/>控制面"]
+        C_ARROW["ArrowCodec<br/>表格数据"]
+        C_PICKLE["CloudpickleCodec<br/>策略闭包"]
+        C_MSGPACK["MsgpackCodec<br/>高效控制面"]
+        C_RAW["RawCodec<br/>二进制透传"]
+    end
+
+    T_HTTP --> M_ENV
+    T_TCP --> M_ENV
+    T_MEM --> M_ENV
+    T_SHM --> M_ENV
+    T_REDIS --> M_ENV
+    M_ENV --> C_JSON
+    M_ENV --> C_ARROW
+    M_ENV --> C_PICKLE
+    M_ENV --> C_MSGPACK
+    M_ENV --> C_RAW
 ```
 
-### 2.1 External Control Plane
+**三层分离铁律**：
+- **编码层**：决定"载荷如何序列化为字节"——与传输无关
+- **消息层**：决定"字节如何包装为有意义的消息"——与编码无关
+- **传输层**：决定"消息如何在节点间移动"——与消息内容无关
 
-方向：Client ↔ Dispatcher。
+> 任何一层可独立替换：换传输不动消息格式，换编码不动传输，换消息类型不改编解码。
 
-内容：Job 提交、查询、取消、结果、能力和集群查询。消息小、类型化、可幂等。
+### 1.3 与 V3 协议的关系
 
-### 2.2 Worker Control Plane
+V3.1 协议**完全继承** V3 的 Envelope / Headers / 消息类型表 / Transport / Codec 设计（已验证 922 项测试通过）。V3.1 的扩展点：
 
-方向：Worker ↔ Dispatcher。
+| 维度 | V3 | V3.1 |
+|------|----|------|
+| task_type 数量 | 6 | **47**（见 DESIGN_GENERALIZE） |
+| ComputeSpec.params | 无 | **新增**（承载 47 个 task_type 的特定参数） |
+| 消息类型 | 28 个 | **不变**（28 个） |
+| Envelope 结构 | 不变 | **不变** |
+| Transport | 5 种 | **不变**（5 种） |
+| Codec | 7 种 | **不变**（7 种） |
 
-内容：注册、心跳、claim、lease renew、进度、partial 引用、complete、fail、release。Worker 采用 pull 模式，Dispatcher 不要求反向连接 Worker。
+**核心结论**：V3.1 的协议扩展是**业务层扩展**（更多 task_type），**协议层零改动**。这正是 COMPUTE_OFFLOAD_PLAN_V2_CN §12.11 "通用性保证"的体现。
 
-### 2.3 Storage Control Plane
+---
 
-方向：Dispatcher/Client/Worker ↔ Storage。
+## 2. Envelope 信封
 
-内容：Dataset selector 解析、Snapshot 创建、Artifact upload/download session 和 metadata。大型 bytes 不在此平面的 JSON body 中。
+### 2.1 结构
 
-### 2.4 Event Plane
+所有节点间通信都包装在统一信封中。信封本身永远是 JSON 或 Msgpack 可序列化的；payload 按 `headers.content_type` 决定编码方式。
 
-方向：Dispatcher → Client。
+```python
+@dataclass
+class Envelope:
+    """统一消息信封 — COMPUTE_OFFLOAD_PLAN_V2_CN §12.3。
 
-首版使用 Server-Sent Events。事件来自持久 JobEvent Log，可按 sequence 续读；轮询 Job status 是降级路径。
+    Fields:
+        protocol: Always "stockstat-rpc" (协议标识)
+        version: 协议版本 (semver, e.g. "1.0")
+        type: 消息类型 (见 §3)
+        id: 唯一消息 UUID v4
+        reply_to: 原始消息 ID (异步回复)
+        headers: 元数据 (见 §2.2)
+        payload: 消息体 (dict / bytes / str)
+    """
+    protocol: str = "stockstat-rpc"
+    version: str = "1.0"
+    type: str = ""
+    id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    reply_to: Optional[str] = None
+    headers: Headers = field(default_factory=Headers)
+    payload: Any = None
+```
 
-### 2.5 Artifact Data Plane
+### 2.2 Headers 字段
 
-方向：Producer/Consumer ↔ Artifact endpoint。
+| 字段 | 类型 | 默认 | 说明 |
+|------|------|------|------|
+| `content_type` | str | `application/json` | 载荷 MIME 类型（决定解码方式） |
+| `data_codec` | str | `arrow` | 表格数据编码：arrow / json / parquet |
+| `strategy_codec` | str | `cloudpickle` | 策略函数编码：cloudpickle / json / none |
+| `encoding` | str | `json` | 信封编码：json / msgpack |
+| `priority` | int | `0` | 0 普通 / -1 高 / 1 低 |
+| `timeout` | int | `3600` | 超时秒数 |
+| `trace_id` | str | `""` | 分布式追踪 ID（贯穿全链路） |
+| `data_ref` | str | `""` | 数据引用：shm://id / cache://key / inline:b64 / redis://id |
+| `retry_count` | int | `0` | 重试次数 |
+| `protocol_version` | str | `1.0` | 协议版本（协商用） |
+| `accepted_codecs` | list | `[]` | Client 声明支持的 codec |
+| `accepted_encodings` | list | `[]` | Client 声明支持的 envelope 编码 |
 
-内容：Arrow、Parquet、策略 bundle、模型、检查点和其他不可变 bytes。支持分块、Range、摘要校验和对象存储签名 URL。
+### 2.3 信封示例
 
-## 3. 逻辑 Channel
-
-协议定义 Channel，而不是把每个底层中间件都暴露成业务 Transport。
-
-| Channel | 生产实现 | 本地实现 | 语义 |
-|---|---|---|---|
-| `ControlChannel` | HTTPS JSON | Embedded function adapter | request/response command/query |
-| `EventChannel` | SSE over HTTPS | Embedded event iterator | 持久事件流 |
-| `ArtifactChannel` | HTTPS/object store | Local filesystem/mmap | 不可变 bytes 上传下载 |
-
-Redis、PostgreSQL notify、内存 queue、S3 SDK 和共享内存是服务内部 adapter，不改变 Job/Lease/Artifact 协议。
-
-Embedded Channel 可在性能模式中省略实际 HTTP，但必须经过相同 Pydantic model 和 command handler。合同测试提供强制 JSON/Arrow round-trip 模式，防止本地路径依赖不可序列化对象。
-
-## 4. ControlMessage 信封
-
-所有 JSON 控制请求、响应和持久事件使用统一逻辑信封：
+**task.submit 消息**：
 
 ```json
 {
-  "protocol": "stockstat-control",
-  "protocol_version": "3.1",
-  "message_type": "job.submit",
-  "message_id": "0190f4e6-9e1e-7b0a-a7b1-9b22bcb3cf17",
-  "correlation_id": null,
-  "causation_id": null,
-  "sent_at": "2026-07-20T10:30:00.123456Z",
-  "deadline_at": null,
-  "trace": {
-    "traceparent": "00-...-...-01",
-    "tracestate": null
+  "protocol": "stockstat-rpc",
+  "version": "1.0",
+  "type": "task.submit",
+  "id": "550e8400-e29b-41d4-a716-446655440000",
+  "reply_to": null,
+  "headers": {
+    "content_type": "application/vnd.stockstat.task+json",
+    "data_codec": "arrow",
+    "strategy_codec": "cloudpickle",
+    "encoding": "json",
+    "priority": 0,
+    "timeout": 3600,
+    "trace_id": "trace-abc-123",
+    "data_ref": "",
+    "retry_count": 0,
+    "protocol_version": "1.0",
+    "accepted_codecs": ["arrow", "cloudpickle", "json"],
+    "accepted_encodings": ["json", "msgpack"]
   },
-  "content_schema": "stockstat.job.submit/1",
-  "content": {}
-}
-```
-
-### 4.1 字段定义
-
-| 字段 | 必填 | 说明 |
-|---|---|---|
-| `protocol` | 是 | 固定 `stockstat-control` |
-| `protocol_version` | 是 | 控制协议 major.minor，首版 `3.1` |
-| `message_type` | 是 | 稳定消息类型 |
-| `message_id` | 是 | UUIDv7，单条消息唯一 |
-| `correlation_id` | 否 | 请求/响应关联，响应指向请求 message ID |
-| `causation_id` | 否 | 事件因果来源，例如 complete 导致 job.succeeded |
-| `sent_at` | 是 | RFC 3339 UTC |
-| `deadline_at` | 否 | 消息处理绝对 deadline，不代表 Job deadline |
-| `trace` | 否 | W3C trace context |
-| `content_schema` | 是 | payload schema ID/major |
-| `content` | 是 | 对应 schema 的 JSON object |
-
-除 `/v31/meta`、原始市场数据响应和 Artifact bytes endpoint 外，所有 JSON 控制响应以及所有 POST 控制请求都使用 `ControlMessage`。GET 请求通过 path/query 表达查询，响应仍使用 `ControlMessage`。
-
-为提高可读性，本文后续多数“请求/响应”示例只展示 `content`；实现时必须包入第 4 节信封。Endpoint 与 `message_type` 必须匹配，不允许把 `work.complete` 发送到 Job submit 路径。
-
-### 4.2 明确删除的 V3 Headers
-
-| V3 字段 | V3.1 处理 |
-|---|---|
-| `data_codec` | 放入 ArtifactRef metadata |
-| `strategy_codec` | 策略用 StrategyRef，不支持 cloudpickle codec |
-| `encoding` | HTTP `Content-Type` 显式协商；首版 JSON |
-| `data_ref` | 放入输入绑定中的 ArtifactRef |
-| `retry_count` | Attempt/ExecutionPolicy 持久字段 |
-| `priority` | JobSpec.execution.priority |
-| `timeout` | Job deadline / WorkUnit deadline |
-| `accepted_codecs` | `/meta` 和 HTTP Accept 协商，不每条消息重复 |
-| `reply_to` | 使用 correlation/causation，不承担路由目标语义 |
-
-### 4.3 JSON 约束
-
-- UTF-8。
-- `Content-Type: application/vnd.stockstat.control+json; version=3.1`。
-- 最大控制消息默认 1 MiB。
-- 禁止 NaN、Infinity、bytes、Python repr 和 `default=str`。
-- Canonical JSON 用于摘要、签名和幂等冲突检测。
-- 未知 major schema 拒绝；同 major 的未知可选字段按 schema 策略处理。
-- 首版不自动检测 MessagePack。未来若需要，使用明确 media type 和版本协商。
-
-## 5. 协议发现与版本协商
-
-### 5.1 Meta endpoint
-
-```text
-GET /v31/meta
-```
-
-响应：
-
-```json
-{
-  "service": "dispatcher",
-  "service_version": "3.1.0",
-  "protocol_versions": ["3.1"],
-  "control_media_types": ["application/vnd.stockstat.control+json"],
-  "event_media_types": ["text/event-stream"],
-  "artifact_media_types": [
-    "application/vnd.apache.arrow.stream",
-    "application/vnd.apache.parquet",
-    "application/vnd.stockstat.manifest+json",
-    "application/octet-stream"
-  ],
-  "limits": {
-    "max_control_bytes": 1048576,
-    "max_job_inputs": 64,
-    "max_job_fanout": 100000
+  "payload": {
+    "task_id": "task-2024-001",
+    "data_spec": {...},
+    "compute_spec": {...},
+    "dispatch_spec": {...}
   }
 }
 ```
 
-### 5.2 版本规则
+### 2.4 编码方式
 
-- 协议 major 不兼容时拒绝。
-- minor 只允许增加可选字段、消息类型和 endpoint。
-- 行为破坏性变化升级协议 major。
-- 金融能力版本独立协商，不随协议 minor 自动变化。
-- Artifact schema 也独立版本化。
+- **JSON**（默认）：人可读，跨语言，调试友好
+- **Msgpack**（V2 §13.5）：紧凑二进制，比 JSON 小 15-30%
 
-请求可携带：
-
-```text
-StockStat-Protocol-Version: 3.1
-Accept: application/vnd.stockstat.control+json; version=3.1
+```python
+def encode(self) -> bytes:
+    """按 headers.encoding 选择序列化方式。"""
+    d = self.to_dict()
+    # bytes payload 自动 base64 编码
+    if isinstance(d["payload"], (bytes, bytearray)):
+        d["payload"] = base64.b64encode(d["payload"]).decode("ascii")
+        d["_payload_b64"] = True
+    if self.headers.encoding == "msgpack":
+        import msgpack
+        return msgpack.dumps(d, use_bin_type=True)
+    return json.dumps(d, default=str).encode("utf-8")
 ```
 
-## 6. JobSpec
+### 2.5 解码自动检测
 
-### 6.1 `job.submit`
+```python
+@classmethod
+def decode(cls, raw: bytes) -> "Envelope":
+    """自动检测 JSON vs Msgpack。"""
+    try:
+        d = json.loads(raw.decode("utf-8"))   # try JSON first
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        import msgpack
+        d = msgpack.loads(raw, raw=False)     # fall back to msgpack
+    # 还原 base64 payload
+    if d.get("_payload_b64") and isinstance(d.get("payload"), str):
+        d["payload"] = base64.b64decode(d["payload"])
+    return cls.from_dict(d)
+```
+
+**关键设计**：JSON 先尝试（更常见且成本低），失败再尝试 msgpack。msgpack 字节流不是合法 UTF-8，所以 `raw.decode("utf-8")` 会抛 `UnicodeDecodeError`，触发 fallback。
+
+### 2.6 reply 辅助方法
+
+```python
+def reply(self, type: str, payload=None, content_type="application/json") -> "Envelope":
+    """构建回复信封，reply_to 设为当前信封的 id。"""
+    return Envelope(
+        type=type,
+        reply_to=self.id,
+        headers=Headers(
+            content_type=content_type,
+            trace_id=self.headers.trace_id,  # 透传 trace_id
+            protocol_version=self.headers.protocol_version,
+        ),
+        payload=payload,
+    )
+```
+
+---
+
+## 3. 消息类型表
+
+### 3.1 控制面（Client ↔ Dispatcher）
+
+| `type` | 方向 | `content_type` | 说明 |
+|--------|------|----------------|------|
+| `task.submit` | C → D | `application/vnd.stockstat.task+json` | 提交任务（payload = TaskSpec） |
+| `task.ack` | D → C | `application/json` | 确认接收，返回 task_id + 预估 |
+| `task.status` | C → D | `application/json` | 查询状态 |
+| `task.status.reply` | D → C | `application/json` | 返回 TaskInfo |
+| `task.result` | C → D | `application/json` | 获取结果 |
+| `task.result.reply` | D → C | `application/vnd.stockstat.result+cloudpickle` | 返回结果（base64 cloudpickle） |
+| `task.cancel` | C → D | `application/json` | 取消任务 |
+| `task.progress` | D → C（推送） | `application/json` | 进度推送（订阅模式） |
+| `task.error` | D → C | `application/json` | 错误上报 |
+| `cluster.info` | C → D | `application/json` | 查询集群拓扑与节点信息 |
+| `cluster.info.reply` | D → C | `application/json` | 返回完整集群拓扑 |
+
+### 3.2 调度面（Dispatcher ↔ Worker）
+
+| `type` | 方向 | 说明 |
+|--------|------|------|
+| `dispatch.assign` | D → W | 分配任务分片（含 TaskSpec + data_ref + 内联 data） |
+| `dispatch.ack` | W → D | 确认接收分片 |
+| `dispatch.complete` | W → D | 完成并回传最终结果（base64 cloudpickle） |
+| `dispatch.partial` | W → D | 流式回传部分结果（V2 §13.2） |
+| `dispatch.fail` | W → D | 失败上报（含 traceback） |
+| `dispatch.heartbeat` | W → D | 心跳（含负载） |
+| `dispatch.register` | W → D | Worker 注册（含硬件配置 + 别名） |
+| `dispatch.unregister` | W → D | Worker 主动下线 |
+| `dispatch.drain` | D → W | 通知优雅下线（V2 §13.4） |
+| `dispatch.preempt` | D → W | 暂停当前任务（V2 §13.3） |
+| `dispatch.resume` | D → W | 恢复被抢占的任务 |
+| `dispatch.preempt_rejected` | W → D | 不支持抢占时拒绝 |
+
+### 3.3 数据面（大数据传输）
+
+| `type` | 方向 | 说明 |
+|--------|------|------|
+| `data.fetch` | D → S | 预取数据请求 |
+| `data.stream` | S → D | 数据流（Arrow IPC，可分 chunk） |
+| `data.ref` | D → W | 数据引用（共享内存 ID 或 Storage URL） |
+
+### 3.4 服务发现（V2 §13.4）
+
+| `type` | 方向 | 说明 |
+|--------|------|------|
+| `cluster.discover` | W → S | Worker 查询可用 Dispatcher 列表 |
+| `cluster.discover.reply` | S → W | 返回 Dispatcher 地址列表 |
+
+### 3.5 类型分组
+
+```python
+CONTROL_TYPES = {TASK_SUBMIT, TASK_ACK, TASK_STATUS, TASK_STATUS_REPLY,
+                 TASK_RESULT, TASK_RESULT_REPLY, TASK_CANCEL, TASK_PROGRESS,
+                 TASK_ERROR, CLUSTER_INFO, CLUSTER_INFO_REPLY}  # 11 个
+
+DISPATCH_TYPES = {DISPATCH_ASSIGN, DISPATCH_ACK, DISPATCH_COMPLETE,
+                  DISPATCH_PARTIAL, DISPATCH_FAIL, DISPATCH_HEARTBEAT,
+                  DISPATCH_REGISTER, DISPATCH_UNREGISTER, DISPATCH_DRAIN,
+                  DISPATCH_PREEMPT, DISPATCH_RESUME, DISPATCH_PREEMPT_REJECTED}  # 12 个
+
+DATA_TYPES = {DATA_FETCH, DATA_STREAM, DATA_REF}  # 3 个
+
+DISCOVERY_TYPES = {CLUSTER_DISCOVER, CLUSTER_DISCOVER_REPLY}  # 2 个
+
+ALL_TYPES = CONTROL_TYPES | DISPATCH_TYPES | DATA_TYPES | DISCOVERY_TYPES  # 28 个
+
+
+def is_control(t: str) -> bool: return t in CONTROL_TYPES
+def is_dispatch(t: str) -> bool: return t in DISPATCH_TYPES
+def is_data(t: str) -> bool: return t in DATA_TYPES
+```
+
+---
+
+## 4. TaskSpec 三段式
+
+### 4.1 结构
+
+`task.submit` 的 payload 是一个 TaskSpec JSON，描述"算什么"但不描述"怎么传"：
+
+```python
+@dataclass
+class TaskSpec:
+    """完整任务规范 — V2 §12.5 三段式。"""
+    task_id: str                        # UUID v4
+    data_spec: DataSpec                 # 需要什么数据
+    compute_spec: ComputeSpec           # 做什么计算
+    dispatch_spec: DispatchSpec = ...   # 如何分发
+    trace_id: str = ""                  # 分布式追踪 ID
+    created_at: datetime = ...          # 创建时间
+    created_by: str = ""                # Client 标识
+```
+
+### 4.2 DataSpec
+
+```python
+@dataclass
+class DataSpec:
+    """描述需要什么数据 — 任何 task_type 通用。"""
+    symbols: list[str]                  # ["BTC/USDT", "ETH/USDT"]
+    timeframe: str = "1d"               # "1d" / "1h" / "5m"
+    start: Optional[str] = None         # "2024-01-01"
+    end: Optional[str] = None           # "2024-12-31"
+    source: Optional[str] = None        # "binance" / "yfinance"
+
+    def cache_key(self) -> str:
+        """Stable hash for Dispatcher data cache (V2 §9.5)。"""
+        # sha256(symbols + timeframe + start + end + source) 前 32 字节
+```
+
+### 4.3 ComputeSpec
+
+V3.1 的 ComputeSpec 在 V3 基础上**新增 `params` dict**，承载 47 个 task_type 的特定参数：
+
+```python
+@dataclass
+class ComputeSpec:
+    """描述做什么计算 — 按 task_type 分发到对应 handler。
+
+    V3.1 扩展点：params dict 承载 47 个 task_type 的特定参数，
+    避免为每个 task_type 新增专用字段。
+    """
+    task_type: str                      # 见 DESIGN_GENERALIZE §11 注册表
+    strategy_ref: Optional[str] = None  # "cloudpickle:base64..." / "registry:name" / "dsl:expr"
+    strategy_codec: str = "cloudpickle"
+    params: dict = field(default_factory=dict)  # 任务类型特定参数
+
+    # ── 回测类共用字段（保留 V3 语义）──
+    initial_cash: float = 1_000_000.0
+    cost_model: Optional[str] = None    # "binance_spot" / "binance_futures_bnb"
+    fill_model: Optional[str] = None    # "next_open" / "intrabar_fill"
+    execution_model: Optional[str] = None  # "next_bar" / "intrabar"
+    benchmark: Optional[str] = None
+    trade_on: str = "open"
+    allow_short: bool = False
+    periods_per_year: Optional[int] = None
+
+    # ── grid_search/batch_backtest 共用 ──
+    param_grid: Optional[dict] = None
+    metric: str = "sharpe"
+    maximize: bool = True
+    strategies: Optional[dict] = None   # {name: strategy_ref}
+    fee_models: Optional[list] = None
+
+    # ── monte_carlo 共用 ──
+    n_simulations: int = 1000
+    seed: int = 0
+```
+
+**`params` dict 示例**：
+
+| task_type | params 示例 |
+|-----------|------------|
+| `indicator` | `{"indicator_name": "rsi", "window": 14}` |
+| `correlation` | `{"method": "pearson", "x": [...], "y": [...]}` |
+| `hypothesis_test` | `{"test": "chi2_independence", "table": [[...]]}` |
+| `wavelet` | `{"method": "cwt", "wavelet": "morl", "scales": [1,2,...]}` |
+| `transfer_entropy` | `{"k": 1, "l": 1, "bins": 4, "n_permutations": 100}` |
+| `grey_relation` | `{"rho": 0.5}` |
+| `ml_train` | `{"model_type": "random_forest", "hyperparams": {"n_estimators": 100}}` |
+
+### 4.4 DispatchSpec
+
+```python
+@dataclass
+class DispatchSpec:
+    """描述如何分发 — 任何 task_type 通用。"""
+    split_strategy: str = "auto"        # auto/param_wise/symbol_wise/time_wise/none
+    max_workers: Optional[int] = None
+    data_dispatch: str = "auto"         # auto/inline/shared_memory/stream/storage_ref
+    priority: int = 0                   # 0/-1/1
+    timeout: int = 3600                 # 秒
+    retry_count: int = 0
+    preemptable: bool = False           # V2 §13.3
+```
+
+### 4.5 完整 TaskSpec 示例
 
 ```json
 {
-  "protocol": "stockstat-control",
-  "protocol_version": "3.1",
-  "message_type": "job.submit",
-  "message_id": "0190...",
-  "sent_at": "2026-07-20T10:30:00Z",
-  "content_schema": "stockstat.job.submit/1",
-  "content": {
-    "name": "BTC MA cross grid search",
-    "operation": {
-      "capability_id": "finance.experiment.search",
-      "capability_version": "1.0",
-      "parameters": {
-        "method": "grid",
-        "base_operation": {
-          "capability_id": "finance.backtest.run",
-          "capability_version": "1.0",
-          "parameters": {
-            "strategy": {
-              "kind": "python_package",
-              "name": "ma-cross",
-              "version": "1.0.0",
-              "entrypoint": "research.strategies:build",
-              "artifact": {"artifact_id": "...", "sha256": "..."},
-              "config": {}
-            },
-            "initial_cash": 10000.0,
-            "cost_model": {"id": "cost.binance_spot", "version": "1", "params": {}},
-            "fill_model": {"id": "fill.next_open", "version": "1", "params": {}}
-          }
-        },
-        "parameter_space": {
-          "short": [3, 5, 8],
-          "long": [10, 20, 30]
-        },
-        "objective": {"metric": "sharpe", "direction": "maximize"}
-      }
+  "task_id": "task-2024-001",
+  "data_spec": {
+    "symbols": ["BTC/USDT"],
+    "timeframe": "1d",
+    "start": "2024-01-01",
+    "end": "2024-12-31",
+    "source": "binance"
+  },
+  "compute_spec": {
+    "task_type": "grid_search",
+    "strategy_ref": "cloudpickle:base64...",
+    "strategy_codec": "cloudpickle",
+    "params": {},
+    "initial_cash": 1000000,
+    "cost_model": "binance_spot",
+    "param_grid": {
+      "short": [3, 5, 8, 10],
+      "long": [10, 20, 30, 50]
     },
-    "inputs": [
-      {
-        "name": "market_data",
-        "dataset": {
-          "instruments": [
-            {"asset_class": "crypto", "symbol": "BTC/USDT", "venue": "binance"}
-          ],
-          "timeframe": "1d",
-          "start": "2024-01-01T00:00:00Z",
-          "end": "2025-01-01T00:00:00Z",
-          "source_policy": {"mode": "exact", "source": "binance"},
-          "snapshot_policy": "pin_on_submit"
-        }
-      }
-    ],
-    "execution": {
-      "priority": 50,
-      "deadline_at": "2026-07-20T12:30:00Z",
-      "max_attempts": 3,
-      "retry_backoff": {"initial_seconds": 1, "factor": 2, "max_seconds": 60},
-      "resources": null,
-      "worker_labels": {},
-      "partitioning": {"mode": "auto"}
-    },
-    "outputs": {
-      "retain_for_seconds": 2592000,
-      "detail_level": "standard",
-      "emit_partials": true
-    },
-    "tags": {"project": "paxg-research"}
-  }
-}
-```
-
-### 6.2 Job submit 规则
-
-- `job_id` 由 Dispatcher 生成。
-- Client 使用 HTTP `Idempotency-Key`；不把自生成 task ID 当幂等保障。
-- `operation.parameters` 由 capability schema 校验。
-- `inputs` 只能是 DatasetSelector 或完整 ArtifactRef。
-- DataFrame/Series 必须先上传，再提交 ArtifactRef。
-- Job submit 接受后不依赖 Client 保持连接。
-- `execution.partitioning` 是偏好；最终计划由 Capability Planner 决定。
-
-### 6.3 Idempotency-Key
-
-作用域：`principal + endpoint + key`。
-
-行为：
-
-| 情况 | 响应 |
-|---|---|
-| 首次 key | 创建 Job，202 |
-| 相同 key + 相同 canonical request | 返回同一 Job，200/202 |
-| 相同 key + 不同 request digest | 409 `IDEMPOTENCY_CONFLICT` |
-| key 超过保留期 | 可视为新请求，保留期由 meta 声明 |
-
-## 7. Job 消息与 HTTP API
-
-### 7.1 Endpoint 表
-
-| 方法 | 路径 | 消息/结果 | 状态码 |
-|---|---|---|---|
-| `POST` | `/v31/jobs` | `job.submit` -> `job.accepted/rejected` | 202/4xx |
-| `GET` | `/v31/jobs/{job_id}` | `job.status.reply` | 200/404 |
-| `POST` | `/v31/jobs/{job_id}/cancel` | `job.cancel` -> receipt | 202/200 |
-| `GET` | `/v31/jobs/{job_id}/events` | SSE JobEvent | 200 |
-| `GET` | `/v31/jobs/{job_id}/result` | Result Manifest | 200/409/404 |
-| `GET` | `/v31/jobs` | 分页 Job summary | 200 |
-| `GET` | `/v31/capabilities` | 可用金融能力 | 200 |
-| `GET` | `/v31/cluster` | Worker/资源聚合 | 200 |
-| `POST` | `/v31/workers/{worker_id}/drain` | 管理命令 | 202 |
-| `POST` | `/v31/data/ingest-schedules` | 创建有限数据采集计划 | 201 |
-| `GET` | `/v31/data/ingest-schedules` | 查询采集计划 | 200 |
-| `PATCH` | `/v31/data/ingest-schedules/{id}` | 启停/修改采集计划 | 200 |
-
-### 7.2 `job.accepted`
-
-```json
-{
-  "message_type": "job.accepted",
-  "correlation_id": "<submit-message-id>",
-  "content_schema": "stockstat.job.accepted/1",
-  "content": {
-    "job_id": "0190...",
-    "state": "accepted",
-    "revision": 1,
-    "submitted_at": "2026-07-20T10:30:00.200000Z",
-    "status_url": "/v31/jobs/0190...",
-    "events_url": "/v31/jobs/0190.../events",
-    "result_url": "/v31/jobs/0190.../result"
-  }
-}
-```
-
-### 7.3 `job.status.reply`
-
-```json
-{
-  "job_id": "0190...",
-  "state": "running",
-  "revision": 14,
-  "progress": {
-    "fraction": 0.375,
-    "completed_weight": 3.0,
-    "total_weight": 8.0,
-    "message": "3/8 parameter batches complete"
+    "metric": "sharpe",
+    "maximize": true
   },
-  "stages": [
-    {"stage_id": "...", "name": "backtests", "state": "running", "progress": 0.375}
-  ],
-  "created_at": "...",
-  "started_at": "...",
-  "finished_at": null,
-  "deadline_at": "...",
-  "error": null,
-  "result": null
-}
-```
-
-### 7.4 Job 状态
-
-稳定枚举：
-
-```text
-accepted
-planning
-queued
-running
-cancelling
-succeeded
-failed
-cancelled
-expired
-```
-
-终态：`succeeded/failed/cancelled/expired`。
-
-### 7.5 取消
-
-请求：
-
-```json
-{
-  "message_type": "job.cancel",
-  "content_schema": "stockstat.job.cancel/1",
-  "content": {"reason": "user requested", "grace_seconds": 10}
-}
-```
-
-语义：
-
-- 幂等。
-- 已终态返回当前终态，不重写结果。
-- 接受取消不等于立即完成取消。
-- Client wait timeout 不自动发送 cancel。
-- `cancelling` 期间可能仍有 Worker 清理和 checkpoint。
-
-### 7.6 IngestSchedule
-
-采集计划不是通用工作流协议，只能触发 `finance.data.ingest`：
-
-```json
-{
-  "name": "BTC hourly incremental",
-  "ingest": {
-    "instrument": {"asset_class": "crypto", "symbol": "BTC/USDT", "venue": "binance"},
-    "source": "binance",
-    "timeframe": "1h",
-    "mode": "incremental"
+  "dispatch_spec": {
+    "split_strategy": "param_wise",
+    "max_workers": 8,
+    "data_dispatch": "auto",
+    "priority": 0,
+    "timeout": 3600,
+    "retry_count": 0,
+    "preemptable": false
   },
-  "trigger": {
-    "type": "interval",
-    "seconds": 3600,
-    "timezone": "UTC"
-  },
-  "catch_up": "latest_only",
-  "enabled": true
+  "trace_id": "trace-abc-123",
+  "created_at": "2026-07-24T10:00:00Z",
+  "created_by": "StockStatClient"
 }
 ```
 
-每个触发实例创建普通 Job，并使用 `schedule_id + scheduled_at` 作为内部幂等键。支持 `manual`、`interval`、`cron` 三种 trigger；不接受任意 capability、任意 DAG 或用户代码。
+### 4.6 序列化
 
-## 8. JobEvent 与 SSE
+所有三段都是 JSON 可序列化的：
 
-### 8.1 Event schema
+```python
+spec = TaskSpec(...)
+d = spec.to_dict()              # JSON dict
+restored = TaskSpec.from_dict(d)  # roundtrip
+```
+
+bytes 载荷（如策略 cloudpickle）通过 `strategy_ref = "cloudpickle:base64..."` 引用，不嵌入 TaskSpec。
+
+---
+
+## 5. Codec 编码层
+
+### 5.1 Codec 注册表
+
+| Codec | media_type | 用途 | 依赖 | 状态 |
+|-------|-----------|------|------|------|
+| `JsonCodec` | `application/json` | 控制面、TaskSpec | 标准库 | ✅ |
+| `ArrowCodec` | `application/vnd.apache.arrow.file` | 表格数据 | pyarrow | ✅ |
+| `ParquetCodec` | `application/vnd.apache.parquet` | 大数据持久化 | pyarrow | ✅ |
+| `CsvCodec` | `text/csv` | CSV 导出 | pandas | ✅ |
+| `CloudpickleCodec` | `application/vnd.python.cloudpickle` | 策略闭包 | cloudpickle | ✅ |
+| `MsgpackCodec` | `application/msgpack` | 高效控制面 | msgpack | ✅ |
+| `RawCodec` | `application/octet-stream` | 二进制透传 | 标准库 | ✅ |
+
+### 5.2 工厂函数
+
+```python
+def get_codec(name: str) -> Codec:
+    """按名称获取 codec。"""
+
+def get_codec_for_content_type(content_type: str) -> Codec:
+    """按 MIME 自动选择 codec。"""
+    ct = content_type.lower()
+    if ct == "application/json": return JsonCodec()
+    if ct.startswith("application/vnd.apache.arrow"): return ArrowCodec()
+    if ct.startswith("application/vnd.python.cloudpickle"): return CloudpickleCodec()
+    if ct == "application/msgpack": return MsgpackCodec()
+    if ct.startswith("application/vnd.stockstat.result+"):
+        return get_codec(ct.split("+", 1)[1])
+    return JsonCodec()  # fallback
+```
+
+### 5.3 可选依赖优雅降级
+
+```python
+class CloudpickleCodec:
+    name = "cloudpickle"
+    media_type = "application/vnd.python.cloudpickle"
+
+    def encode(self, data):
+        try:
+            import cloudpickle
+        except ImportError as e:
+            raise ImportError(
+                "CloudpickleCodec requires 'cloudpickle'. "
+                "Install with: pip install stockstat-foundation[compute]"
+            ) from e
+        return cloudpickle.dumps(data)
+```
+
+---
+
+## 6. Transport 传输层
+
+### 6.1 Transport Protocol
+
+```python
+@runtime_checkable
+class Transport(Protocol):
+    name: str
+    def send(self, envelope: Envelope) -> None: ...
+    def receive(self, timeout: Optional[float] = None) -> Envelope: ...
+    def request(self, envelope: Envelope, timeout: Optional[float] = None) -> Envelope: ...
+    def reply(self, original: Envelope, reply: Envelope) -> None: ...
+    def send_data(self, data: bytes, content_type: str) -> str: ...
+    def fetch_data(self, data_ref: str) -> bytes: ...
+    def close(self) -> None: ...
+```
+
+### 6.2 五种实现
+
+| 实现 | 适用 | 特点 | 状态 |
+|------|------|------|------|
+| `InProcessTransport` | 测试 / 单机 | queue.Queue，零序列化 | ✅ |
+| `HttpTransport` | 跨机默认 | REST + JSON，httpx | ✅ |
+| `SharedMemoryTransport` | 同机大数据 | mmap 零拷贝 | ✅ |
+| `RedisTransport` | 多 Worker | pub/sub 解耦 | ✅ |
+| `TcpTransport` | 高性能 LAN | length-prefixed binary | 预留 |
+
+### 6.3 InProcessTransport
+
+```python
+class InProcessTransport:
+    """单进程传输 — queue.Queue + reply 路由。"""
+    name = "in_process"
+
+    def __init__(self, *, encode_envelopes: bool = False):
+        self._inbox = queue.Queue()
+        self._replies: dict[str, queue.Queue] = {}
+        self._peer = None
+
+    def wire_to(self, peer): self._peer = peer
+    def send(self, envelope): ...
+    def receive(self, timeout=None): ...
+    def request(self, envelope, timeout=None): ...
+    def reply(self, original, reply): ...
+    def send_data(self, data, ct) -> str:
+        return f"inline:{base64.b64encode(data).decode('ascii')}"
+    def fetch_data(self, data_ref) -> bytes: ...
+
+
+def make_pair(*, encode_envelopes=False):
+    """创建双向绑定的传输对（测试用）。"""
+    a = InProcessTransport(encode_envelopes=encode_envelopes)
+    b = InProcessTransport(encode_envelopes=encode_envelopes)
+    a.wire_to(b)
+    b.wire_to(a)
+    return a, b
+```
+
+### 6.4 HttpTransport
+
+```python
+class HttpTransport:
+    """HTTP 传输 — REST + JSON 控制面。"""
+    name = "http"
+
+    def __init__(self, base_url: str, *, timeout: int = 30):
+        self._base_url = base_url.rstrip("/")
+        self._client = httpx.Client(timeout=timeout)
+
+    def request(self, envelope, timeout=None):
+        path = messages.TYPE_TO_PATH.get(envelope.type, "/dispatch/message")
+        resp = self._client.post(
+            f"{self._base_url}{path}",
+            content=envelope.encode(),
+            headers={"Content-Type": "application/json"},
+            timeout=timeout or self._timeout,
+        )
+        # 区分 Envelope 响应 vs 普通 JSON
+        try:
+            d = json.loads(resp.content.decode("utf-8"))
+            if d.get("protocol") == "stockstat-rpc":
+                return Envelope.decode(resp.content)
+            return Envelope(type=f"{envelope.type}.reply",
+                            reply_to=envelope.id, payload=d)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return Envelope(payload=resp.content)
+
+    def send_data(self, data, ct) -> str:
+        return f"inline:{base64.b64encode(data).decode('ascii')}"
+```
+
+### 6.5 SharedMemoryTransport
+
+```python
+class SharedMemoryTransport:
+    """同机零拷贝 — 控制面走 underlying，数据面走 mmap。"""
+    name = "shared_memory"
+
+    def __init__(self, underlying=None, *, inline_threshold=10*1024*1024):
+        self._underlying = underlying or InProcessTransport()
+        self._inline_threshold = inline_threshold
+        self._shm_registry: dict[str, object] = {}
+
+    def send_data(self, data, ct) -> str:
+        if len(data) < self._inline_threshold:
+            return f"inline:{base64...}"
+        try:
+            from multiprocessing import shared_memory
+            shm = shared_memory.SharedMemory(
+                name=f"ss_{uuid.uuid4().hex[:16]}",
+                create=True, size=len(data))
+            shm.buf[:len(data)] = data
+            self._shm_registry[shm.name] = shm
+            return f"shm://{shm.name}"
+        except Exception:
+            return f"inline:{base64...}"  # 优雅降级
+
+    def fetch_data(self, data_ref) -> bytes:
+        if data_ref.startswith("inline:"): return base64.b64decode(...)
+        if data_ref.startswith("shm://"):
+            shm_name = data_ref[len("shm://"):]
+            if shm_name in self._shm_registry:
+                return bytes(self._shm_registry[shm_name].buf)
+            # 跨进程 attach
+            from multiprocessing import shared_memory
+            shm = shared_memory.SharedMemory(name=shm_name)
+            data = bytes(shm.buf)
+            shm.close()
+            return data
+```
+
+### 6.6 RedisTransport
+
+```python
+class RedisTransport:
+    """Redis 列表 + pub/sub 传输。"""
+    name = "redis"
+
+    def __init__(self, redis_url, *, node_id=None, queue_prefix="stockstat:node"):
+        import redis
+        self._r = redis.from_url(redis_url)
+        self._node_id = node_id or f"node-{uuid.uuid4().hex[:8]}"
+        self._my_queue = f"{queue_prefix}:{self._node_id}"
+        self._replies = {}
+        self._dispatcher = threading.Thread(target=self._dispatch_loop, daemon=True)
+        self._dispatcher.start()
+
+    def send(self, envelope):
+        peer_id = envelope.reply_to or "dispatcher"
+        self._r.lpush(f"{self._queue_prefix}:{peer_id}", envelope.encode())
+
+    def receive(self, timeout=None):
+        result = self._r.brpop(self._my_queue, timeout=int(timeout or 0))
+        if result is None: return None
+        _, raw = result
+        return Envelope.decode(raw)
+
+    def send_data(self, data, ct) -> str:
+        ref_id = uuid.uuid4().hex
+        self._r.set(f"stockstat:data:{ref_id}", data, ex=3600)
+        return f"redis://{ref_id}"
+
+    def fetch_data(self, data_ref) -> bytes:
+        ref_id = data_ref[len("redis://"):]
+        return self._r.get(f"stockstat:data:{ref_id}")
+```
+
+### 6.7 选择策略
+
+```python
+def build_transport(url: Optional[str] = None, *,
+                    transport: Optional[Transport] = None,
+                    transport_type: str = "auto") -> Transport:
+    if transport is not None: return transport
+    if url is None or transport_type == "in_process":
+        return InProcessTransport()
+    if url.startswith("http://") or url.startswith("https://"):
+        return HttpTransport(url)
+    if url.startswith("shm://"):
+        return SharedMemoryTransport()
+    if url.startswith("redis://") or url.startswith("rediss://"):
+        return RedisTransport(url)
+    if url.startswith("tcp://"):
+        return TcpTransport(url)
+    raise ValueError(f"Unknown transport for URL: {url}")
+```
+
+---
+
+## 7. 数据分发策略
+
+### 7.1 四种策略
+
+| 策略 | `data_dispatch` | 数据路径 | 编码 | 适用 |
+|------|-----------------|---------|------|------|
+| 随任务内联 | `"inline"` | Dispatcher → Worker（随 `dispatch.assign`） | base64 cloudpickle | < 10MB |
+| 共享内存 | `"shared_memory"` | Dispatcher 写入 shm → Worker 通过 ID 读取 | raw bytes | 同机，任意大小 |
+| Storage 引用 | `"storage_ref"` | Worker 直接从 Storage 拉取 | HTTP + Arrow | > 100MB |
+| Dispatcher 流式 | `"stream"` | Dispatcher 通过 WebSocket/TCP 推流 | Arrow IPC stream | 10~100MB |
+| 自动 | `"auto"` | Dispatcher 按大小+拓扑自动选择 | — | 默认 |
+
+### 7.2 自动选择
+
+```python
+SMALL_DATA_THRESHOLD = 10 * 1024 * 1024   # 10 MB
+LARGE_DATA_THRESHOLD = 100 * 1024 * 1024  # 100 MB
+
+
+def choose_data_dispatch(data_size: int, workers_same_host: bool = False,
+                         workers_can_reach_storage: bool = False) -> str:
+    if data_size < SMALL_DATA_THRESHOLD:
+        return "inline"
+    if workers_same_host:
+        return "shared_memory"
+    if data_size > LARGE_DATA_THRESHOLD and workers_can_reach_storage:
+        return "storage_ref"
+    return "stream"
+
+
+def resolve_data_dispatch(spec_dispatch: str, data_size: int, ...) -> str:
+    """如果 spec 显式指定（非 'auto'），原样返回；否则用 choose_data_dispatch。"""
+    if spec_dispatch in ("auto", "", None):
+        return choose_data_dispatch(data_size, ...)
+    return spec_dispatch
+```
+
+### 7.3 数据大小估算
+
+```python
+def estimate_data_size(data) -> int:
+    if isinstance(data, (bytes, bytearray)): return len(data)
+    if isinstance(data, dict):
+        total = 0
+        for v in data.values():
+            if isinstance(v, dict):
+                for df in v.values():
+                    total += _estimate_df_size(df)
+            else:
+                total += _estimate_df_size(v)
+        return total or 1024
+    return _estimate_df_size(data)
+
+
+def _estimate_df_size(df) -> int:
+    if isinstance(df, pd.DataFrame):
+        return df.memory_usage(deep=True).sum()
+    return 1024
+```
+
+### 7.4 Stream 对象（鸭子类型）
+
+```python
+class Stream:
+    """数据流 — 同时支持迭代模式与 collect 模式。
+
+    V2 §13.1: Worker 通过检查函数签名自动决定如何传入：
+    - 签名声明 Stream → 传 Stream 对象（增量计算）
+    - 签名声明 pd.DataFrame → 调用 stream.collect() 传完整 DataFrame
+    """
+    def __init__(self, chunks=None, data=None):
+        self._chunks = chunks
+        self._collected = data
+
+    def __iter__(self):
+        if self._chunks:
+            for chunk in self._chunks:
+                yield chunk
+        elif self._collected is not None:
+            yield self._collected
+
+    def collect(self) -> Any:
+        """返回完整 DataFrame（缓存，幂等）。"""
+        if self._collected is None and self._chunks:
+            import pandas as pd
+            self._collected = pd.concat(list(self._chunks))
+        return self._collected
+
+    @classmethod
+    def from_data(cls, data) -> "Stream":
+        return cls(data=data)
+
+
+def is_stream_aware(handler) -> bool:
+    """检查 handler 签名是否声明 Stream 参数。"""
+    sig = inspect.signature(handler)
+    for param in sig.parameters.values():
+        if param.annotation is Stream or "Stream" in str(param.annotation):
+            return True
+    return getattr(handler, "__stream_aware__", False)
+```
+
+---
+
+## 8. Worker 注册与心跳
+
+### 8.1 注册消息 `dispatch.register`
+
+Worker 首次启动时向 Dispatcher 发送注册消息：
 
 ```json
 {
-  "sequence": 42,
-  "job_id": "0190...",
-  "event_type": "work.succeeded",
-  "occurred_at": "2026-07-20T10:35:00Z",
-  "stage_id": "...",
-  "work_unit_id": "...",
-  "attempt_id": "...",
-  "progress": {"fraction": 0.5},
-  "artifact_refs": [],
-  "error": null,
-  "details": {}
-}
-```
-
-### 8.2 SSE 映射
-
-```text
-id: 42
-event: work.succeeded
-data: {ControlMessage JSON}
-```
-
-Client 使用 `Last-Event-ID: 42` 续读。Dispatcher 至少保证单 Job sequence 严格递增。
-
-### 8.3 事件投递语义
-
-- at-least-once。
-- Client 按 sequence 去重。
-- 断线重连可续读。
-- 事件过保留期返回 410 `EVENT_CURSOR_EXPIRED`，Client 获取当前 Job status 后从最新 sequence 继续。
-- `job.succeeded` 事件发布前，Result Manifest 必须已经持久可读。
-
-### 8.4 Partial result
-
-Partial result 只在事件中放 ArtifactRef：
-
-```json
-{
-  "event_type": "work.partial",
-  "details": {"partial_sequence": 3},
-  "artifact_refs": [
-    {"artifact_id": "...", "kind": "trial_summary_partial", "sha256": "..."}
-  ]
-}
-```
-
-禁止把几 MB DataFrame 直接放在 SSE data 中。
-
-## 9. Result Manifest
-
-### 9.1 通用结构
-
-```json
-{
-  "job_id": "0190...",
-  "capability": {"id": "finance.backtest.run", "version": "1.0"},
-  "result_schema": "stockstat.result.backtest/1",
-  "created_at": "2026-07-20T10:40:00Z",
-  "summary": {
-    "metrics": {"total_return": 0.12, "sharpe": 1.34}
-  },
-  "artifacts": {
-    "equity": {"artifact_id": "...", "sha256": "...", "schema_ref": "stockstat.backtest.equity/1"},
-    "fills": {"artifact_id": "...", "sha256": "...", "schema_ref": "stockstat.backtest.fills/1"}
-  },
-  "reproducibility": {
-    "dataset_snapshot_ids": ["..."],
-    "strategy_digest": "...",
-    "kernel_build_id": "...",
-    "random_seed": 0,
-    "plan_digest": "..."
-  },
-  "warnings": []
-}
-```
-
-### 9.2 返回规则
-
-- Job 未成功：409 `JOB_RESULT_NOT_READY`，错误中包含当前状态。
-- Result Manifest 为小型 JSON，可直接返回。
-- Artifact 内容按需下载。
-- Result Manifest schema 由能力定义，通用外壳不限制金融字段。
-
-## 10. Worker 注册协议
-
-### 10.1 Endpoint
-
-```text
-POST /internal/v31/workers/register
-```
-
-### 10.2 `worker.register`
-
-```json
-{
-  "message_type": "worker.register",
-  "content_schema": "stockstat.worker.register/1",
-  "content": {
-    "worker_id": "persistent-worker-uuid",
-    "worker_session_id": "0190...",
-    "alias": "cpu-farm-beta",
-    "agent_version": "3.1.0",
-    "kernel_build_id": "sha256:...",
-    "python_abi": "cp312",
-    "platform": "linux-x86_64",
-    "resources": {
-      "cpu_cores": 32,
-      "memory_bytes": 137438953472,
-      "scratch_bytes": 1099511627776,
-      "gpus": []
-    },
-    "capabilities": [
-      {
-        "capability_id": "finance.backtest.run",
-        "versions": ["1.0"],
-        "executor_roles": ["execute"],
-        "checkpoint_modes": ["none"],
-        "input_modes": ["materialized"]
+  "type": "dispatch.register",
+  "id": "msg-uuid",
+  "headers": {"content_type": "application/json"},
+  "payload": {
+    "worker_id": "550e8400-e29b-41d4-a716-446655440000",
+    "alias": "gpu-box-alpha",
+    "address": "192.168.1.101",
+    "port": 9100,
+    "concurrency": 8,
+    "hardware": {
+      "cpu": {
+        "model": "AMD Ryzen 9 7950X",
+        "cores_physical": 16,
+        "cores_logical": 32,
+        "threads": 32,
+        "freq_mhz": 4500
       },
-      {
-        "capability_id": "finance.indicator.compute",
-        "versions": ["1.0"],
-        "executor_roles": ["execute", "reduce"],
-        "checkpoint_modes": ["none"],
-        "input_modes": ["materialized", "record_batch_stream"]
-      }
-    ],
-    "labels": {"zone": "east", "pool": "cpu"},
-    "artifact_access_modes": ["https"],
-    "cache": {"capacity_bytes": 536870912000}
+      "memory": {"total_gb": 64.0, "available_gb": 48.5},
+      "gpu": {"devices": [{"model": "NVIDIA RTX 4090", "vram_gb": 24.0}]},
+      "disk": {"total_gb": 2000.0, "available_gb": 1500.0},
+      "os": "Ubuntu 22.04",
+      "python_version": "3.11.4"
+    },
+    "capabilities": ["indicator", "backtest", "grid_search", "batch_backtest",
+                     "monte_carlo", "correlation", "hypothesis_test",
+                     "spectral_analysis", "wavelet", "transfer_entropy",
+                     "mutual_information", "hurst_exponent", "sample_entropy",
+                     "permutation_entropy", "rqa", "grey_relation", "gm11_predict",
+                     "ml_train", "ml_predict", "risk_metrics", ...],
+    "stockstat_version": "3.1.0",
+    "labels": {"rack": "A-12", "zone": "datacenter-east"},
+    "preemptable": true
   }
 }
 ```
 
-### 10.3 `worker.registered`
+**字段说明**：
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `worker_id` | string | 是 | Worker 唯一 ID |
+| `alias` | string | 否 | 用户自定义别名（便于人读） |
+| `address` | string | 是 | Worker 监听地址 |
+| `port` | int | 是 | Worker 监听端口 |
+| `concurrency` | int | 是 | 最大并发任务数 |
+| `hardware` | object | 是 | 硬件配置（见上） |
+| `capabilities` | list[string] | 是 | 支持的 task_type 列表 |
+| `stockstat_version` | string | 是 | Worker 安装的 stockstat 版本 |
+| `labels` | dict | 否 | 用户自定义标签 |
+| `preemptable` | bool | 否 | 是否支持抢占 |
+
+### 8.2 心跳消息 `dispatch.heartbeat`
+
+每 10 秒发送：
 
 ```json
 {
-  "worker_id": "...",
-  "worker_session_id": "...",
-  "state": "ready",
-  "heartbeat_interval_seconds": 10,
-  "default_lease_ttl_seconds": 60,
-  "max_claim_batch": 4,
-  "session_expires_at": "...",
-  "server_time": "..."
-}
-```
-
-### 10.4 注册验证
-
-- `worker_id` 与凭证绑定。
-- 同一 `worker_id` 新 session 注册后，旧 session 的 heartbeat/complete 被拒绝。
-- capability 加载失败的项不得注册。
-- 不仅比较整个 StockStat version，还比较 capability version、Kernel build 和 Python ABI。
-- 同一注册项中的所有 `versions` 必须具有相同 executor/checkpoint/input modes；不同则拆为多个注册项。
-
-## 11. Worker heartbeat 与 desired state
-
-### 11.1 Endpoint
-
-```text
-POST /internal/v31/workers/heartbeat
-```
-
-### 11.2 请求
-
-```json
-{
-  "worker_id": "...",
-  "worker_session_id": "...",
-  "observed_at": "...",
-  "state": "busy",
-  "resources_free": {
-    "cpu_cores": 12,
-    "memory_bytes": 68719476736,
-    "scratch_bytes": 900000000000,
-    "gpus": []
-  },
-  "active_attempt_ids": ["..."],
-  "cache_summary": {
-    "bytes_used": 1000000000,
-    "hot_artifact_digests": ["sha256:..."]
-  },
-  "metrics": {
-    "cpu_percent": 62.5,
-    "memory_used_bytes": 50000000000
+  "type": "dispatch.heartbeat",
+  "id": "msg-uuid",
+  "headers": {"content_type": "application/json"},
+  "payload": {
+    "worker_id": "...",
+    "alias": "gpu-box-alpha",
+    "timestamp": "2026-07-24T10:30:00Z",
+    "load": {
+      "cpu_percent": 37.5,
+      "memory_used_gb": 15.2,
+      "memory_available_gb": 48.8,
+      "gpu_percent": [85.0],
+      "gpu_memory_used_gb": [18.5],
+      "disk_available_gb": 1498.0
+    },
+    "active_tasks": 3,
+    "completed_tasks": 156,
+    "failed_tasks": 2,
+    "avg_task_duration_s": 12.3,
+    "status": "online"
   }
 }
 ```
 
-### 11.3 响应
+### 8.3 Worker 状态机
 
-```json
-{
-  "accepted": true,
-  "desired_state": "ready",
-  "commands": [],
-  "next_heartbeat_seconds": 10,
-  "server_time": "..."
-}
+| status | 含义 | Dispatcher 行为 |
+|--------|------|----------------|
+| `online` | 正常，接受任务 | 正常分发 |
+| `busy` | 活动任务 = concurrency | 不再分发新任务 |
+| `draining` | 优雅下线中 | 等待现有任务完成 |
+| `offline` | 心跳超时（30s）或主动下线 | 从可用列表移除，其任务重新分配 |
+
+### 8.4 心跳超时检测
+
+Dispatcher 后台线程每 10 秒检查所有 Worker：
+
+```python
+def check_timeouts(self) -> list[str]:
+    now = time.time()
+    timed_out = []
+    for w in self._workers.values():
+        if w.status in ("online", "busy"):
+            if now - w.last_heartbeat > self._offline_timeout:
+                w.status = "offline"
+                timed_out.append(w.worker_id)
+    return timed_out
 ```
 
-Admin drain 后，下一次 heartbeat 返回 `desired_state="draining"`。取消具体 Attempt 主要通过 lease renew 响应传达。
+---
 
-## 12. Work claim 与 WorkLease
+## 9. 任务生命周期
 
-### 12.1 Endpoint
-
-```text
-POST /internal/v31/work/claim
-```
-
-这是长轮询请求。无工作时可返回 200 空列表和 retry hint，或 204；统一 SDK adapter 推荐 200 typed reply。
-
-### 12.2 `work.claim`
-
-```json
-{
-  "worker_id": "...",
-  "worker_session_id": "...",
-  "max_items": 2,
-  "wait_seconds": 20,
-  "resources_free": {
-    "cpu_cores": 8,
-    "memory_bytes": 34359738368,
-    "scratch_bytes": 100000000000,
-    "gpus": []
-  },
-  "cache_hints": ["sha256:dataset-a"]
-}
-```
-
-### 12.3 `work.claim.reply`
-
-```json
-{
-  "leases": [
-    {
-      "job_id": "...",
-      "stage_id": "...",
-      "work_unit_id": "...",
-      "attempt_id": "...",
-      "lease_generation": 3,
-      "lease_token": "opaque-secret-token",
-      "lease_expires_at": "2026-07-20T10:31:00Z",
-      "renew_after_seconds": 20,
-      "work": {
-        "capability": {"id": "finance.backtest.run", "version": "1.0"},
-        "executor_role": "execute",
-        "parameters": {},
-        "inputs": [
-          {"name": "market_data", "artifact": {"artifact_id": "...", "sha256": "..."}}
-        ],
-        "partition": {"index": 3, "count": 8, "payload": {}},
-        "resources": {"cpu_cores": 1, "memory_bytes": 2147483648},
-        "random_seed": 1003,
-        "deadline_at": "...",
-        "checkpoint": null,
-        "output_contract": {"result_schema": "stockstat.result.backtest-trial/1"}
-      }
-    }
-  ],
-  "retry_after_ms": 250,
-  "server_time": "..."
-}
-```
-
-### 12.4 Lease 字段语义
-
-| 字段 | 作用 |
-|---|---|
-| `attempt_id` | 本次实际执行身份 |
-| `lease_generation` | WorkUnit 单调 fencing 值 |
-| `lease_token` | 认证本次租约的 opaque secret |
-| `lease_expires_at` | 未续租则失效 |
-| `renew_after_seconds` | 建议续租周期 |
-
-`lease_token` 不得记录到普通日志或事件。
-
-`executor_role` 是 Dispatcher Planner 生成的内部执行角色，首版只能是 `execute` 或 `reduce`。它不出现在公共 JobSpec 中，也不构成独立 capability；该字段持久化并参与 plan digest，Worker 必须同时校验 capability version 和 role。
-
-## 13. Attempt 消息
-
-所有 Attempt 请求公共字段：
-
-```json
-{
-  "worker_id": "...",
-  "worker_session_id": "...",
-  "attempt_id": "...",
-  "work_unit_id": "...",
-  "lease_generation": 3,
-  "lease_token": "..."
-}
-```
-
-### 13.1 `work.start`
-
-Endpoint：
-
-```text
-POST /internal/v31/attempts/{attempt_id}/start
-```
-
-附加字段：`started_at`、`executor_pid`、已解析输入 digests。重复 start 幂等。
-
-### 13.2 `work.renew`
-
-Endpoint：
-
-```text
-POST /internal/v31/attempts/{attempt_id}/renew
-```
-
-请求附加：
-
-```json
-{
-  "progress": {"fraction": 0.4, "completed_units": 40, "total_units": 100},
-  "resources_used": {"cpu_percent": 95, "memory_bytes": 1000000000},
-  "checkpoint": null,
-  "last_partial_sequence": 2
-}
-```
-
-响应：
-
-```json
-{
-  "accepted": true,
-  "lease_expires_at": "...",
-  "action": "continue",
-  "reason": null
-}
-```
-
-`action`：
-
-```text
-continue
-cancel
-checkpoint_and_stop
-```
-
-### 13.3 `work.partial`
-
-Endpoint：
-
-```text
-POST /internal/v31/attempts/{attempt_id}/partial
-```
-
-附加字段：
-
-```json
-{
-  "partial_sequence": 3,
-  "artifacts": [{"artifact_id": "...", "sha256": "..."}],
-  "summary": {"completed_trials": 25}
-}
-```
-
-同一 Attempt 的 `partial_sequence` 单调递增；重复 sequence + 相同 digest 幂等，内容冲突返回 409。
-
-### 13.4 `work.complete`
-
-Endpoint：
-
-```text
-POST /internal/v31/attempts/{attempt_id}/complete
-```
-
-请求：
-
-```json
-{
-  "completion_id": "0190...",
-  "completed_at": "...",
-  "result": {
-    "result_schema": "stockstat.result.backtest-trial/1",
-    "summary": {"sharpe": 1.23},
-    "artifacts": [{"artifact_id": "...", "sha256": "..."}]
-  },
-  "stats": {
-    "duration_ms": 12345,
-    "cpu_time_ms": 12000,
-    "peak_memory_bytes": 1000000000
-  }
-}
-```
-
-响应：
-
-```json
-{
-  "accepted": true,
-  "work_unit_state": "succeeded",
-  "job_state": "running"
-}
-```
-
-条件：
-
-- Attempt 是 WorkUnit 当前有效 Attempt。
-- generation/token/session 匹配。
-- Artifact 已 commit 且 digest 可查。
-- result schema 匹配 output contract。
-
-重复 `completion_id` 返回同一 ack。旧 Attempt 返回 409 `STALE_ATTEMPT`，不得改变 Job。
-
-### 13.5 `work.fail`
-
-Endpoint：
-
-```text
-POST /internal/v31/attempts/{attempt_id}/fail
-```
-
-请求：
-
-```json
-{
-  "failure_id": "0190...",
-  "failed_at": "...",
-  "error": {
-    "code": "NUMERICAL_FAILURE",
-    "category": "compute",
-    "message": "covariance matrix is not positive semidefinite",
-    "retryable": false,
-    "details": {},
-    "causes": []
-  },
-  "log_artifact": {"artifact_id": "...", "sha256": "..."},
-  "checkpoint": null
-}
-```
-
-Dispatcher 结合 worker suggestion、错误分类和 ExecutionPolicy 决定：
-
-- `retry_scheduled`，返回 `not_before`。
-- `work_failed_terminal`。
-- `job_failed`。
-
-### 13.6 `work.release`
-
-Worker 在尚未开始、无法满足本地资源或输入准备暂时失败时释放租约：
-
-```text
-POST /internal/v31/attempts/{attempt_id}/release
-```
-
-释放不计为计算失败，但有频率限制和调度惩罚，避免 Worker 不断领取后拒绝。
-
-## 14. Lease 与故障语义
-
-### 14.1 Lease 到期
-
-```mermaid
-sequenceDiagram
-    participant W1 as Worker 1
-    participant D as Dispatcher
-    participant W2 as Worker 2
-
-    D-->>W1: lease generation=1
-    W1->>W1: compute
-    Note over W1,D: network lost, lease expires
-    D-->>W2: retry lease generation=2
-    W2->>D: complete generation=2
-    D-->>W2: accepted
-    W1->>D: late complete generation=1
-    D-->>W1: 409 STALE_ATTEMPT
-```
-
-### 14.2 Worker heartbeat 丢失
-
-Worker session offline 不必立即使所有 Lease 失效；以每个 Lease expiry 为准。这样短暂 heartbeat 抖动不误杀正在续租的 Attempt。若 heartbeat 与 renew 共用连接全部中断，Lease 自然到期。
-
-### 14.3 Dispatcher 重启
-
-Lease、Attempt 和 expiry 持久化。新副本恢复后：
-
-- 未到期 Lease 继续有效。
-- Worker 可继续 renew。
-- 已到期 Lease 由 reaper 重新排队。
-- complete 仍按 generation 条件提交。
-
-### 14.4 Artifact 上传完成但 complete 未提交
-
-Artifact 暂时无 Job 引用。Worker 重试 complete；若 Attempt 最终 stale，Artifact 按 orphan retention GC。
-
-## 15. Storage Snapshot 协议
-
-### 15.1 创建快照
-
-Endpoint：
-
-```text
-POST /internal/v31/snapshots
-```
-
-请求：
-
-```json
-{
-  "request_id": "0190...",
-  "selector": {
-    "instruments": [{"asset_class": "crypto", "symbol": "BTC/USDT", "venue": "binance"}],
-    "timeframe": "1h",
-    "start": "2024-01-01T00:00:00Z",
-    "end": "2025-01-01T00:00:00Z",
-    "fields": ["open", "high", "low", "close", "volume"],
-    "source_policy": {"mode": "exact", "source": "binance"},
-    "snapshot_policy": "pin_on_submit"
-  },
-  "purpose": {"job_id": "...", "input_name": "market_data"}
-}
-```
-
-响应可能同步返回已存在 snapshot，或 202 返回 preparation handle。首版建议小/中数据同步构建，大数据内部异步但 Dispatcher 等待状态，不把 Storage preparation 暴露为新的用户 Job。
-
-### 15.2 Snapshot response
-
-```json
-{
-  "dataset_snapshot_id": "...",
-  "selector_digest": "sha256:...",
-  "artifact": {
-    "artifact_id": "...",
-    "kind": "market_data_snapshot",
-    "media_type": "application/vnd.apache.arrow.stream",
-    "codec": "arrow-ipc-stream",
-    "size_bytes": 52428800,
-    "sha256": "...",
-    "schema_ref": "stockstat.market.ohlcv/1",
-    "locator": "artifact://sha256/..."
-  },
-  "row_count": 44000,
-  "resolved_range": {"start": "...", "end": "..."},
-  "lineage": {"ingest_batch_ids": ["..."]},
-  "created_at": "..."
-}
-```
-
-## 16. Artifact 协议
-
-### 16.1 ArtifactRef
-
-完整字段：
-
-```json
-{
-  "artifact_id": "0190...",
-  "kind": "work_result",
-  "media_type": "application/vnd.apache.arrow.stream",
-  "codec": "arrow-ipc-stream",
-  "compression": "zstd",
-  "size_bytes": 123456,
-  "sha256": "64-hex",
-  "schema_ref": "stockstat.backtest.equity/1",
-  "locator": "artifact://sha256/64-hex",
-  "created_at": "...",
-  "expires_at": null
-}
-```
-
-控制消息中的简写 ArtifactRef 至少包含 `artifact_id` 和 `sha256`；服务端可补全 metadata。
-
-### 16.2 上传
-
-1. `POST /internal/v31/artifacts/uploads`。
-2. 响应 `upload_id`、`part_size`、upload URL。
-3. `PUT`/multipart 上传 bytes。
-4. `POST /internal/v31/artifacts/uploads/{upload_id}/commit`。
-5. Storage 校验并返回 ArtifactRef。
-
-Commit 请求：
-
-```json
-{
-  "commit_id": "0190...",
-  "kind": "work_result",
-  "media_type": "application/vnd.apache.arrow.stream",
-  "codec": "arrow-ipc-stream",
-  "compression": "zstd",
-  "size_bytes": 123456,
-  "sha256": "...",
-  "schema_ref": "stockstat.backtest.equity/1",
-  "lineage": {
-    "job_id": "...",
-    "work_unit_id": "...",
-    "attempt_id": "...",
-    "input_artifact_digests": ["..."]
-  }
-}
-```
-
-### 16.3 下载
-
-1. `POST /internal/v31/artifacts/{artifact_id}/download-session`。
-2. 返回限时 URL、size、digest、headers。
-3. Consumer 使用 HTTP Range/streaming 下载。
-4. Consumer 校验 size 和 SHA-256。
-
-### 16.4 数据 media types
-
-| media type | 用途 |
-|---|---|
-| `application/vnd.apache.arrow.stream` | 默认表格流 |
-| `application/vnd.apache.arrow.file` | 可 mmap 的固定 Arrow 文件 |
-| `application/vnd.apache.parquet` | 归档/分析结果 |
-| `application/vnd.stockstat.manifest+json` | 结果、快照、策略 manifest |
-| `application/vnd.python.wheel` | Python 策略 wheel |
-| `application/zip` | 受控 source/model bundle |
-| `application/octet-stream` | 其他明确 schema 的 bytes |
-
-### 16.5 不允许的路径
-
-- JSON base64 DataFrame。
-- Redis value 保存大型 DataFrame 作为主路径。
-- `file://` 路径跨主机传递。
-- `shm://` 由远程 Client 构造。
-- cloudpickle strategy/result。
-
-本地 ArtifactChannel 可在内部把 logical Artifact 映射到文件/mmap，但不会改变 ArtifactRef 公共语义。
-
-## 17. Cluster 与 capability 查询
-
-### 17.1 `/v31/capabilities`
-
-返回金融能力，而非 Python handler 名：
-
-```json
-{
-  "capabilities": [
-    {
-      "id": "finance.backtest.run",
-      "versions": ["1.0"],
-      "parameter_schema": "stockstat.finance.backtest.run.params/1",
-      "result_schema": "stockstat.result.backtest/1",
-      "available_workers": 4,
-      "resource_profiles": ["cpu"]
-    }
-  ]
-}
-```
-
-### 17.2 `/v31/cluster`
-
-```json
-{
-  "dispatcher": {
-    "logical_id": "cluster-main",
-    "service_version": "3.1.0",
-    "replicas": 2,
-    "state": "healthy"
-  },
-  "workers": [
-    {
-      "worker_id": "...",
-      "alias": "cpu-farm-beta",
-      "state": "ready",
-      "last_heartbeat_at": "...",
-      "resources_total": {},
-      "resources_free": {},
-      "capabilities": ["finance.backtest.run@1.0"],
-      "labels": {"zone": "east"},
-      "active_attempts": 3
-    }
-  ],
-  "summary": {
-    "ready_workers": 4,
-    "draining_workers": 0,
-    "queued_work_units": 12,
-    "leased_work_units": 8
-  }
-}
-```
-
-敏感硬件详情只对授权 Admin 返回。普通 Client 只需可用能力和聚合资源。
-
-## 18. 错误协议
-
-### 18.1 Error object
-
-```json
-{
-  "code": "STALE_ATTEMPT",
-  "category": "infrastructure",
-  "message": "attempt no longer owns the current work lease",
-  "retryable": false,
-  "error_id": "0190...",
-  "trace_id": "...",
-  "details": {
-    "attempt_id": "...",
-    "work_unit_id": "..."
-  },
-  "causes": []
-}
-```
-
-### 18.2 Error response
-
-错误也使用 ControlMessage：
-
-```json
-{
-  "message_type": "error",
-  "correlation_id": "<request message id>",
-  "content_schema": "stockstat.error/1",
-  "content": {"error": {}}
-}
-```
-
-### 18.3 HTTP 状态映射
-
-| HTTP | 典型错误 |
-|---|---|
-| 400 | malformed request、时间范围错误 |
-| 401 | 未认证 |
-| 403 | scope/租户/策略包不允许 |
-| 404 | Job/Artifact/Worker 不存在 |
-| 409 | idempotency conflict、result not ready、stale attempt、state conflict |
-| 410 | event cursor/artifact 已过保留期 |
-| 413 | 控制消息或上传超过限额 |
-| 422 | capability 参数 schema 验证失败 |
-| 429 | quota/rate limit |
-| 500 | 未分类内部错误 |
-| 503 | 暂时不可用，可按 Retry-After 重试 |
-
-### 18.4 关键错误码
-
-```text
-PROTOCOL_VERSION_UNSUPPORTED
-MESSAGE_SCHEMA_INVALID
-CAPABILITY_NOT_FOUND
-CAPABILITY_VERSION_UNAVAILABLE
-CAPABILITY_PARAMETER_INVALID
-IDEMPOTENCY_CONFLICT
-JOB_NOT_FOUND
-JOB_RESULT_NOT_READY
-JOB_ALREADY_TERMINAL
-DATA_NOT_FOUND
-DATA_SNAPSHOT_FAILED
-ARTIFACT_NOT_FOUND
-ARTIFACT_INTEGRITY_FAILED
-ARTIFACT_UPLOAD_INCOMPLETE
-WORKER_SESSION_STALE
-WORKER_CAPABILITY_MISMATCH
-RESOURCE_INSUFFICIENT
-LEASE_EXPIRED
-STALE_ATTEMPT
-ATTEMPT_ALREADY_COMPLETED
-COMPUTE_FAILED
-NUMERICAL_FAILURE
-DEADLINE_EXCEEDED
-QUOTA_EXCEEDED
-UNAUTHORIZED_STRATEGY
-```
-
-## 19. 重试策略
-
-### 19.1 Client 重试
-
-安全重试：
-
-- `GET` 查询。
-- 带 Idempotency-Key 的 `POST /jobs`。
-- 幂等 cancel。
-- upload part。
-- commit_id 固定的 Artifact commit。
-
-Client 仅对网络失败、429、503 和标记 retryable 的 infrastructure error 自动退避。参数/金融计算错误不自动重试。
-
-### 19.2 Worker 重试
-
-- heartbeat/claim 可无限带 jitter 退避，但 session 过期后重新注册。
-- renew 在 lease 到期前积极重试；过期后停止提交有效结果。
-- complete/fail 使用固定 completion/failure ID 重试。
-- Artifact upload 按 upload session 续传。
-
-### 19.3 Dispatcher Work 重试
-
-新重试创建新 Attempt 和 generation。`max_attempts` 包含首次 Attempt。退避时间写入 `not_before`，服务重启后不丢失。
-
-错误默认策略：
-
-| category | 默认 |
-|---|---|
-| validation/security | terminal |
-| data not found/quality | terminal |
-| numerical/strategy exception | terminal，除非 capability 明确 |
-| worker lost/lease expired | retry |
-| artifact/storage transient | retry |
-| deadline exceeded | terminal expired |
-
-## 20. 安全协议
-
-### 20.1 传输安全
-
-- 跨机强制 TLS。
-- Worker 建议 mTLS 或短期 workload token。
-- Client 使用 OAuth2/JWT/API token。
-- Embedded Channel 使用进程内身份，不跳过授权单元测试。
-
-### 20.2 Scope
-
-建议 scopes：
-
-```text
-jobs:submit
-jobs:read
-jobs:cancel
-artifacts:upload
-artifacts:read
-data:read
-data:ingest
-cluster:read
-cluster:admin
-worker:register
-worker:claim
-worker:complete
-```
-
-### 20.3 策略包
-
-- StrategyRef 包含 digest 和 signature metadata。
-- Dispatcher 验证提交者权限和 trust policy。
-- Worker 下载后再次校验 digest/signature。
-- 策略包不能通过 JSON inline 或 pickle 发送。
-
-### 20.4 Replay 防护
-
-- message ID 用于审计，不单独充当认证。
-- Worker lease token 有 session、attempt、expiry 绑定。
-- complete 的 completion ID 幂等，但仍需当前 fencing 条件。
-- 签名 upload/download URL 短期有效。
-
-## 21. 可观测性
-
-### 21.1 Trace
-
-使用 W3C Trace Context。Span 层次：
-
-```text
-job.submit
-job.plan
-dataset.snapshot
-stage.execute
-work.claim
-attempt.execute
-artifact.download
-artifact.upload
-work.complete
-job.finalize
-```
-
-### 21.2 Metrics
-
-统一低基数标签，不能把 `job_id` 作为 Prometheus label。关键指标：
-
-```text
-jobs_submitted_total
-jobs_terminal_total{state,capability}
-job_queue_wait_seconds
-job_duration_seconds
-work_units_ready
-work_lease_seconds
-work_retries_total{reason}
-stale_attempt_completions_total
-worker_resources_free
-artifact_bytes_uploaded_total
-artifact_bytes_downloaded_total
-snapshot_cache_hits_total
-```
-
-### 21.3 日志
-
-结构化日志字段可含 IDs 和 digest，不含 lease token、认证 token、策略源码或大型参数。完整 traceback 受限保存并通过 `error_id` 关联。
-
-## 22. 协议时序
-
-### 22.1 完整任务
+### 9.1 完整时序
 
 ```mermaid
 sequenceDiagram
     participant C as Client
     participant D as Dispatcher
     participant S as Storage
-    participant A as Artifact Store
     participant W as Worker
 
-    C->>D: job.submit + Idempotency-Key
-    D-->>C: job.accepted
-    D->>S: create DatasetSnapshot
-    S->>A: publish Arrow snapshot
-    A-->>S: ArtifactRef
-    S-->>D: Snapshot Manifest
+    Note over C,D: 阶段1: 提交 (轻量控制)
+    C->>D: POST /dispatch/submit (TaskSpec JSON)
+    D-->>C: {task_id, status: "pending", n_slices}
 
-    W->>D: work.claim(free resources)
-    D-->>W: WorkLease + input ArtifactRefs
-    W->>A: download/verify inputs
-    W->>D: work.start
+    Note over D,S: 阶段2: 预取数据 (1次拉取)
+    D->>S: GET /api/v1/ohlcv?symbol=...
+    S-->>D: data.stream (Arrow IPC binary)
+    D->>D: 写入 DataCache (cache://key)
 
-    loop lease active
-        W->>D: work.renew(progress)
-        D-->>W: continue + new expiry
+    Note over D,W: 阶段3: 分发任务+数据
+    D->>D: 分片 (grid 1000组 → 8片)
+    loop 每个分片
+        W->>D: POST /dispatch/assign
+        D-->>W: {task_spec, data_ref, data (base64)}
     end
 
-    W->>A: upload/commit result Artifact
-    A-->>W: ArtifactRef
-    W->>D: work.complete(token, result refs)
-    D-->>W: accepted
-    D->>D: finalize Result Manifest + event
-    D-->>C: SSE job.succeeded
-    C->>D: GET result manifest
-    C->>A: download requested result Artifact
+    Note over W: 阶段4: 计算 (进程内, 复用 Compute)
+    W->>W: BacktestEngine(data, strategy).run()
+
+    Note over W,D: 阶段5: 回传结果 (轻量, 可流式)
+    W->>D: POST /dispatch/partial (可选)
+    W->>D: POST /dispatch/complete {result (base64)}
+
+    Note over D: 阶段6: 合并
+    D->>D: 合并 N 个分片
+
+    Note over C,D: 阶段7: 返回结果
+    C->>D: GET /dispatch/result/{id}
+    D-->>C: {result (base64 cloudpickle)}
+
+    Note over W,D: 心跳 (定时)
+    W->>D: POST /dispatch/heartbeat
 ```
 
-### 22.2 参数搜索 fan-out/fan-in
+### 9.2 状态机
 
-```mermaid
-sequenceDiagram
-    participant D as Dispatcher
-    participant W1 as Worker 1
-    participant W2 as Worker 2
-    participant WR as Reducer Worker
-    participant A as Artifact Store
-
-    D-->>W1: backtest batch lease 1
-    D-->>W2: backtest batch lease 2
-    W1->>A: trial summary artifact 1
-    W2->>A: trial summary artifact 2
-    W1->>D: complete 1
-    W2->>D: complete 2
-    D-->>WR: reducer lease with summary refs
-    WR->>A: ranking artifact
-    WR->>D: reducer complete
-    D->>D: job.succeeded
+```
+pending -> running -> completed
+   |         |
+   |         |--> failed
+   |         |
+   |         +--> cancelled (Client 取消 / Worker 超时)
+   |
+   +--> cancelled (调度前取消)
 ```
 
-## 23. Embedded 映射
+### 9.3 进度推送
 
-| 逻辑协议 | Embedded 实现 |
-|---|---|
-| `/v31/jobs` | 直接调用 Dispatcher Command Handler |
-| SSE | 读取本地 Event Log iterator |
-| Snapshot API | 调用 Storage service object |
-| Artifact upload | 原子写本地 content-addressed 文件 |
-| Work claim | Local Worker Agent 调相同 Lease service |
-| Arrow download | 本地文件/mmap |
+Worker 在长时间任务中通过 `on_progress(completed, total)` 回调：
 
-Embedded 模式不允许：
+```python
+def on_progress(completed, total):
+    if self._worker:
+        self._worker._send_partial(spec.task_id, {
+            "completed": completed,
+            "total": total,
+            "progress": completed / total if total > 0 else 0,
+        })
+```
 
-- 跳过 Job/Work 状态机。
-- 直接调用 `BacktestEngine` 返回对象。
-- 使用不同错误类型和结果结构。
-- 忽略 Artifact digest。
+Dispatcher 缓存在 `state.stream_partials`，Client 通过 `task.stream_results()` 消费。
 
-## 24. 协议测试
+---
 
-### 24.1 Schema/golden tests
+## 10. 错误处理与重试
 
-- 每种消息 valid/invalid fixture。
-- ControlMessage canonical JSON。
-- JobSpec、Worker register、WorkLease、complete、error golden files。
-- 未知 major/minor 字段行为。
+### 10.1 错误场景
 
-### 24.2 HTTP conformance
+| 场景 | 消息 | 处理 |
+|------|------|------|
+| Worker 计算崩溃 | `dispatch.fail` {error, traceback} | 标记 FAILED；可选重试 |
+| Worker 心跳超时 | 无心跳 30s | 标记 Worker offline；其任务可重新分配 |
+| Worker 超时 | `dispatch.complete` 未在 timeout 内到达 | 取消该分片，重新分配 |
+| Dispatcher 崩溃 | Client 轮询超时 | Client 向备用 Dispatcher 重试 |
+| Storage 不可达 | `data.fetch` 失败 | 返回 `task.error` |
+| 数据解码失败 | Worker 解码 Arrow 失败 | `dispatch.fail` {error: "codec_error"} |
+| 协议不兼容 | 协商失败 | `task.error` {error_code: "PROTOCOL_MISMATCH"} |
+| 无 Worker 支持该 task_type | capability 不匹配 | `task.error` {error_code: "WORKER_CAPABILITY_INSUFFICIENT"} |
 
-- content type/version。
-- 状态码与 Error object。
-- Idempotency-Key。
-- ETag/revision 可选并发查询。
-- SSE reconnect/Last-Event-ID。
-- Range download。
+### 10.2 错误消息格式
 
-### 24.3 Lease model tests
+```json
+{
+  "type": "task.error",
+  "headers": {"content_type": "application/json", "trace_id": "trace-xyz"},
+  "payload": {
+    "task_id": "task-2024-001",
+    "slice_id": "slice-3",
+    "error_code": "COMPUTE_FAILED",
+    "error_message": "BacktestError: insufficient data for window=50",
+    "context": {"task_type": "backtest", "symbol": "BTC/USDT"},
+    "recoverable": false,
+    "traceback": "...",
+    "retryable": false
+  }
+}
+```
 
-- claim/renew/complete 正常链路。
-- lease expiry 后 retry generation 增加。
-- 迟到 complete 返回 stale。
-- complete 响应丢失后相同 completion ID 重试。
-- cancel/complete race。
+### 10.3 RetryPolicy
 
-### 24.4 Artifact tests
+```python
+@dataclass
+class RetryPolicy:
+    """Exponential backoff retry policy。"""
+    max_retries: int = 3
+    backoff_base: float = 1.0
+    backoff_factor: float = 2.0
+    max_backoff: float = 60.0
 
-- multipart upload/commit。
-- digest mismatch。
-- Range 和断点续传。
-- orphan GC。
-- Arrow schema round-trip。
+    def should_retry(self, error: dict, attempt: int) -> bool:
+        if attempt >= self.max_retries:
+            return False
+        return error.get("retryable", False)
 
-### 24.5 Cross-channel tests
+    def next_delay(self, attempt: int) -> float:
+        delay = self.backoff_base * (self.backoff_factor ** attempt)
+        return min(delay, self.max_backoff)
+```
 
-同一 fixture 经 HTTP 和 Embedded Channel：
+**用法**：
 
-- 生成相同状态变化。
-- 返回相同 Error code。
-- Result Manifest 语义一致。
-- 强制序列化模式下无隐藏 Python 对象。
+```python
+policy = RetryPolicy(max_retries=3, backoff_base=1.0)
+if policy.should_retry(error, attempt=2):
+    time.sleep(policy.next_delay(2))
+    re_enqueue_slice()
+```
 
-### 24.6 Security tests
+---
 
-- Worker session replay。
-- lease token 泄露防日志测试。
-- 未授权 Artifact read。
-- Strategy digest/signature 篡改。
-- zip slip/path traversal。
-- 超大控制消息和 fan-out 限额。
+## 11. 协议优化
 
-## 25. 与 V3 协议的关键差异
+### 11.1 流式结果（V2 §13.2）
 
-| V3 | V3.1 |
-|---|---|
-| Envelope payload 可为 bytes/Any | Control content 仅类型化 JSON |
-| JSON 自动 fallback Msgpack | 显式 media type，不自动猜测 |
-| cloudpickle 策略和结果 | 策略包 + Result Manifest/Arrow |
-| base64 内联 DataFrame | ArtifactRef + byte stream |
-| `TaskSpec` 巨型 ComputeSpec | capability-specific schema |
-| task/slice ID 后缀 | Job/Stage/WorkUnit/Attempt 独立 ID |
-| Worker heartbeat 代表任务所有权 | 每个 Attempt 独立 Lease |
-| retry_count 字段但无可靠实现 | generation/fencing + 持久 retry policy |
-| Dispatcher 内存合并 Python 对象 | Reducer WorkUnit 合并 Artifacts |
-| Redis/SHM 被当作公开 Transport | Redis/SHM 仅内部 adapter |
-| progress 轮询内存列表 | 持久事件 + SSE sequence |
-| 多级消息原样转发设想 | 首版单逻辑 Dispatcher HA |
+Worker 每完成一部分发送 `dispatch.partial`：
 
-## 26. 验收标准
+```
+Worker → POST /dispatch/partial {slice_id, {progress: 0.25, completed: 25, total: 100}}
+Worker → POST /dispatch/partial {slice_id, {progress: 0.5, completed: 50, total: 100}}
+Worker → POST /dispatch/complete {result (base64)}
+```
 
-- 所有跨进程控制内容为版本化 JSON schema。
-- 所有大型数据通过 ArtifactRef 和字节流传输。
-- Job submit、Artifact commit、Work complete 可安全重试。
-- Worker 所有结果提交受 current Attempt fencing 保护。
-- Client 可用 SSE 断线续读进度和 partial refs。
-- HTTP 与 Embedded Channel 通过同一协议合同套件。
-- 协议不包含具体指标、回测参数字段，也不接受任意 custom payload。
+Client `task.stream_results()` 迭代消费：
+
+```python
+def stream_results(self, task_id):
+    state = self._get_state(task_id)
+    self.wait(task_id)
+    for p in state.partials:
+        yield p
+    if not state.partials or state.partials[-1] is not state.result:
+        yield state.result
+```
+
+### 11.2 鸭子类型检测（V2 §13.1）
+
+Worker 通过 `is_stream_aware(handler)` 检查 handler 签名：
+
+```python
+def dispatch(spec, data, on_progress=None):
+    handler = HANDLERS.get(spec.compute_spec.task_type)
+    if is_stream_aware(handler):
+        stream = Stream.from_data(data)
+        return handler(spec, stream, on_progress=on_progress)
+    return handler(spec, data, on_progress=on_progress)
+```
+
+### 11.3 抢占（V2 §13.3）
+
+```python
+# Dispatcher.preempt(slice_id, worker_id)
+state.info.state = TaskState.PENDING  # 回到 pending
+state.assigned.pop(slice_id, None)
+return {"status": "preempted"}
+
+# Worker.preempt(slice_id) — 协作式
+self._preempted.add(slice_id)
+return True  # handler 必须定期检查并优雅退出
+```
+
+**关键**：Python 线程无法强制 kill，handler 必须主动检查 `_preempted` 并保存 checkpoint 后退出。
+
+### 11.4 弹性伸缩（V2 §13.4）
+
+- `dispatch.drain` → Worker 优雅下线
+- `cluster.discover` → Worker 自动发现 Dispatcher
+- Autoscaler 监控 `/dispatch/autoscaler`：
+
+```json
+{
+    "queue_depth": 15,
+    "active_tasks": 8,
+    "total_concurrency": 8,
+    "available_concurrency": 0,
+    "online_workers": 1,
+    "scale_up_recommended": true,
+    "scale_down_recommended": false
+}
+```
+
+### 11.5 协议瘦身（V2 §13.5）
+
+- `headers.encoding = "msgpack"` 切换为 MessagePack
+- 心跳消息比 JSON 小 15-30%
+- 大数据（含二进制）msgpack 优势更明显（不需 base64 膨胀）
+
+---
+
+## 12. 版本协商
+
+Client 在 `task.submit` 声明支持的版本和编码：
+
+```json
+{
+  "headers": {
+    "protocol_version": "1.0",
+    "accepted_codecs": ["arrow", "parquet", "json", "cloudpickle"],
+    "accepted_encodings": ["json", "msgpack"]
+  }
+}
+```
+
+Dispatcher 在 `task.ack` 返回实际使用的版本与 codec：
+
+```json
+{
+  "type": "task.ack",
+  "headers": {
+    "protocol_version": "1.0",
+    "content_type": "application/json"
+  },
+  "payload": {
+    "task_id": "...",
+    "status": "pending",
+    "negotiated_codec": "arrow",
+    "negotiated_encoding": "msgpack"
+  }
+}
+```
+
+不兼容时返回 `task.error`：
+
+```json
+{
+  "type": "task.error",
+  "payload": {
+    "error_code": "PROTOCOL_MISMATCH",
+    "error_message": "Server cannot satisfy accepted_codecs=['protobuf']"
+  }
+}
+```
+
+---
+
+## 13. HTTP 路径映射
+
+### 13.1 TYPE_TO_PATH
+
+```python
+TYPE_TO_PATH = {
+    TASK_SUBMIT: "/dispatch/submit",
+    TASK_STATUS: "/dispatch/status",
+    TASK_RESULT: "/dispatch/result",
+    TASK_CANCEL: "/dispatch/cancel",
+    CLUSTER_INFO: "/dispatch/cluster",
+    DISPATCH_REGISTER: "/dispatch/register",
+    DISPATCH_HEARTBEAT: "/dispatch/heartbeat",
+    DISPATCH_UNREGISTER: "/dispatch/unregister",
+    DISPATCH_ASSIGN: "/dispatch/assign",
+    DISPATCH_COMPLETE: "/dispatch/complete",
+    DISPATCH_FAIL: "/dispatch/fail",
+    DISPATCH_PARTIAL: "/dispatch/partial",
+    DISPATCH_PREEMPT: "/dispatch/preempt",
+    DISPATCH_RESUME: "/dispatch/resume",
+    DISPATCH_DRAIN: "/dispatch/drain",
+    CLUSTER_DISCOVER: "/dispatch/discover",
+    DATA_FETCH: "/api/v1/ohlcv",
+}
+```
+
+### 13.2 完整 REST API
+
+| 消息类型 | HTTP 路径 | 方法 | 说明 |
+|---------|----------|------|------|
+| `task.submit` | `/dispatch/submit` | POST | 提交 TaskSpec |
+| `task.status` | `/dispatch/status/{id}` | GET | 查询状态 |
+| `task.result` | `/dispatch/result/{id}` | GET | 获取结果 |
+| `task.cancel` | `/dispatch/cancel/{id}` | POST | 取消任务 |
+| `cluster.info` | `/dispatch/cluster` | GET | 集群拓扑 |
+| `dispatch.register` | `/dispatch/register` | POST | Worker 注册 |
+| `dispatch.heartbeat` | `/dispatch/heartbeat` | POST | Worker 心跳 |
+| `dispatch.unregister` | `/dispatch/unregister/{id}` | POST | Worker 下线 |
+| `dispatch.assign` | `/dispatch/assign` | POST | Worker 拉取任务 |
+| `dispatch.complete` | `/dispatch/complete` | POST | 回传结果 |
+| `dispatch.fail` | `/dispatch/fail` | POST | 上报失败 |
+| `dispatch.partial` | `/dispatch/partial` | POST | 流式部分结果 |
+| `dispatch.preempt` | `/dispatch/preempt/{slice_id}` | POST | 抢占任务 |
+| `dispatch.resume` | `/dispatch/resume/{slice_id}` | POST | 恢复任务 |
+| `dispatch.drain` | `/dispatch/drain/{worker_id}` | POST | 通知 Worker 下线 |
+| `cluster.discover` | `/dispatch/discover` | GET | 服务发现 |
+| (Autoscaler) | `/dispatch/autoscaler` | GET | Autoscaler 指标 |
+| (Sub register) | `/dispatch/sub/register` | POST | 子 Dispatcher 注册 |
+| (Sub unregister) | `/dispatch/sub/unregister/{id}` | POST | 子 Dispatcher 注销 |
+| (Sub list) | `/dispatch/sub` | GET | 列出子 Dispatcher |
+| (History) | `/dispatch/tasks/history` | GET | 任务历史 |
+| (Stats) | `/dispatch/tasks/stats` | GET | 任务统计 |
+| (V2 compat) | `/api/v1/tasks` | POST/GET | V2 §10.2 兼容 |
+| (V2 compat) | `/api/v1/tasks/{id}` | GET/DELETE | 状态/取消 |
+| (V2 compat) | `/api/v1/tasks/{id}/result` | GET | 结果 |
+| (Admin) | `/admin/api/dispatcher/cluster` | GET | Admin 拓扑 |
+| (Admin) | `/admin/api/dispatcher/tasks` | GET | Admin 历史 |
+| (Admin) | `/admin/api/dispatcher/stats` | GET | Admin 统计 |
+| (Admin) | `/admin/api/dispatcher/autoscaler` | GET | Admin Autoscaler |
+| (Storage) | `/api/v1/ohlcv` | GET | OHLCV 查询 |
+| (Storage) | `/api/v1/ohlcv` | POST | OHLCV 写入 |
+| (Storage) | `/api/v1/symbols` | GET | 标的列表 |
+| (Storage) | `/health` | GET | 健康检查 |
+
+---
+
+## 14. 异常类
+
+### 14.1 异常类层次
+
+```python
+class AppError(Exception):
+    """Base application error with error code and context."""
+    code: str = "INTERNAL_ERROR"
+    recoverable: bool = False
+
+    def __init__(self, message="", code=None, context=None, recoverable=None):
+        self.message = message or self.code
+        if code is not None: self.code = code
+        self.context = context or {}
+        if recoverable is not None: self.recoverable = recoverable
+```
+
+### 14.2 V3.1 异常
+
+| 异常 | code | recoverable | 触发场景 |
+|------|------|------------|---------|
+| `TaskError` | `TASK_FAILED` | False | `TaskRef.wait()` 当任务 FAILED |
+| `TaskNotReadyError` | `TASK_NOT_READY` | True | `TaskRef.result()` 当未完成 |
+| `TaskCancelledError` | `TASK_CANCELLED` | False | 任务被取消 |
+| `TaskTimeoutError` | `TASK_TIMEOUT` | True | `wait(timeout)` 超时 |
+| `TaskNotFoundError` | `TASK_NOT_FOUND` | False | 未知 task_id |
+| `ProtocolMismatchError` | `PROTOCOL_MISMATCH` | False | 协议版本不兼容 |
+| `TransportError` | `TRANSPORT_ERROR` | True | 传输失败（网络/连接） |
+| `DispatcherUnavailableError` | `DISPATCHER_UNAVAILABLE` | True | Dispatcher 不可达 |
+| `WorkerCapabilityError` | `WORKER_CAPABILITY_INSUFFICIENT` | True | 无 Worker 支持该 task_type |
+| `StorageError` | `STORAGE_ERROR` | True | Storage 访问失败 |
+| `ComputeError` | `COMPUTE_FAILED` | False | 计算失败 |
+| `ConfigError` | `CONFIG_ERROR` | False | 配置错误 |
+
+### 14.3 序列化
+
+```python
+def to_dict(self) -> dict:
+    return {
+        "code": self.code,
+        "message": self.message,
+        "context": self.context,
+        "recoverable": self.recoverable,
+    }
+```
+
+---
+
+## 15. 协议测试覆盖
+
+### 15.1 测试文件
+
+| 测试文件 | 测试数 | 覆盖 |
+|---------|--------|------|
+| `test_envelope.py` | 25 | Envelope 编解码 / Headers / reply / base64 payload |
+| `test_task_spec.py` | 20 | TaskSpec 三段式 / to_dict / from_dict / roundtrip |
+| `test_messages.py` | 10 | 消息类型常量 / TYPE_TO_PATH / 分组 |
+| `test_codec.py` | 30 | 7 个 Codec / 工厂函数 / 优雅降级 |
+| `test_transport.py` | 35 | InProcess / HTTP / SHM / Redis / build_transport |
+| `test_errors.py` | 15 | 12 个异常类 / to_dict / 继承 |
+| `test_data_dispatch.py` | 15 | choose_data_dispatch / estimate_data_size / Stream |
+| `test_retry.py` | 10 | RetryPolicy / 指数退避 |
+| `test_version_negotiation.py` | 8 | 协议协商 / PROTOCOL_MISMATCH |
+| `test_http_paths.py` | 12 | TYPE_TO_PATH 映射 / REST API |
+| `test_redis_cluster.py` | 17 + 6 skip | MsgpackCodec / RedisTransport / RedisTaskQueue |
+| `test_shm_stream.py` | 34 | SharedMemory / Stream / duck-typing / partial |
+| `test_preempt.py` | 36 | Checkpoint / preempt / drain / discover |
+| `test_multilevel.py` | 23 | SubDispatcher / TaskHistory / Admin routes |
+| **合计** | **290** | |
+
+### 15.2 关键测试场景
+
+#### 15.2.1 Envelope JSON + Msgpack roundtrip
+
+```python
+env = Envelope(type="task.submit",
+               headers=Headers(encoding="msgpack", trace_id="t1"),
+               payload={"x": 1})
+raw = env.encode()  # msgpack bytes
+restored = Envelope.decode(raw)
+assert restored.headers.trace_id == "t1"
+assert restored.payload["x"] == 1
+```
+
+#### 15.2.2 协议协商字段
+
+```python
+env = Envelope(
+    type="task.submit",
+    headers=Headers(
+        accepted_codecs=["arrow", "cloudpickle"],
+        accepted_encodings=["json", "msgpack"],
+        protocol_version="1.0",
+    ),
+)
+d = env.to_dict()
+assert d["headers"]["accepted_codecs"] == ["arrow", "cloudpickle"]
+```
+
+#### 15.2.3 RetryPolicy 指数退避
+
+```python
+p = RetryPolicy(backoff_base=1.0, backoff_factor=2.0, max_backoff=10.0)
+assert p.next_delay(0) == 1.0
+assert p.next_delay(1) == 2.0
+assert p.next_delay(2) == 4.0
+assert p.next_delay(10) == 10.0  # capped
+assert p.should_retry({"retryable": True}, attempt=2) is True
+assert p.should_retry({"retryable": True}, attempt=3) is False  # max reached
+```
+
+#### 15.2.4 data_dispatch 自动选择
+
+```python
+assert choose_data_dispatch(1024) == "inline"
+assert choose_data_dispatch(50*1024*1024, workers_same_host=True) == "shared_memory"
+assert choose_data_dispatch(200*1024*1024, workers_can_reach_storage=True) == "storage_ref"
+assert choose_data_dispatch(50*1024*1024, workers_same_host=False) == "stream"
+```
+
+#### 15.2.5 TaskSpec roundtrip（含 47 个 task_type）
+
+```python
+for task_type in ALL_TASK_TYPES:
+    spec = TaskSpec(
+        task_id=f"test-{task_type}",
+        data_spec=DataSpec(symbols=["BTC/USDT"]),
+        compute_spec=ComputeSpec(task_type=task_type, params={"test": True}),
+    )
+    d = spec.to_dict()
+    restored = TaskSpec.from_dict(d)
+    assert restored.compute_spec.task_type == task_type
+    assert restored.compute_spec.params["test"] is True
+```
+
+#### 15.2.6 Stream 鸭子类型检测
+
+```python
+def stream_handler(spec, data: Stream, on_progress=None):
+    return data.collect()
+
+def df_handler(spec, data, on_progress=None):
+    return data
+
+assert is_stream_aware(stream_handler) is True
+assert is_stream_aware(df_handler) is False
+```
+
+---
+
+## 16. 协议演进策略
+
+### 16.1 演进类型
+
+| 演进类型 | 策略 | 示例 |
+|---------|------|------|
+| 增加字段 | 直接加，旧端忽略 | v1.1 增加 `headers.gpu_required` |
+| 增加消息类型 | 直接加，旧端不处理 | v1.1 增加 `task.heartbeat` 类型 |
+| 增加 task_type | 直接加，按 capability 路由 | 新增 `bayesian_inference` |
+| 增加 Codec | 通过 `content_type` 协商 | 增加 `protobuf` codec |
+| 增加 Transport | 配置选择 | 增加 `TcpTransport` |
+| 破坏性变更 | 升 `version`，双版本过渡 | v2.0 改 Envelope 结构 |
+
+### 16.2 V3.1 的协议扩展实践
+
+V3.1 从 V3 的 6 个 task_type 扩展到 47 个，**协议层零改动**：
+
+1. `task_type` 字段已存在（V3），新增 task_type 只是值的变化
+2. `ComputeSpec.params` dict 已支持任意参数（V3.1 新增字段，有默认值 `{}`，旧端忽略）
+3. 消息类型表不变（28 个）
+4. Envelope/Headers/Transport/Codec 不变
+
+这验证了 COMPUTE_OFFLOAD_PLAN_V2_CN §12.11 "通用性保证"的设计——**协议不感知业务语义**。
+
+---
+
+## 17. 总结
+
+V3.1 通讯协议**完全继承 V3**（已验证 922 项测试），并在业务层扩展：
+
+| 维度 | V3 | V3.1 |
+|------|----|------|
+| Envelope | 不变 | 不变 |
+| Headers | 不变 | 不变 |
+| 消息类型 | 28 个 | 28 个（不变） |
+| Transport | 5 种 | 5 种（不变） |
+| Codec | 7 种 | 7 种（不变） |
+| task_type | 6 个 | **47 个**（业务扩展） |
+| ComputeSpec | 专用字段 | +`params` dict（通用） |
+
+**核心设计原则**：
+1. **协议不感知业务** — 只搬运字节、路由消息
+2. **三层分离** — Codec / Message / Transport 独立可替换
+3. **传输无关** — 同一消息走 HTTP/SHM/Redis/InProcess
+4. **可扩展** — 新增 task_type/Codec/Transport 零协议改动
+5. **可组合** — 多级 Dispatcher 消息原样转发
+
+**与 COMPUTE_OFFLOAD_PLAN_V2_CN 的对应**：
+- §12.2 三层协议栈 ✅
+- §12.3 Envelope 信封 ✅
+- §12.4 消息类型表 ✅
+- §12.5 TaskSpec 三段式 ✅
+- §12.6 数据分发策略 ✅
+- §12.7 传输层映射 ✅
+- §12.8 生命周期消息流 ✅
+- §12.9 错误处理 ✅
+- §12.10 多级级联 ✅
+- §12.11 通用性保证 ✅
+- §12.12 版本演进 ✅
+- §12.13 集群拓扑查询 ✅
+- §13.1 流式 + 鸭子类型 ✅
+- §13.2 结果流式回传 ✅
+- §13.3 优先级与抢占 ✅
+- §13.4 弹性伸缩 ✅
+- §13.5 协议瘦身 ✅
+
+---
+
+*本文件定义 V3.1 通讯协议的完整设计。实现见 [DESIGN_ARCH_FOUNDATION_V31.md](DESIGN_ARCH_FOUNDATION_V31.md)，整体架构见 [DESIGN_ARCH_V31.md](DESIGN_ARCH_V31.md)。*

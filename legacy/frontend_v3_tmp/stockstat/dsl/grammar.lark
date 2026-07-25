@@ -1,0 +1,31 @@
+?start: query
+
+query: "SELECT" select_list "FROM" source ("WHERE" condition)? ("LIMIT" INT)?
+
+select_list: select_expr ("," select_expr)*
+select_expr: expr ("AS" NAME)?
+
+source: "ohlcv" "(" string ("," string)* ")"
+
+?expr: expr OP expr      -> binop
+     | func_call
+     | NAME               -> name_ref
+     | NUMBER             -> number
+     | STRING             -> literal_string
+
+func_call: NAME "(" (expr ("," expr)*)? ("," kwarg)* ")"
+kwarg: NAME "=" expr
+
+condition: expr COMP expr
+
+OP: "+" | "-" | "*" | "/"
+COMP: ">" | "<" | ">=" | "<=" | "==" | "!="
+
+string: STRING
+
+%import common.ESCAPED_STRING -> STRING
+%import common.NUMBER -> NUMBER
+%import common.INT -> INT
+%import common.CNAME -> NAME
+%import common.WS
+%ignore WS

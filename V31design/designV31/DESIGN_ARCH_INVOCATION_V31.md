@@ -1,516 +1,1083 @@
-# StockStat V3.1 Invocation 架构设计
+# DESIGN_ARCH_INVOCATION_V31 — 用户入口层架构设计
 
-> 大模块：Python SDK、CLI、DSL 与调用网关
-> 日期：2026-07-20
-> 状态：V3.1 设计稿
-> 上位文档：[DESIGN_ARCH_V31.md](DESIGN_ARCH_V31.md)
-> 依赖文档：[DESIGN_ARCH_FOUNDATION_V31.md](DESIGN_ARCH_FOUNDATION_V31.md) | [DESIGN_PROT_V31.md](DESIGN_PROT_V31.md)
+> **模块**：Invocation（用户入口 / 调用端）
+> **版本**：v3.1
+> **日期**：2026-07-24
+> **状态**：设计稿
+> **关联**：
+> - [DESIGN_ARCH_V31.md](DESIGN_ARCH_V31.md) — 总设计
+> - [DESIGN_ARCH_FOUNDATION_V31.md](DESIGN_ARCH_FOUNDATION_V31.md) — 基础层
+> - [DESIGN_GENERALIZE.md](DESIGN_GENERALIZE.md) — 任务原子化清单
+>
+> **核心使命**：提供用户与系统交互的**唯一入口**——构建 TaskSpec、提交到 ComputeBackend、消费结果。**不含任何计算逻辑**（BacktestEngine / ComputeEngine 移至 Compute 模块），通过 ComputeBackend Protocol 与 Compute 解耦。
 
-## 1. 模块职责
+---
 
-Invocation 将用户意图转换为类型化的 Storage 请求或金融 Job，并把异步任务、事件和 Artifact 还原成金融友好的 Python 结果。
+## 目录
 
-Invocation 包含：
+1. [模块定位与边界](#1-模块定位与边界)
+2. [内部结构](#2-内部结构)
+3. [StockStatClient 重构](#3-stockstatclient-重构)
+4. [ComputeAPI 设计](#4-computeapi-设计)
+5. [DataClient 数据访问](#5-dataclient-数据访问)
+6. [DSL 引擎](#6-dsl-引擎)
+7. [CLI 命令](#7-cli-命令)
+8. [TUI 交互终端](#8-tui-交互终端)
+9. [Export 序列化](#9-export-序列化)
+10. [可视化层 _viz](#10-可视化层-_viz)
+11. [旧客户代码迁移路径](#11-旧客户代码迁移路径)
+12. [部署形态](#12-部署形态)
+13. [测试体系](#13-测试体系)
 
-- 公共 Python SDK。
-- 同步与异步任务句柄。
-- 金融命名空间 API。
-- CLI。
-- DSL 编译器。
-- Artifact 上传、下载与本地缓存。
-- 本地嵌入式拓扑装配入口。
-- 旧代码迁移工具和迁移报告。
+---
 
-Invocation 不包含：
+## 1. 模块定位与边界
 
-- 指标和回测算法实现。
-- 调度策略和任务状态持久化。
-- OHLCV 数据库访问实现。
-- Worker 线程池或进程池。
+### 1.1 Invocation 是什么
 
-## 2. 一个调用模型
+Invocation 是用户与系统交互的**唯一入口**，承载：
 
-V3.1 删除以下分叉：
+- **Client SDK**：`StockStatClient` —— Python 用户的主接口
+- **ComputeAPI**：`client.compute.*` —— 本地轻量计算 + 远程任务提交
+- **DataClient**：`client.ohlcv()` / `client.ingest()` —— 数据访问
+- **DSL 引擎**：策略 DSL 解析与求值
+- **CLI**：`stockstat` 命令行
+- **TUI**：交互式终端
+- **Export**：结果序列化（JSON/CSV/Parquet）
+- **可视化**：ChartSpec + matplotlib 渲染
 
-- `StockStatClient` 与 `V2Client` 双客户端。
-- online/offline 两套方法实现。
-- `LocalComputeBackend` 直调金融核心。
-- `RemoteComputeBackend` 走 Dispatcher。
-- `AutoComputeBackend` 在客户端猜测任务规模。
-- `backtest()` 特判本地后端。
+### 1.2 Invocation 不是什么
 
-统一入口为 `StockStat` Session：
+| 不是 | 理由 |
+|------|------|
+| 不含 BacktestEngine | 移至 Compute 模块，通过 ComputeBackend 调用 |
+| 不含 ComputeEngine | 同上 |
+| 不含指标算法 | 通过 `indicator` task_type 提交到 Compute |
+| 不含任务调度 | 由 Dispatcher 负责 |
+| 不含数据持久化 | 由 Storage 负责 |
+| 不含协议实现 | 由 Foundation 提供 |
 
-```python
-from stockstat import StockStat
+### 1.3 与 V2/V3 的关键差异
 
-# 嵌入式单机拓扑
-ss = StockStat.local(path="stockstat.db")
+| 维度 | V2/V3 | V3.1 |
+|------|-------|------|
+| BacktestEngine 位置 | `frontend/stockstat/backtest/` | **Compute 模块** |
+| ComputeEngine 位置 | `frontend/stockstat/compute/` | **Compute 模块** |
+| 指标算法位置 | `frontend/stockstat/indicators/` | **Compute 模块** |
+| Client 计算方式 | 直接调 BacktestEngine | 通过 ComputeBackend 提交 TaskSpec |
+| 兼容性 | V3 保留 v1.7 行为 | **完全重构**，旧 API 迁移而非兼容 |
 
-# 分离部署拓扑
-ss = StockStat.connect("https://dispatcher.example.com", token="...")
+**核心变化**：V2/V3 的 Client 既"调用"又"计算"（BacktestEngine 在进程内），V3.1 的 Client **只调用**，计算全部委托给 ComputeBackend。
+
+---
+
+## 2. 内部结构
+
+```
+packages/invocation/stockstat/
+├── __init__.py                   # 导出 StockStatClient + 公共 API
+├── client.py                     # StockStatClient（重构）
+├── compute_api.py                # ComputeAPI（client.compute）
+├── data_access/                  # DataClient（HTTP / Storage 直连）
+│   ├── __init__.py
+│   └── ohlcv.py
+├── dsl/                          # DSL 引擎
+│   ├── __init__.py
+│   ├── parser.py
+│   ├── evaluator.py
+│   └── ast_nodes.py
+├── plot/                         # 绘图基础（_viz 的简化版）
+│   ├── __init__.py
+│   ├── base.py
+│   └── matplotlib_backend.py
+├── _viz/                         # 可视化层（ChartSpec / Renderer）
+│   ├── __init__.py
+│   ├── specs/
+│   └── renderers/
+├── export/                       # 序列化
+│   ├── __init__.py
+│   └── serializers.py
+├── app/                          # CLI / TUI
+│   ├── __init__.py
+│   ├── cli.py
+│   └── tui.py
+└── _compat.py                    # V2 旧 API 迁移辅助（可选）
 ```
 
-`local()` 与 `connect()` 返回相同接口。差异只在 Session 内部使用的 `ControlChannel` 和 `ArtifactChannel` Adapter。
-
-## 3. 同步与异步语义
-
-所有计算调用先构造 Job。同步 API 只是 `submit + wait + materialize` 的语法糖。
-
-```python
-# 同步
-ma = ss.indicators.ma(series, window=20)
-
-# 同一个能力的异步形式
-job = ss.indicators.submit(
-    "ma",
-    input=series,
-    window=20,
-)
-ma = job.wait().as_series()
-```
-
-内部链路必须相同：
+### 2.1 依赖关系
 
 ```mermaid
-sequenceDiagram
-    participant U as User
-    participant SDK as StockStat SDK
-    participant D as Dispatcher
-    participant W as Worker
+graph TB
+    subgraph "Invocation（本模块）"
+        C[StockStatClient]
+        CA[ComputeAPI]
+        DC[DataClient]
+        DSL[DSL Engine]
+        CLI[CLI/TUI]
+        EXP[Export]
+        VIZ[_viz]
+    end
 
-    U->>SDK: indicators.ma(...)
-    SDK->>SDK: build JobSpec
-    SDK->>D: job.submit
-    D->>W: WorkLease
-    W-->>D: work.complete + ArtifactRef
-    D-->>SDK: job.succeeded event
-    SDK->>SDK: download/materialize Artifact
-    SDK-->>U: pandas Series
+    subgraph "Foundation"
+        F[contracts.ComputeBackend<br/>protocol.Envelope/TaskSpec<br/>codec/transport]
+    end
+
+    subgraph "Compute（远程或本地）"
+        BE[BacktestEngine]
+        CE[ComputeEngine]
+        IND[indicators]
+    end
+
+    subgraph "Storage"
+        S[Storage REST API]
+    end
+
+    C --> CA
+    C --> DC
+    CA -->|构建 TaskSpec| F
+    CA -->|submit| F
+    DC -->|HTTP| S
+    DSL -->|编译策略| F
+    CLI --> C
+    EXP --> C
+    VIZ --> C
+
+    F -.->|Transport| BE
+    F -.->|Transport| CE
+    F -.->|Transport| IND
+
+    style C fill:#fff3e0,stroke:#f57c00,stroke-width:3px
+    style F fill:#e1f5ff,stroke:#0288d1
+    style BE fill:#fce4ec,stroke:#c62828
+    style S fill:#e8f5e9,stroke:#388e3c
 ```
 
-同步调用不得绕过 Dispatcher 和 Worker Runtime，即使所有组件位于同一进程或同一台机器。
+---
 
-## 4. SDK 包结构
+## 3. StockStatClient 重构
 
-建议新建 `packages/sdk/`，发布名继续使用 `stockstat`，但代码为全新实现：
+### 3.1 设计理念
 
-```text
-packages/sdk/
-├── pyproject.toml
-└── stockstat/
-    ├── __init__.py
-    ├── session.py
-    ├── config.py
-    ├── channels/
-    │   ├── control.py
-    │   ├── artifacts.py
-    │   ├── http.py
-    │   └── embedded.py
-    ├── jobs/
-    │   ├── handle.py
-    │   ├── events.py
-    │   └── result.py
-    ├── data/
-    │   ├── api.py
-    │   ├── selectors.py
-    │   └── frames.py
-    ├── indicators/
-    │   └── api.py
-    ├── backtests/
-    │   └── api.py
-    ├── experiments/
-    │   └── api.py
-    ├── risk/
-    │   └── api.py
-    ├── portfolio/
-    │   └── api.py
-    ├── dsl/
-    │   ├── parser.py
-    │   ├── compiler.py
-    │   └── diagnostics.py
-    ├── artifacts/
-    │   ├── upload.py
-    │   ├── download.py
-    │   └── cache.py
-    ├── migration/
-    │   ├── scanner.py
-    │   ├── strategy_packager.py
-    │   └── report.py
-    └── cli/
-        ├── main.py
-        ├── data.py
-        ├── jobs.py
-        ├── cluster.py
-        └── migrate.py
-```
+V3.1 的 StockStatClient 是**纯调用者**：
+- 构建 TaskSpec 提交给 ComputeBackend
+- 通过 DataClient 访问 Storage（HTTP 或直连）
+- 不直接持有 BacktestEngine / ComputeEngine
 
-## 5. 公共 API
-
-### 5.1 Data API
+### 3.2 类定义
 
 ```python
-bars = ss.data.ohlcv(
-    "BTC/USDT",
-    venue="binance",
-    timeframe="1h",
-    start="2024-01-01",
-    end="2025-01-01",
+# client.py
+from __future__ import annotations
+from typing import Optional, Any
+from stockstat_foundation import (
+    ComputeBackend, TaskRef, TaskInfo, TaskState,
+    TaskSpec, DataSpec, ComputeSpec, DispatchSpec,
+    Config, Transport, build_transport,
 )
 
-ingest_job = ss.data.ingest(
-    "BTC/USDT",
-    source="binance",
-    timeframe="1h",
-    start="2024-01-01",
-)
-ingest_job.wait()
+
+class StockStatClient:
+    """StockStat V3.1 用户入口。
+
+    职责：
+    - 数据访问（ohlcv / ingest / list_symbols）
+    - 计算提交（backtest / compute / remote）
+    - 结果消费（wait / result / stream）
+
+    不含：
+    - BacktestEngine / ComputeEngine（在 Compute 模块）
+    - 任务调度（在 Dispatcher 模块）
+    - 数据持久化（在 Storage 模块）
+
+    用法：
+        # 默认本地后端（单机全栈）
+        client = StockStatClient()
+        result = client.backtest(data, strategy)
+
+        # 远程后端（分布式）
+        client = StockStatClient(
+            storage_url="http://storage:8000",
+            compute_backend=RemoteComputeBackend("http://dispatcher:9000"),
+        )
+        task = client.compute.remote("grid_search", ...)
+        result = task.wait()
+    """
+
+    def __init__(
+        self,
+        host: str = "localhost",
+        port: int = 8000,
+        *,
+        storage_url: Optional[str] = None,
+        compute_backend: Optional[ComputeBackend] = None,
+        config: Optional[Config] = None,
+        http_client=None,
+        cache_enabled: bool = True,
+        use_https: bool = False,
+        timeout: int = 30,
+    ):
+        self._config = config or Config.from_env()
+        self._storage_url = storage_url or f"{'https' if use_https else 'http'}://{host}:{port}"
+
+        # DataClient（HTTP 访问 Storage）
+        from .data_access import DataClient
+        self._data_client = DataClient(
+            base_url=self._storage_url,
+            http_client=http_client,
+            timeout=timeout,
+            cache_enabled=cache_enabled,
+        )
+
+        # ComputeBackend（默认 LocalComputeBackend，在 Compute 模块实现）
+        if compute_backend is None:
+            compute_backend = self._build_default_backend()
+        self._compute_backend = compute_backend
+
+        # ComputeAPI（client.compute）
+        from .compute_api import ComputeAPI
+        self._compute_api = ComputeAPI(
+            client=self,
+            data_client=self._data_client,
+            compute_backend=self._compute_backend,
+        )
+
+    def _build_default_backend(self) -> ComputeBackend:
+        """根据 config.default_backend 选择后端。"""
+        backend_type = self._config.default_backend
+        if backend_type == "local":
+            from stockstat_compute import LocalComputeBackend
+            return LocalComputeBackend(client=self, data_client=self._data_client)
+        elif backend_type == "remote":
+            from stockstat_compute import RemoteComputeBackend
+            url = self._config.dispatcher_url or self._storage_url
+            return RemoteComputeBackend(dispatcher_url=url)
+        elif backend_type == "auto":
+            from stockstat_compute import AutoComputeBackend, LocalComputeBackend, RemoteComputeBackend
+            local = LocalComputeBackend(client=self, data_client=self._data_client)
+            remote = RemoteComputeBackend(
+                dispatcher_url=self._config.dispatcher_url or self._storage_url)
+            return AutoComputeBackend(local=local, remote=remote)
+        else:
+            raise ValueError(f"Unknown backend type: {backend_type}")
+
+    # ── 数据访问（透传 DataClient）──
+
+    @property
+    def data(self) -> "DataClient":
+        return self._data_client
+
+    def ohlcv(self, symbol: str, timeframe: str = "1d",
+              start: Optional[str] = None, end: Optional[str] = None,
+              source: Optional[str] = None) -> Any:
+        """查询 OHLCV 数据。"""
+        return self._data_client.ohlcv(symbol, timeframe, start, end, source)
+
+    def ingest(self, symbol: str, timeframe: str, data: Any) -> int:
+        """写入 OHLCV 数据。"""
+        return self._data_client.ingest(symbol, timeframe, data)
+
+    def list_symbols(self) -> list[str]:
+        return self._data_client.list_symbols()
+
+    # ── 计算访问 ──
+
+    @property
+    def compute(self) -> "ComputeAPI":
+        return self._compute_api
+
+    @property
+    def compute_backend(self) -> ComputeBackend:
+        return self._compute_backend
+
+    def backtest(self, data, strategy, **kwargs) -> Any:
+        """透明模式回测 — 默认同步阻塞，返回 BacktestResult。
+
+        若 async_submit=True，返回 TaskRef。
+        """
+        async_submit = kwargs.pop("async_submit", False)
+        spec = self._compute_api.build_backtest_task_spec(
+            data=data, strategy=strategy, **kwargs)
+        task_ref = self._compute_backend.submit(spec)
+        if async_submit:
+            return task_ref
+        return task_ref.wait(timeout=kwargs.get("timeout", 3600))
+
+    def run_dsl(self, expression: str, data=None, **kwargs) -> Any:
+        """执行 DSL 表达式。"""
+        from .dsl import DslEngine
+        engine = DslEngine(client=self)
+        return engine.evaluate(expression, data=data, **kwargs)
+
+    # ── 集群信息 ──
+
+    def cluster_info(self, **kwargs) -> dict:
+        return self._compute_backend.cluster_info(**kwargs)
 ```
 
-现有数据管理功能的对应入口一并保留：
+### 3.3 关键设计决策
+
+| 决策 | 选择 | 理由 |
+|------|------|------|
+| BacktestEngine 位置 | Compute 模块 | 计算与调用分离 |
+| 默认后端 | `LocalComputeBackend` | 单机全栈场景零配置 |
+| 远程后端 | 显式传入或 config | 分布式场景显式配置 |
+| 透明模式 | `backtest()` 默认同步 | 与 v1.7 行为一致，便于迁移 |
+| 异步模式 | `compute.remote()` 或 `async_submit=True` | 显式异步 |
+
+---
+
+## 4. ComputeAPI 设计
+
+### 4.1 设计理念
+
+ComputeAPI 是 `client.compute` 的实现，提供：
+- **本地轻量计算**：毫秒级指标直接计算（`client.compute.ma()`）
+- **远程任务提交**：重型任务异步提交（`client.compute.remote()`）
+- **集群查询**：`client.compute.cluster_info()`
+
+### 4.2 类定义
 
 ```python
-frames = ss.data.ohlcv_batch(["BTC/USDT", "ETH/USDT"], timeframe="1h")
-instruments = ss.data.instruments(asset_class="crypto")
-sources = ss.data.sources()
-health = ss.data.health()
+# compute_api.py
+from __future__ import annotations
+from typing import Any, Optional
+import uuid
+from stockstat_foundation import (
+    TaskSpec, DataSpec, ComputeSpec, DispatchSpec,
+    TaskRef, ComputeBackend,
+)
 
-# 仅面向数据采集的有限计划，不开放通用 DAG/cron 工作流。
-schedule = ss.data.schedule_ingest(
-    "BTC/USDT",
-    source="binance",
-    timeframe="1h",
-    interval="1h",
-    mode="incremental",
+
+class ComputeAPI:
+    """统一计算入口。
+
+    - client.compute.ma(...)         # 本地轻量指标（即时返回）
+    - client.compute.remote(...)     # 远程任务提交（返回 TaskRef）
+    - client.compute.cluster_info()  # 集群拓扑
+    """
+
+    def __init__(self, client, data_client, compute_backend: ComputeBackend):
+        self._client = client
+        self._data_client = data_client
+        self._backend = compute_backend
+
+    # ── 本地轻量指标（直接调 Compute 模块的 ComputeEngine）──
+    # 这些方法在 LocalComputeBackend 场景下直接执行；
+    # 在 RemoteComputeBackend 场景下提交 indicator task_type。
+
+    def ma(self, data, window: int = 20) -> Any:
+        """简单移动平均。"""
+        return self._dispatch_indicator("ma", data, window=window)
+
+    def ema(self, data, window: int = 12) -> Any:
+        return self._dispatch_indicator("ema", data, window=window)
+
+    def rsi(self, data, window: int = 14) -> Any:
+        return self._dispatch_indicator("rsi", data, window=window)
+
+    def macd(self, data, fast: int = 12, slow: int = 26, signal: int = 9) -> Any:
+        return self._dispatch_indicator("macd", data, fast=fast, slow=slow, signal=signal)
+
+    def bollinger(self, data, window: int = 20, std: float = 2.0) -> Any:
+        return self._dispatch_indicator("bollinger", data, window=window, std=std)
+
+    def atr(self, data, window: int = 14) -> Any:
+        return self._dispatch_indicator("atr", data, window=window)
+
+    # ... 其余 40+ 指标方法透传 ...
+
+    def _dispatch_indicator(self, name: str, data, **params) -> Any:
+        """本地后端直接计算；远程后端提交 indicator task。"""
+        from stockstat_foundation import LocalComputeBackend
+        if isinstance(self._backend, LocalComputeBackend):
+            # 本地路径：直接调 ComputeEngine
+            return self._backend.compute_indicator(name, data, **params)
+        # 远程路径：构建 TaskSpec 提交
+        spec = TaskSpec(
+            task_id=str(uuid.uuid4()),
+            data_spec=DataSpec(symbols=[]),  # 数据内联
+            compute_spec=ComputeSpec(
+                task_type="indicator",
+                params={"indicator_name": name, **params},
+            ),
+        )
+        task_ref = self._backend.submit(spec)
+        return task_ref.wait()
+
+    # ── 显式异步提交 ──
+
+    def remote(
+        self,
+        task_type: str,
+        *,
+        data_spec: Optional[DataSpec] = None,
+        compute_spec: Optional[ComputeSpec] = None,
+        dispatch_spec: Optional[DispatchSpec] = None,
+        **kwargs,
+    ) -> TaskRef:
+        """显式异步提交 — 返回 TaskRef。
+
+        用法：
+            task = client.compute.remote(
+                "grid_search",
+                data_spec=DataSpec(symbols=["BTC/USDT"], timeframe="1d"),
+                compute_spec=ComputeSpec(
+                    task_type="grid_search",
+                    strategy_ref=cloudpickle_dumps(strategy),
+                    param_grid={"short": [3, 5, 8], "long": [10, 20, 30]},
+                    metric="sharpe",
+                ),
+            )
+            result = task.wait(timeout=3600)
+        """
+        spec = TaskSpec(
+            task_id=str(uuid.uuid4()),
+            data_spec=data_spec or DataSpec(symbols=kwargs.pop("symbols", [])),
+            compute_spec=compute_spec or ComputeSpec(task_type=task_type, params=kwargs),
+            dispatch_spec=dispatch_spec or DispatchSpec(),
+            trace_id=str(uuid.uuid4()),
+            created_by="StockStatClient",
+        )
+        return self._backend.submit(spec)
+
+    # ── 统计/信号/非线性等高级任务的便捷方法 ──
+
+    def correlation(self, x, y, method: str = "pearson") -> Any:
+        """相关分析。"""
+        return self._submit_stats("correlation", x=x, y=y, method=method)
+
+    def hypothesis_test(self, data, test: str, **params) -> Any:
+        return self._submit_stats("hypothesis_test", data=data, test=test, **params)
+
+    def spectral_analysis(self, signal_data, method: str = "welch", **params) -> Any:
+        return self._submit_stats("spectral_analysis", signal=signal_data,
+                                  method=method, **params)
+
+    def transfer_entropy(self, x, y, k: int = 1, l: int = 1) -> Any:
+        return self._submit_stats("transfer_entropy", x=x, y=y, k=k, l=l)
+
+    def mutual_information(self, x, y, estimator: str = "ksg") -> Any:
+        return self._submit_stats("mutual_information", x=x, y=y, estimator=estimator)
+
+    def _submit_stats(self, task_type: str, **params) -> Any:
+        """统计类任务便捷提交（同步等待结果）。"""
+        spec = TaskSpec(
+            task_id=str(uuid.uuid4()),
+            data_spec=DataSpec(symbols=[]),
+            compute_spec=ComputeSpec(task_type=task_type, params=params),
+        )
+        task_ref = self._backend.submit(spec)
+        return task_ref.wait()
+
+    # ── 集群信息 ──
+
+    def cluster_info(self, **kwargs) -> dict:
+        return self._backend.cluster_info(**kwargs)
+
+    # ── TaskSpec 构建辅助 ──
+
+    def build_backtest_task_spec(self, data, strategy, **kwargs) -> TaskSpec:
+        """构建 backtest TaskSpec。"""
+        from stockstat_foundation import cloudpickle_dumps
+        import uuid
+
+        async_submit = kwargs.pop("async_submit", False)
+        timeout = kwargs.pop("timeout", 3600)
+
+        # 数据内联或引用
+        data_spec = DataSpec(symbols=kwargs.pop("symbols", []))
+        if hasattr(data, "to_dict"):
+            # DataFrame 等结构 → 内联
+            kwargs["_inline_data"] = data
+
+        return TaskSpec(
+            task_id=str(uuid.uuid4()),
+            data_spec=data_spec,
+            compute_spec=ComputeSpec(
+                task_type="backtest",
+                strategy_ref=f"cloudpickle:{cloudpickle_dumps(strategy)}",
+                initial_cash=kwargs.get("initial_cash", 1_000_000.0),
+                cost_model=kwargs.get("cost_model"),
+                fill_model=kwargs.get("fill_model"),
+                execution_model=kwargs.get("execution_model"),
+                benchmark=kwargs.get("benchmark"),
+                trade_on=kwargs.get("trade_on", "open"),
+                allow_short=kwargs.get("allow_short", False),
+                periods_per_year=kwargs.get("periods_per_year"),
+                params=kwargs,
+            ),
+            dispatch_spec=DispatchSpec(timeout=timeout),
+            trace_id=str(uuid.uuid4()),
+            created_by="StockStatClient",
+        )
+```
+
+### 4.3 本地 vs 远程的透明切换
+
+```python
+# 场景 A：单机全栈（默认）
+client = StockStatClient()  # LocalComputeBackend
+sma = client.compute.ma(data.close, window=20)        # 直接调 ComputeEngine
+result = client.backtest(data, strategy)               # 直接调 BacktestEngine
+
+# 场景 B：分布式
+client = StockStatClient(
+    storage_url="http://storage:8000",
+    compute_backend=RemoteComputeBackend("http://dispatcher:9000"),
+)
+sma = client.compute.ma(data.close, window=20)        # 提交 indicator task（透明）
+result = client.backtest(data, strategy)               # 提交 backtest task（透明同步）
+
+# 场景 C：显式异步
+task = client.compute.remote("grid_search", ...)
+result = task.wait(timeout=3600)
+```
+
+---
+
+## 5. DataClient 数据访问
+
+### 5.1 设计
+
+DataClient 是 Invocation 访问 Storage 的 HTTP 客户端：
+
+```python
+# data_access/ohlcv.py
+class DataClient:
+    """OHLCV 数据访问客户端。"""
+
+    def __init__(self, base_url: str, *, http_client=None,
+                 timeout: int = 30, cache_enabled: bool = True):
+        self._base_url = base_url.rstrip("/")
+        self._http = http_client or httpx.Client(timeout=timeout)
+        self._cache_enabled = cache_enabled
+        self._cache: dict[str, Any] = {}
+
+    def ohlcv(self, symbol: str, timeframe: str = "1d",
+              start: Optional[str] = None, end: Optional[str] = None,
+              source: Optional[str] = None) -> "pd.DataFrame":
+        """查询 OHLCV 数据。"""
+        cache_key = f"{symbol}:{timeframe}:{start}:{end}:{source}"
+        if self._cache_enabled and cache_key in self._cache:
+            return self._cache[cache_key]
+
+        params = {"symbol": symbol, "timeframe": timeframe}
+        if start: params["start"] = start
+        if end: params["end"] = end
+        if source: params["source"] = source
+
+        resp = self._http.get(f"{self._base_url}/api/v1/ohlcv", params=params)
+        resp.raise_for_status()
+
+        # Arrow 解码
+        from stockstat_foundation import ArrowCodec
+        df = ArrowCodec().decode(resp.content)
+
+        if self._cache_enabled:
+            self._cache[cache_key] = df
+        return df
+
+    def ingest(self, symbol: str, timeframe: str, data) -> int:
+        """写入 OHLCV 数据。"""
+        from stockstat_foundation import ArrowCodec
+        body = ArrowCodec().encode(data)
+        resp = self._http.post(
+            f"{self._base_url}/api/v1/ohlcv",
+            content=body,
+            headers={"Content-Type": "application/vnd.apache.arrow.file",
+                     "X-Symbol": symbol, "X-Timeframe": timeframe},
+        )
+        return resp.json().get("rows_written", 0)
+
+    def list_symbols(self) -> list[str]:
+        resp = self._http.get(f"{self._base_url}/api/v1/symbols")
+        return resp.json().get("symbols", [])
+```
+
+---
+
+## 6. DSL 引擎
+
+### 6.1 设计
+
+DSL 引擎解析策略表达式，编译为可执行策略或 TaskSpec：
+
+```python
+# dsl/evaluator.py
+class DslEngine:
+    """策略 DSL 引擎。
+
+    用法：
+        result = client.run_dsl(
+            "backtest(ma_cross(short=5, long=20), initial_cash=10000)",
+            data=btc_data,
+        )
+    """
+
+    def __init__(self, client):
+        self._client = client
+        from .parser import DslParser
+        self._parser = DslParser()
+
+    def evaluate(self, expression: str, data=None, **kwargs) -> Any:
+        ast = self._parser.parse(expression)
+        return self._eval(ast, data=data, **kwargs)
+
+    def compile_strategy(self, expression: str) -> str:
+        """编译 DSL 为 cloudpickle 策略引用。"""
+        ast = self._parser.parse(expression)
+        strategy = self._build_strategy(ast)
+        from stockstat_foundation import cloudpickle_dumps
+        return f"cloudpickle:{cloudpickle_dumps(strategy)}"
+```
+
+### 6.2 DSL 语法示例
+
+```dsl
+# 简单指标
+sma(close, 20)
+
+# 回测
+backtest(ma_cross(short=5, long=20), initial_cash=10000, cost_model="binance_spot")
+
+# 网格搜索
+grid_search(
+    ma_cross(short=?, long=?),
+    param_grid={short: [3, 5, 8], long: [10, 20, 30]},
+    metric="sharpe",
 )
 ```
 
-`IngestSchedule` 每次触发都创建普通的 `finance.data.ingest` Job；调度、事件、重试和审计与手工采集一致。它只支持 `manual`、`interval`、`cron` 三类 trigger；`incremental` 是采集范围模式，不是第四类 trigger。该接口不演化为通用任务编排器。
+---
 
-小型查询可直接 materialize 为 DataFrame。大型查询默认返回 `DatasetHandle`：
+## 7. CLI 命令
 
-```python
-dataset = ss.data.dataset(selector)
-df = dataset.collect(limit=100_000)
-for batch in dataset.iter_batches():
-    ...
-```
+### 7.1 命令结构
 
-### 5.2 Indicator API
+```bash
+# 数据命令
+stockstat data fetch BTC/USDT --timeframe 1d --start 2024-01-01
+stockstat data list
+stockstat data ingest --file btc.csv --symbol BTC/USDT --timeframe 1d
 
-支持本地对象和 Storage selector 两种输入：
+# 计算命令
+stockstat compute indicator ma --window 20 --symbol BTC/USDT
+stockstat compute backtest --strategy ma_cross.py --initial-cash 10000
+stockstat compute grid-search --strategy ma_cross.py --param-grid grid.json
 
-```python
-# 迁移友好的 Series 输入，SDK 上传为临时 Arrow Artifact
-rsi = ss.indicators.rsi(df["close"], window=14)
+# 任务命令（分布式）
+stockstat task submit --spec task.json
+stockstat task status <task_id>
+stockstat task result <task_id>
+stockstat task cancel <task_id>
+stockstat task list
 
-# 避免数据先下载到 Client
-job = ss.indicators.submit(
-    "rsi",
-    input=ss.data.selector("BTC/USDT", timeframe="1h"),
-    column="close",
-    window=14,
-)
-```
-
-### 5.3 Backtest API
-
-```python
-strategy = ss.strategies.package(
-    "research.strategies:ma_cross",
-    config={"short": 5, "long": 20},
-)
-
-job = ss.backtests.submit(
-    data=ss.data.selector("BTC/USDT", timeframe="1d"),
-    strategy=strategy,
-    initial_cash=10_000,
-    cost_model={"name": "binance_spot", "params": {}},
-    fill_model={"name": "next_open", "params": {}},
-)
-
-result = job.wait().as_backtest()
-print(result.metrics)
-```
-
-`ss.backtests.run(...)` 提供同步语法糖，但仍经过完整 Job 链路。
-
-### 5.4 Experiment API
-
-```python
-search = ss.experiments.grid_search(
-    base_backtest={...},
-    parameters={"short": [3, 5, 8], "long": [10, 20, 30]},
-    objective={"metric": "sharpe", "direction": "maximize"},
-)
-result = search.wait().as_search_result()
-```
-
-批量、费率扫描、Monte Carlo、Walk-forward 和 Optuna 使用明确的金融 API，不暴露任意 DAG 构造器。
-
-## 6. JobHandle
-
-`JobHandle` 只保存 `job_id`、Session 引用和最近状态缓存，不保存服务端 Python 对象。
-
-建议接口：
-
-```python
-class JobHandle:
-    id: str
-
-    def status(self) -> JobStatus: ...
-    def wait(self, timeout: float | None = None) -> JobResult: ...
-    def cancel(self, reason: str = "") -> CancelReceipt: ...
-    def events(self, after: int | None = None): ...
-    def result(self) -> JobResult: ...
-    def artifacts(self) -> list[ArtifactRef]: ...
-```
-
-语义：
-
-- `result()` 在未完成时抛 `JobNotReadyError`。
-- `wait()` 的客户端 timeout 不等于取消服务端 Job。
-- `cancel()` 是幂等命令，返回当前取消状态。
-- `events()` 使用 SSE 或 Embedded EventChannel，并支持从 sequence 续读。
-- 进度来自持久事件，不依赖内存列表。
-
-## 7. JobResult 与惰性物化
-
-服务端结果始终是 Manifest + ArtifactRef。SDK 提供金融结果视图：
-
-| 视图 | 主要属性 |
-|---|---|
-| `IndicatorResult` | `series`、`metadata` |
-| `BacktestResult` | `equity`、`fills`、`trades`、`positions`、`metrics`、`config` |
-| `SearchResult` | `ranking`、`best_parameters`、`trial(job_id)` |
-| `BatchResult` | `summary`、`result_refs` |
-| `SimulationResult` | `quantiles`、`paths`、`statistics` |
-
-大表默认惰性下载。访问 `result.equity` 时 SDK 才获取相应 Artifact，避免 `wait()` 一次性下载全部回测明细。
-
-## 8. Artifact 输入处理
-
-### 8.1 小型 Python 输入
-
-当用户传入 Series/DataFrame：
-
-1. SDK 验证 index、时区和字段。
-2. 编码为 Arrow IPC。
-3. 计算 SHA-256。
-4. 请求上传 session。
-5. 上传 Artifact。
-6. JobSpec 只引用 ArtifactRef。
-
-### 8.2 策略输入
-
-远程策略不使用 cloudpickle。支持：
-
-| 类型 | 说明 |
-|---|---|
-| Builtin | 内核内置、版本化策略 ID |
-| Python package | wheel/source bundle + entrypoint + lock manifest |
-| Declarative | 受限策略表达式，由 SDK 编译为 schema |
-
-开发期 `StockStat.local()` 可提供显式 `unsafe_python_object` 调试功能，但该能力不进入远程协议、默认关闭，也不作为迁移验收路径。
-
-## 9. DSL 设计位置
-
-DSL 是 Invocation 编译器，而不是 Dispatcher 解释器。
-
-```mermaid
-flowchart LR
-    T[DSL Text] --> P[Parse AST]
-    P --> V[金融语义校验]
-    V --> C[编译为 Data Query 或 JobSpec]
-    C --> D[Dispatcher]
-```
-
-收益：
-
-- Dispatcher 不依赖 Lark。
-- DSL 与 Python API 产生相同 JobSpec。
-- 新能力通过 descriptor 暴露给 DSL 编译器。
-- 语法错误和类型错误在 Client 侧提供精确位置。
-- 不保留 V2 的硬编码 Evaluator 与 Registry Evaluator 双实现。
-
-## 10. Embedded Topology
-
-`StockStat.local()` 不等于直接调用 Kernel。它通过装配包启动真实模块：
-
-```mermaid
-graph LR
-    SDK[SDK] --> EC[Embedded Control Channel]
-    EC --> D[Dispatcher Library]
-    D --> S[SQLite + Local Artifact Store]
-    D --> W[Local Worker Agent]
-    W --> P[Spawn Process Pool]
-```
-
-建议装配包 `stockstat-local`，依赖 Dispatcher、Storage、Worker 和 Kernel。SDK 基础包不强依赖这些服务实现。
-
-本地模式要求：
-
-- 使用相同 Job/Stage/WorkUnit/Attempt 状态机。
-- Worker 使用进程执行 CPU 密集任务。
-- Artifact 仍以 Arrow/Manifest 表达。
-- 可选跳过网络字节复制，但必须通过相同接口和合同。
-- 合同测试可启用“强制序列化模式”，验证本地对象在远程边界也可 round-trip。
-
-## 11. 调用网关
-
-公开 HTTP API 由 Dispatcher 的 Gateway 子模块提供。SDK 不直接访问 Dispatcher 数据库，也不直接调用 Worker。
-
-控制路径：
-
-```text
-SDK -> Gateway -> Command Handler -> Planner/Scheduler
-```
-
-数据路径：
-
-```text
-SDK -> Gateway 获取 upload/download session
-SDK <-> Storage/Artifact endpoint 传输 Arrow bytes
-```
-
-Gateway 不代理大型二进制，避免重现 Storage/Dispatcher 带宽耦合。
-
-## 12. 自动路由的归属
-
-V3 的 `AutoComputeBackend` 在 Client 侧按粗略大小选择本地或远程。V3.1 删除该实现。
-
-新规则：
-
-- `StockStat.local()` 明确选择本地拓扑。
-- `StockStat.connect()` 明确选择远程拓扑。
-- 在远程集群内，任务大小、数据局部性和 Worker 选择由 Dispatcher Planner/Scheduler 决定。
-- SDK 可提供显式 `execution.target="local"|"cluster"` 给混合 Session，但不自行估算资源。
-
-## 13. CLI
-
-建议命令：
-
-```text
-stockstat data ingest
-stockstat data query
-stockstat job submit
-stockstat job status
-stockstat job events
-stockstat job cancel
-stockstat job result
+# 集群命令
+stockstat cluster info
 stockstat cluster workers
-stockstat cluster capabilities
-stockstat artifact inspect
-stockstat strategy package
-stockstat migrate scan
-stockstat migrate verify
-stockstat local serve
+stockstat cluster stats
+
+# 服务命令
+stockstat serve --host 0.0.0.0 --port 8000     # 启动 Storage
+stockstat dispatcher --storage-url http://storage:8000  # 启动 Dispatcher
+stockstat worker --dispatcher-url http://dispatcher:9000  # 启动 Worker
+
+# 配置命令
+stockstat config show
+stockstat config set dispatcher_url http://dispatcher:9000
 ```
 
-CLI 调用 SDK，不复制 HTTP 客户端逻辑。
+### 7.2 CLI 实现
 
-## 14. 旧代码迁移
+```python
+# app/cli.py
+import click
 
-### 14.1 客户端迁移映射
 
-| 旧调用 | 新调用 | 迁移性质 |
-|---|---|---|
-| `StockStatClient(...)` | `StockStat.connect(...)` | 构造方式替换 |
-| `V2Client(mode="offline")` | `StockStat.local(...)` | 拓扑替换 |
-| `client.ohlcv(...)` | `ss.data.ohlcv(...)` | 命名空间迁移 |
-| `client.ingest(...)` | `ss.data.ingest(...).wait()` | 采集变为持久 Job |
-| `client.compute.ma(...)` | `ss.indicators.ma(...)` | 可机械迁移 |
-| `client.backtest(...)` | `ss.backtests.run(...)` | 同步语义保留 |
-| `client.compute.remote(...)` | 对应命名空间 `.submit(...)` | 弱类型入口改为类型化入口 |
-| `task.wait/result/cancel` | `JobHandle.wait/result/cancel` | 语义相近 |
-| `V2Client.run_dsl()` | `ss.dsl.execute()` | 单一编译器 |
-| `BacktestResult.render()` | `result.render()` 或 Admin | Artifact 惰性物化 |
+@click.group()
+def cli():
+    """StockStat V3.1 CLI."""
 
-### 14.2 策略迁移
 
-旧 `@strategy` 函数迁移要求：
+@cli.group()
+def data():
+    """数据管理。"""
 
-- 函数位于可导入模块，不依赖 notebook 临时闭包。
-- 捕获变量改为显式 config。
-- 依赖通过 package manifest 声明。
-- 使用 `stockstat strategy package module:function` 生成签名 Artifact。
-- 本地和远程使用同一个 StrategyRef。
 
-Notebook 用户可由迁移工具生成模块模板；无法静态提取的动态闭包会给出明确诊断，不静默 cloudpickle。
+@data.command("fetch")
+@click.argument("symbol")
+@click.option("--timeframe", default="1d")
+@click.option("--start")
+@click.option("--end")
+def data_fetch(symbol, timeframe, start, end):
+    from ..client import StockStatClient
+    client = StockStatClient()
+    df = client.ohlcv(symbol, timeframe, start, end)
+    click.echo(df.to_string())
 
-### 14.3 完全迁移的定义
 
-“旧客户代码能完全迁移”定义为：
+@cli.group()
+def compute():
+    """计算任务。"""
 
-1. 每个公开功能有新 API 对应项。
-2. 代表性脚本可通过明确代码修改迁移，不要求旧 import 原样运行。
-3. 相同数据、参数、种子下满足结果等价策略。
-4. 旧策略可重构为受控策略包执行。
-5. 迁移工具可发现不支持的动态行为并生成报告。
 
-### 14.4 迁移期解释器隔离
+@compute.command("backtest")
+@click.option("--strategy", required=True)
+@click.option("--symbol", required=True)
+@click.option("--initial-cash", default=1000000, type=float)
+def compute_backtest(strategy, symbol, initial_cash):
+    from ..client import StockStatClient
+    client = StockStatClient()
+    data = client.ohlcv(symbol)
+    # 加载策略
+    strategy_obj = _load_strategy(strategy)
+    result = client.backtest(data, strategy_obj, initial_cash=initial_cash)
+    click.echo(f"Result: {result.summary()}")
 
-旧包和新 SDK 最终都使用 `import stockstat`，因此迁移期禁止把两个 distribution 安装在同一 Python 环境。仓库使用独立解释器：
 
-```text
-.venv-legacy  -> 当前 frontend/backend/worker，仅用于生成 oracle
-.venv-v31     -> packages/services 新实现
+@cli.group()
+def task():
+    """任务管理。"""
+
+
+@task.command("status")
+@click.argument("task_id")
+def task_status(task_id):
+    from ..client import StockStatClient
+    client = StockStatClient()
+    info = client.compute_backend.get(task_id)
+    click.echo(f"Task {task_id}: {info.state.value} ({info.progress*100:.1f}%)")
 ```
 
-旧/新 parity 通过子进程、Arrow/JSON fixtures 和差异报告交换结果，不通过在同一进程中导入两套 `stockstat` 实现。P9 切换时新 SDK 才接管正式 distribution/import 名。
+---
 
-## 15. 错误与诊断
+## 8. TUI 交互终端
 
-SDK 将协议错误映射为稳定异常：
+### 8.1 设计
 
-```text
-StockStatError
-├── ValidationError
-├── DataNotFoundError
-├── CapabilityUnavailableError
-├── JobNotFoundError
-├── JobNotReadyError
-├── JobFailedError
-├── JobCancelledError
-├── DeadlineExceededError
-├── ArtifactIntegrityError
-└── AuthenticationError
+TUI 提供交互式终端界面，用于探索性分析：
+
+```python
+# app/tui.py
+class StockStatTUI:
+    """交互式终端。
+
+    功能：
+    - 数据浏览（symbol 列表、OHLCV 预览）
+    - 计算交互（输入 DSL，实时显示结果）
+    - 任务监控（查看运行中的任务、进度）
+    - 集群拓扑（Worker 列表、负载）
+    """
+
+    def __init__(self, client):
+        self._client = client
+
+    def run(self):
+        """启动 TUI 主循环。"""
+        ...
 ```
 
-异常包含 `code`、`job_id`、`error_id`、`trace_id` 和可公开 details，不依赖服务端异常类路径。
+---
 
-## 16. 测试策略
+## 9. Export 序列化
 
-### 16.1 API contract tests
+### 9.1 序列化器
 
-- 每个金融 facade 生成预期 JobSpec golden fixture。
-- 同步和异步形式生成相同 operation/input/execution 语义。
-- Local 与 HTTP Channel 的响应模型一致。
+```python
+# export/serializers.py
+class ResultSerializer:
+    """结果序列化 — 支持多种格式导出。"""
 
-### 16.2 Artifact tests
+    @staticmethod
+    def to_json(result: Any) -> str:
+        """序列化为 JSON。"""
 
-- Series/DataFrame Arrow round-trip。
-- 时区、MultiIndex、NaN 策略和 dtype 测试。
-- 分块上传、断点重传和 SHA-256 校验。
-- 惰性下载确保未访问属性时不下载大 Artifact。
+    @staticmethod
+    def to_csv(result: Any) -> str:
+        """序列化为 CSV。"""
 
-### 16.3 Migration tests
+    @staticmethod
+    def to_parquet(result: Any) -> bytes:
+        """序列化为 Parquet。"""
 
-- 当前 README/USAGE 中所有 Python 示例建立 V3.1 对应版本。
-- PAXG 研究脚本至少选取代表性完整迁移。
-- 旧 23 指标、回测、批量、搜索、Monte Carlo、Walk-forward 均有迁移案例。
-- 扫描器能识别旧 imports、双客户端、cloudpickle 策略和本地数据库用法。
+    @staticmethod
+    def to_arrow(result: Any) -> bytes:
+        """序列化为 Arrow IPC。"""
+```
 
-### 16.4 Embedded/remote parity
+---
 
-同一 JobSpec 分别通过 Embedded Channel 和 HTTP Channel 执行，比较 Manifest、核心数值和 Artifact schema。
+## 10. 可视化层 _viz
 
-## 17. 验收标准
+### 10.1 设计
 
-- 公共入口只有一个 `StockStat` Session。
-- 同步调用没有直调 Kernel 的隐藏路径。
-- SDK 不包含调度和金融算法实现。
-- DSL 与 Python facade 编译到同一 JobSpec。
-- 大对象不进入 JSON 控制消息。
-- 现有公开功能均有迁移映射和至少一个可运行迁移测试。
-- `StockStat.local()` 与 `StockStat.connect()` 除构造方式外使用同一 API。
+V3.1 的可视化层简化为：
+- **ChartSpec**：声明式图表规范（数据 + 类型 + 参数）
+- **Renderer**：渲染器协议（matplotlib 实现）
+- **PlotAdapter**：回测结果适配器
+
+```python
+# _viz/specs/__init__.py
+@dataclass
+class ChartSpec:
+    """声明式图表规范。"""
+    title: str
+    chart_type: str          # line / bar / scatter / heatmap / candlestick
+    data: Any
+    params: dict = field(default_factory=dict)
+    theme: str = "default"
+
+
+# _viz/renderers/__init__.py
+class MatplotlibRenderer:
+    """matplotlib 渲染器。"""
+    def render(self, spec: ChartSpec) -> bytes:
+        """渲染为 PNG bytes。"""
+        ...
+```
+
+---
+
+## 11. 旧客户代码迁移路径
+
+V3.1 完全重构，但保证**功能等价迁移**。下表列出 V2 旧 API 到 V3.1 新 API 的映射：
+
+### 11.1 客户端构造
+
+```python
+# V2 旧
+from stockstat import StockStatClient
+client = StockStatClient(host="storage", port=8000)
+
+# V3.1 新（等价）
+from stockstat import StockStatClient
+client = StockStatClient(storage_url="http://storage:8000")
+# 或
+client = StockStatClient(host="storage", port=8000)  # 参数兼容
+```
+
+### 11.2 数据访问
+
+```python
+# V2 旧
+df = client.ohlcv("BTC/USDT", "1d", "2024-01-01")
+
+# V3.1 新（完全相同）
+df = client.ohlcv("BTC/USDT", "1d", "2024-01-01")
+```
+
+### 11.3 指标计算
+
+```python
+# V2 旧
+sma = client.compute.ma(data.close, window=20)
+
+# V3.1 新（完全相同，本地后端透明）
+sma = client.compute.ma(data.close, window=20)
+```
+
+### 11.4 回测
+
+```python
+# V2 旧
+result = client.backtest(data, strategy, initial_cash=10000)
+
+# V3.1 新（完全相同，本地后端透明）
+result = client.backtest(data, strategy, initial_cash=10000)
+
+# V3.1 新（异步）
+task = client.backtest(data, strategy, initial_cash=10000, async_submit=True)
+result = task.wait()
+```
+
+### 11.5 网格搜索
+
+```python
+# V2 旧
+from stockstat import grid_search
+result = grid_search(data, strategy, param_grid={...}, metric="sharpe")
+
+# V3.1 新（通过 ComputeAPI）
+task = client.compute.remote(
+    "grid_search",
+    data_spec=DataSpec(symbols=["BTC/USDT"], timeframe="1d"),
+    compute_spec=ComputeSpec(
+        task_type="grid_search",
+        strategy_ref=cloudpickle_dumps(strategy),
+        param_grid={"short": [3, 5, 8], "long": [10, 20, 30]},
+        metric="sharpe",
+    ),
+)
+result = task.wait()
+```
+
+### 11.6 迁移辅助
+
+提供 `_compat.py` 模块，封装常见 V2 调用为 V3.1 等价形式：
+
+```python
+# _compat.py
+def grid_search(data, strategy, param_grid, metric="sharpe", **kwargs):
+    """V2 兼容包装 — 内部提交 grid_search task。"""
+    from stockstat_foundation import cloudpickle_dumps
+    client = StockStatClient()
+    task = client.compute.remote(
+        "grid_search",
+        compute_spec=ComputeSpec(
+            task_type="grid_search",
+            strategy_ref=f"cloudpickle:{cloudpickle_dumps(strategy)}",
+            param_grid=param_grid,
+            metric=metric,
+            **kwargs,
+        ),
+    )
+    return task.wait()
+```
+
+### 11.7 迁移矩阵
+
+| V2 旧 API | V3.1 新 API | 迁移难度 |
+|----------|------------|---------|
+| `StockStatClient(host, port)` | `StockStatClient(host, port)` | 零修改 |
+| `client.ohlcv(...)` | `client.ohlcv(...)` | 零修改 |
+| `client.compute.ma(...)` | `client.compute.ma(...)` | 零修改 |
+| `client.backtest(...)` | `client.backtest(...)` | 零修改 |
+| `client.backtest(..., async_submit=True)` | 新增 | 新能力 |
+| `grid_search(...)` | `client.compute.remote("grid_search", ...)` | 中等（用 _compat 零修改） |
+| `batch_backtest(...)` | `client.compute.remote("batch_backtest", ...)` | 中等 |
+| `BacktestEngine(...).run()` | `client.backtest(...)` 或直接用 Compute 模块 | 中等 |
+| `ComputeEngine.<method>` | `client.compute.<method>` | 零修改 |
+
+---
+
+## 12. 部署形态
+
+### 12.1 单机全栈（场景 A）
+
+```python
+# 全部默认，零配置
+client = StockStatClient()
+# → LocalComputeBackend
+# → DataClient → http://localhost:8000（或直连 Storage）
+```
+
+### 12.2 存储分离（场景 B）
+
+```python
+client = StockStatClient(storage_url="http://storage:8000")
+# → LocalComputeBackend（计算在本地）
+# → DataClient → http://storage:8000
+```
+
+### 12.3 分布式（场景 C/D/E）
+
+```python
+from stockstat_compute import RemoteComputeBackend
+client = StockStatClient(
+    storage_url="http://storage:8000",
+    compute_backend=RemoteComputeBackend("http://dispatcher:9000"),
+)
+# → RemoteComputeBackend（计算提交到 Dispatcher）
+# → DataClient → http://storage:8000
+```
+
+### 12.4 离线模式
+
+```python
+client = StockStatClient(
+    config=Config(client_mode="offline", database_url="sqlite:///local.db"),
+)
+# → LocalComputeBackend
+# → DataClient 直连本地 SQLite（绕过 HTTP）
+```
+
+---
+
+## 13. 测试体系
+
+### 13.1 测试分层
+
+| 测试文件 | 测试数 | 覆盖 |
+|---------|--------|------|
+| `test_client.py` | 30 | StockStatClient 构造 / 默认后端 / 透明模式 |
+| `test_compute_api.py` | 40 | ComputeAPI 本地/远程切换 / 47 task_type 便捷方法 |
+| `test_data_client.py` | 20 | DataClient HTTP / 缓存 / Arrow 解码 |
+| `test_dsl.py` | 25 | DSL 解析 / 求值 / 策略编译 |
+| `test_cli.py` | 20 | CLI 命令 / 参数解析 / 输出格式 |
+| `test_compat.py` | 15 | V2 旧 API 迁移验证 |
+| `test_export.py` | 10 | 序列化器 / 格式转换 |
+| `test_viz.py` | 10 | ChartSpec / Renderer |
+| **合计** | **170** | |
+
+### 13.2 关键测试场景
+
+```python
+# 透明模式 — 本地后端
+client = StockStatClient()
+result = client.backtest(data, strategy, initial_cash=10000)
+assert isinstance(result, BacktestResult)
+
+# 异步模式
+task = client.backtest(data, strategy, async_submit=True)
+assert isinstance(task, TaskRef)
+result = task.wait(timeout=60)
+assert isinstance(result, BacktestResult)
+
+# 远程后端透明切换
+client_local = StockStatClient()
+client_remote = StockStatClient(compute_backend=RemoteComputeBackend(...))
+# 同一 API，不同后端
+result_local = client_local.compute.ma(data.close, window=20)
+result_remote = client_remote.compute.ma(data.close, window=20)
+pd.testing.assert_series_equal(result_local, result_remote)
+
+# V2 迁移验证
+from stockstat._compat import grid_search
+result = grid_search(data, strategy, param_grid={...})
+assert isinstance(result, pd.DataFrame)
+
+# PAXG v5-redo 场景
+client = StockStatClient()
+task = client.compute.remote(
+    "batch_backtest",
+    compute_spec=ComputeSpec(
+        task_type="batch_backtest",
+        strategies={f"S{i}": cloudpickle_dumps(s) for i, s in enumerate(strategies)},
+        fee_models=["F1_SpotNoBNB", "F4_FutBNB"],
+    ),
+)
+result = task.wait(timeout=3600)
+assert len(result) == 33 * 4  # 132 次回测
+```
+
+---
+
+## 14. 总结
+
+Invocation 是 V3.1 的**用户入口**，承载：
+
+| 能力 | 实现 |
+|------|------|
+| Client SDK | `StockStatClient`（重构，纯调用者） |
+| 计算访问 | `ComputeAPI`（本地轻量 + 远程异步） |
+| 数据访问 | `DataClient`（HTTP / 直连） |
+| DSL 引擎 | 策略表达式解析与编译 |
+| CLI | `stockstat` 命令（data/compute/task/cluster/serve） |
+| TUI | 交互式终端 |
+| Export | JSON/CSV/Parquet/Arrow 序列化 |
+| 可视化 | ChartSpec + matplotlib Renderer |
+
+**核心设计原则**：
+1. **纯调用者** — Invocation 不含 BacktestEngine/ComputeEngine，通过 ComputeBackend 解耦
+2. **透明切换** — 本地/远程后端通过同一 API，用户无感知
+3. **迁移友好** — V2 旧 API 零修改或通过 `_compat.py` 包装
+4. **任务原子化** — 所有计算归约为 TaskSpec + task_type
+
+**与 V2/V3 的关键差异**：
+- V2/V3 的 Client 既调用又计算 → V3.1 的 Client **只调用**
+- V2/V3 的 BacktestEngine 在 frontend → V3.1 在 **Compute 模块**
+- V2/V3 的兼容层（ComputeBackend）是"可选" → V3.1 是**唯一路径**
+
+---
+
+*本文件定义 Invocation 模块的完整架构。计算后端实现见 [DESIGN_ARCH_COMPUTE_V31.md](DESIGN_ARCH_COMPUTE_V31.md)，数据存储见 [DESIGN_ARCH_STORAGE_V31.md](DESIGN_ARCH_STORAGE_V31.md)。*

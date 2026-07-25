@@ -1,123 +1,273 @@
-# StockStat V3.1 分步实现与测试计划
+# realizeV31 — StockStat V3.1 分步实现规划
 
-> 日期：2026-07-20
-> 目标设计：[../designV31/DESIGN_ARCH_V31.md](../designV31/DESIGN_ARCH_V31.md)
-> 通讯协议：[../designV31/DESIGN_PROT_V31.md](../designV31/DESIGN_PROT_V31.md)
+> **版本**：v3.1
+> **日期**：2026-07-24
+> **状态**：规划稿
+> **关联**：[../designV31/](../designV31/) — 架构设计文档
+>
+> **目的**：将 V3.1 完全重构拆解为 9 个可独立交付的 Phase，每 Phase 有明确的目标、依赖、实现内容、测试计划和验收标准。
 
-## 1. 使用方式
+---
 
-本目录是 V3.1 完全重构的实施门禁。每个 `P*.md` 是一个独立验收阶段；必须满足当前阶段退出条件后才能进入下一阶段。
+## 目录
 
-实施期间遵循：
+1. [总览](#1-总览)
+2. [Phase 依赖关系](#2-phase-依赖关系)
+3. [各 Phase 概览](#3-各-phase-概览)
+4. [里程碑](#4-里程碑)
+5. [测试策略](#5-测试策略)
+6. [回滚策略](#6-回滚策略)
 
-- 旧 `frontend/`、`backend/`、`worker/` 保持可运行，用于生成和复核行为基线。
-- 新代码仅写入 V3.1 新目录，不通过兼容导入调用旧实现。
-- 每阶段包含实现、测试、文档和可运行演示，不把验证集中到最后。
-- 每阶段先做最小正确 vertical slice，再扩展覆盖。
-- P9 切换前不删除旧代码；P9 切换后不长期双轨维护。
-- 旧、新 SDK 都使用 `stockstat` import 名，实施期固定使用 `.venv-legacy` 与 `.venv-v31`，不得同环境安装。
-- 阶段中发现协议或架构冲突时，先更新对应设计文档和 ADR，再修改代码。
+---
 
-## 2. 阶段总览
+## 1. 总览
 
-| 阶段 | 主题 | 核心产出 | 主要门禁 |
-|---|---|---|---|
-| [P1](P1.md) | 基线与 Contracts | 新包骨架、协议 schema、legacy golden | 无跨层依赖、schema/golden 稳定 |
-| [P2](P2.md) | Finance Kernel | 单一指标目录、单次回测内核、规范结果 | 现有指标/代表回测 parity |
-| [P3](P3.md) | Storage 与 Artifact | OHLCV、快照、LocalFS/S3 adapter、迁移器 | 主库一次快照、Artifact 完整性 |
-| [P4](P4.md) | 持久 Dispatcher | Job/Stage/Work/Attempt、Planner、事件、幂等 | 重启恢复、状态机/竞争正确 |
-| [P5](P5.md) | Worker 与 Embedded E2E | spawn Worker、Lease/fencing、`StockStat.local()` | 崩溃重试、旧 Attempt 拒绝、本地完整链路 |
-| [P6](P6.md) | 网络与多节点 | HTTP/SSE、真实多进程、多 Worker 部署 | 非 TestClient E2E、事件续读、带宽目标 |
-| [P7](P7.md) | 金融功能完整迁移 | 搜索、批量、Monte Carlo、Walk-forward、完整回测 | 当前功能矩阵全部 parity |
-| [P8](P8.md) | SDK、DSL 与客户迁移 | 公共 API、CLI、策略打包、迁移扫描、结果/可视化 | README/PAXG 迁移、无旧运行时依赖 |
-| [P9](P9.md) | 生产加固与切换 | PG/Redis/S3、HA、安全、可观测、发布切换 | chaos/perf/security/go-no-go 全通过 |
+V3.1 分 9 个 Phase，按"协议底座 → 存储端 → 计算端 → 用户入口 → 分发端 → 分布式集成 → 高级 handler → 高级特性 → 验证"的顺序交付：
 
-## 3. 依赖关系
+| Phase | 名称 | 主要内容 | 依赖 | 预计耗时 | 测试数 |
+|-------|------|---------|------|---------|--------|
+| **P1** | Foundation | 协议/传输/契约/错误/配置 | — | 1.5 周 | 147 |
+| **P2** | Storage | ORM + REST + Adapters + Admin | P1 | 1 周 | 125 |
+| **P3** | Compute 核心 | BacktestEngine 迁移 + Tier 1 handlers + LocalBackend | P1 | 2 周 | 350 |
+| **P4** | Invocation | Client + ComputeAPI + DSL + CLI + _compat | P1, P3 | 1.5 周 | 170 |
+| **P5** | Dispatcher | 调度 + 预取 + 分片 + 合并 + Worker 管理 | P1, P2 | 2 周 | 220 |
+| **P6** | 分布式集成 | RemoteBackend + Worker + AutoBackend + E2E | P3, P5 | 1.5 周 | 80 |
+| **P7** | 高级 handlers | Tier 2~6（统计/信号/非线性/灰色/ML） | P3 | 2.5 周 | 200 |
+| **P8** | 高级特性 | SHM + Redis + 抢占 + 多级 + 流式 | P6 | 2 周 | 100 |
+| **P9** | 验证与收尾 | PAXG 一致性 + 部署测试 + 文档 + Tier 7 | 全部 | 1.5 周 | 90 |
+| **合计** | | | | **15.5 周** | **1482** |
+
+---
+
+## 2. Phase 依赖关系
 
 ```mermaid
-graph LR
-    P1[P1 Contracts/Baseline] --> P2[P2 Kernel]
-    P1 --> P3[P3 Storage]
-    P1 --> P4[P4 Dispatcher]
-    P2 --> P5[P5 Worker + Embedded]
-    P3 --> P5
-    P4 --> P5
-    P5 --> P6[P6 Network]
-    P6 --> P7[P7 Feature Parity]
-    P7 --> P8[P8 Migration UX]
-    P8 --> P9[P9 Hardening/Cutover]
+graph TB
+    P1[P1 Foundation]
+    P2[P2 Storage]
+    P3[P3 Compute 核心]
+    P4[P4 Invocation]
+    P5[P5 Dispatcher]
+    P6[P6 分布式集成]
+    P7[P7 高级 handlers]
+    P8[P8 高级特性]
+    P9[P9 验证收尾]
+
+    P1 --> P2
+    P1 --> P3
+    P3 --> P4
+    P1 --> P4
+    P1 --> P5
+    P2 --> P5
+    P3 --> P6
+    P5 --> P6
+    P3 --> P7
+    P6 --> P8
+    P1 --> P9
+    P2 --> P9
+    P3 --> P9
+    P4 --> P9
+    P5 --> P9
+    P6 --> P9
+    P7 --> P9
+    P8 --> P9
+
+    style P1 fill:#e1f5ff,stroke:#0288d1,stroke-width:3px
+    style P2 fill:#e8f5e9,stroke:#388e3c
+    style P3 fill:#fce4ec,stroke:#c62828,stroke-width:2px
+    style P4 fill:#fff3e0,stroke:#f57c00
+    style P5 fill:#f3e5f5,stroke:#7b1fa2
+    style P6 fill:#fce4ec,stroke:#c62828
+    style P7 fill:#fce4ec,stroke:#c62828
+    style P8 fill:#f3e5f5,stroke:#7b1fa2
+    style P9 fill:#e1f5ff,stroke:#0288d1
 ```
 
-P2、P3、P4 在人员允许时可部分并行，但共享 Contracts 的任何修改必须先合入 P1 并更新 golden schema。
+**关键路径**：P1 → P3 → P4 → P6 → P9（最长依赖链）
 
-## 4. 通用测试层
+**可并行**：
+- P2 与 P3 可并行（都依赖 P1）
+- P5 与 P4 可并行（P5 依赖 P1+P2，P4 依赖 P1+P3）
+- P7 与 P8 可并行（P7 依赖 P3，P8 依赖 P6）
 
-每个阶段按适用范围增加以下测试：
+---
 
-| 层 | 目标目录 | 内容 |
-|---|---|---|
-| Contract | `tests_v31/contracts/` | schema、canonical JSON、golden、依赖边界 |
-| Kernel | `tests_v31/kernel/` | 金融算法、状态机、数值 parity |
-| Component | `tests_v31/services/` | Storage/Dispatcher/Worker 单组件 |
-| Embedded E2E | `tests_v31/e2e/test_embedded_*` | 无网络完整链路 |
-| Network E2E | `tests_v31/e2e/test_network_*` | 真实端口与独立进程 |
-| Migration | `tests_v31/migration/` | 旧/新 API 和结果对比 |
-| Fault | `tests_v31/fault/` | crash、超时、重复、恢复、网络分区 |
-| Performance | `tests_v31/performance/` | 延迟、吞吐、内存、带宽、加速比 |
-| Security | `tests_v31/security/` | 权限、签名、反序列化、路径与配额 |
+## 3. 各 Phase 概览
 
-## 5. Golden 数据规范
+### P1 — Foundation 基础层
 
-Golden 不使用旧 pickle 作为唯一真值。建议格式：
+- **目标**：建立协议底座，提供 Envelope/TaskSpec/Transport/Codec/Contracts
+- **详见**：[P1.md](P1.md)
+- **关键产出**：`stockstat-foundation` 包
 
-```text
-tests_v31/fixtures/
-├── market/*.arrow
-├── indicators/*.{arrow,json}
-├── backtests/*/
-│   ├── manifest.json
-│   ├── equity.arrow
-│   ├── fills.arrow
-│   └── metrics.json
-├── experiments/*.json
-└── protocol/*.json
+### P2 — Storage 存储端
+
+- **目标**：OHLCV 数据持久化、查询、采集
+- **详见**：[P2.md](P2.md)
+- **关键产出**：`stockstat-backend` 包
+
+### P3 — Compute 核心（BacktestEngine + Tier 1）
+
+- **目标**：迁移 BacktestEngine + 实现 6 个 Tier 1 handler + LocalComputeBackend
+- **详见**：[P3.md](P3.md)
+- **关键产出**：`stockstat-compute` 包（核心部分）
+
+### P4 — Invocation 用户入口
+
+- **目标**：StockStatClient + ComputeAPI + DSL + CLI + V2 迁移辅助
+- **详见**：[P4.md](P4.md)
+- **关键产出**：`stockstat` 包
+
+### P5 — Dispatcher 分发端
+
+- **目标**：任务调度、数据预取、分片、合并、Worker 管理
+- **详见**：[P5.md](P5.md)
+- **关键产出**：`stockstat-dispatcher` 包
+
+### P6 — 分布式集成
+
+- **目标**：RemoteComputeBackend + Worker 进程 + AutoBackend + 端到端测试
+- **详见**：[P6.md](P6.md)
+- **关键产出**：完整分布式链路
+
+### P7 — 高级 handlers（Tier 2~6）
+
+- **目标**：实现 31 个高级 task_type（统计/信号/非线性/灰色/ML）
+- **详见**：[P7.md](P7.md)
+- **关键产出**：PAXG v7 全部计算能力
+
+### P8 — 高级特性
+
+- **目标**：SHM 传输 + Redis 队列 + 抢占/恢复 + 多级 Dispatcher + 流式结果
+- **详见**：[P8.md](P8.md)
+- **关键产出**：生产级分布式能力
+
+### P9 — 验证与收尾
+
+- **目标**：PAXG v1~v7 一致性验证 + 6 部署场景测试 + Tier 7 预留 + 文档
+- **详见**：[P9.md](P9.md)
+- **关键产出**：生产就绪版本
+
+---
+
+## 4. 里程碑
+
+| 里程碑 | 完成 Phase | 能力 | 对应 PAXG |
+|--------|-----------|------|----------|
+| **M1: 协议就绪** | P1 | 跨进程通信能力 | — |
+| **M2: 存储就绪** | P2 | OHLCV 数据服务 | v1~v7 数据基础 |
+| **M3: 单机回测** | P3, P4 | 本地 BacktestEngine + Client | v5-redo 132 回测 |
+| **M4: 分布式回测** | P5, P6 | Dispatcher + Worker 集群 | v5-redo 并行加速 |
+| **M5: 统计能力** | P7 | 统计/信号/非线性/灰色/ML | v7 全路线 |
+| **M6: 生产就绪** | P8, P9 | SHM/Redis/抢占/多级 + 验证 | 全部 PAXG |
+
+---
+
+## 5. 测试策略
+
+### 5.1 测试金字塔
+
+```
+                    ┌─────────────┐
+                    │  PAXG 一致性  │  ← 20 项（端到端结果一致）
+                    ├─────────────┤
+                    │  部署场景    │  ← 60 项（Case A-F）
+                    ├─────────────┤
+                    │  端到端测试  │  ← 55 项（Client → Dispatcher → Worker）
+                    ├─────────────┤
+                    │  集成测试    │  ← 50 项（跨模块）
+                    ├─────────────┤
+                    │  单元测试    │  ← 1297 项（模块内部）
+                    └─────────────┘
 ```
 
-每个 fixture 记录：
+### 5.2 关键回归测试
 
-- 生成用旧 commit。
-- Python、pandas、numpy 版本。
-- 数据摘要。
-- 参数和随机种子。
-- comparison policy。
-- 已知平台差异。
+每个 Phase 完成后必须通过的回归测试：
 
-## 6. 通用完成定义
+| Phase | 回归测试 |
+|-------|---------|
+| P1 | Foundation 147 项单元测试 |
+| P2 | Storage 125 项 + P1 回归 |
+| P3 | **BacktestEngine 277 项**（从 V2 迁移，零修改）+ P1 回归 |
+| P4 | Invocation 170 项 + **PAXG v5-redo 132 回测** + P1~P3 回归 |
+| P5 | Dispatcher 220 项 + P1~P3 回归 |
+| P6 | E2E 80 项 + **本地/远程结果一致性** + P1~P5 回归 |
+| P7 | Tier 2~6 handlers 200 项 + P1~P6 回归 |
+| P8 | 高级特性 100 项 + P1~P7 回归 |
+| P9 | **PAXG v1~v7 全部研究复现** + 部署场景 60 项 + 全量回归 |
 
-每个阶段完成必须同时满足：
-
-- 实现任务全部完成。
-- 本阶段新增测试全通过。
-- 受影响的此前阶段测试全通过。
-- 无未解释的 skip 或 xfail。
-- 新公开 schema/API 有文档和 fixture。
-- 新服务可通过明确命令启动和停止。
-- 资源、线程、临时文件和子进程测试后无泄漏。
-- 已知限制写入当前阶段文档，不以 TODO 冒充完成。
-
-## 7. 目标测试命令
-
-具体命令在创建 workspace 配置时固定，目标形式为：
+### 5.3 持续集成
 
 ```bash
-python -m pytest tests_v31/contracts -q
-python -m pytest tests_v31/kernel -q
-python -m pytest tests_v31/services -q
-python -m pytest tests_v31/e2e -q
-python -m pytest tests_v31/migration -q
-python -m pytest tests_v31/fault -q
-python -m pytest tests_v31/performance -q
-python -m pytest tests_v31/security -q
+# 每个 Phase 的 CI 流程
+pytest tests/foundation/ -v              # P1
+pytest tests/storage/ -v                 # P2
+pytest tests/compute/ -v                 # P3
+pytest tests/invocation/ -v              # P4
+pytest tests/dispatcher/ -v              # P5
+pytest tests/e2e/ -v                     # P6
+pytest tests/handlers_advanced/ -v       # P7
+pytest tests/advanced/ -v                # P8
+pytest tests/paxg_compat/ -v             # P9
+pytest tests/deployments/ -v             # P9
+
+# 全量回归
+pytest tests/ -v --tb=short
 ```
 
-CI 应提供 Linux 主验证，Windows 覆盖 Embedded、spawn Worker、LocalFS Artifact 与基础网络 E2E。生产 adapter 集成测试使用容器服务运行 PostgreSQL、Redis 和 MinIO。
+---
+
+## 6. 回滚策略
+
+### 6.1 Phase 级回滚
+
+每个 Phase 是独立的 git 分支，失败时可回滚到上一 Phase：
+
+```bash
+# 假设 P3 失败，回滚到 P2
+git checkout v31-p2-stable
+# 修复后重新开始 P3
+```
+
+### 6.2 模块级回滚
+
+5 大模块独立包，可单独回滚：
+
+```bash
+# Foundation 回滚（影响所有模块）
+pip install stockstat-foundation==1.0.0  # 降级
+
+# Compute 回滚（不影响 Storage/Dispatcher）
+pip install stockstat-compute==1.0.0
+```
+
+### 6.3 功能开关
+
+高风险特性通过配置开关控制：
+
+```bash
+STOCKSTAT_DISPATCHER_ENABLED=false       # 关闭 Dispatcher
+STOCKSTAT_DISPATCHER_QUEUE=memory        # 用内存队列（不用 Redis）
+STOCKSTAT_DEFAULT_BACKEND=local          # 强制本地后端
+```
+
+---
+
+## 7. 详细 Phase 文档
+
+| Phase | 文档 |
+|-------|------|
+| P1 | [P1.md](P1.md) |
+| P2 | [P2.md](P2.md) |
+| P3 | [P3.md](P3.md) |
+| P4 | [P4.md](P4.md) |
+| P5 | [P5.md](P5.md) |
+| P6 | [P6.md](P6.md) |
+| P7 | [P7.md](P7.md) |
+| P8 | [P8.md](P8.md) |
+| P9 | [P9.md](P9.md) |
+
+---
+
+*本文件为 V3.1 分步实现规划总览。各 Phase 详细内容见对应 P*.md 文件。*
